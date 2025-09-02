@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { Box, Typography, CircularProgress, FormControl, InputLabel, Select, MenuItem, TextField, Dialog, DialogTitle, DialogContent, IconButton, Button } from '@mui/material';
+import { Box, Typography, CircularProgress, FormControl, InputLabel, Select, MenuItem, TextField, Dialog, DialogTitle, DialogContent, Button } from '@mui/material';
 import axios from 'axios';
 import { MaterialReactTable, type MRT_ColumnDef } from 'material-react-table';
 import LockIcon from '@mui/icons-material/Lock';
@@ -46,11 +46,13 @@ const SalesReportsTable = ({ type: initialType }: { type?: 'gold' | 'diamond' | 
     const [periodFrom, setPeriodFrom] = useState(currentDate);
     const [periodTo, setPeriodTo] = useState(currentDate);
     const [detailsOpen, setDetailsOpen] = useState(false);
-    const [detailsData, setDetailsData] = useState<any>(null);
+    const [detailsData] = useState<any>(null);
     const [isChira, setIsChira] = useState<'all' | 'yes' | 'no'>('all');
     const [isWholeSale, setIsWholeSale] = useState<'all' | 'yes' | 'no'>('all');
     const [printDialogOpen, setPrintDialogOpen] = useState(false);
     const [selectedInvoice, setSelectedInvoice] = useState<any | null>(null);
+    // Trigger refresh after closing an invoice
+    const [invoiceRefreshFlag, setInvoiceRefreshFlag] = useState(0);
     const [chiraDialogOpen, setChiraDialogOpen] = useState(false);
     const [chiraDialogIdFact, setChiraDialogIdFact] = useState(null);
     const [chiraRefreshFlag, setChiraRefreshFlag] = useState(0);
@@ -61,11 +63,9 @@ const SalesReportsTable = ({ type: initialType }: { type?: 'gold' | 'diamond' | 
 
     const apiUrlusers = `http://102.213.182.8:9000/users`;
     const [users, setUsers] = useState<Users[]>([]);
-    const [loadingUsers, setLoadingUsers] = useState(false);
     const fetchUsers = async () => {
         const token = localStorage.getItem('token');
         try {
-            setLoadingUsers(true);
             const res = await axios.get<Users[]>(`${apiUrlusers}/ListUsers`, {
                 headers: { Authorization: `Bearer ${token}` }
             });
@@ -75,13 +75,14 @@ const SalesReportsTable = ({ type: initialType }: { type?: 'gold' | 'diamond' | 
             console.error("Error fetching Users:", error);
 
         } finally {
-            setLoadingUsers(false);
+            // no-op
         }
     };
 
 
     useEffect(() => {
         fetchUsers();
+        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
 
 
@@ -150,7 +151,7 @@ const SalesReportsTable = ({ type: initialType }: { type?: 'gold' | 'diamond' | 
         // eslint-disable-next-line
 
 
-    }, [imageUrls]);
+    }, [imageUrls, imageBlobUrls]);
 
     // Cleanup blob URLs on unmount or when imageBlobUrls changes
     useEffect(() => {
@@ -178,7 +179,7 @@ const SalesReportsTable = ({ type: initialType }: { type?: 'gold' | 'diamond' | 
             })
             .catch(() => setData([]))
             .finally(() => setLoading(false));
-    }, [type, periodFrom, periodTo, ps, isChira, isWholeSale, chiraRefreshFlag]);
+    }, [type, periodFrom, periodTo, ps, isChira, isWholeSale, chiraRefreshFlag, invoiceRefreshFlag]);
 
     // Calculate total weight in gram (sum of qty for all rows)
     const totalWeight = data.reduce((sum, row) => {
@@ -449,10 +450,7 @@ const SalesReportsTable = ({ type: initialType }: { type?: 'gold' | 'diamond' | 
                 const { row } = props;
                 // Show all product details for this invoice
                 const details: any[] = row.original._productDetails || [];
-                const picint = row.original.picint;
                 const prix_vente_remise = row.original.prix_vente_remise;
-                  
-                const blobUrls = picint && imageBlobUrls[picint] ? imageBlobUrls[picint] : [];
 
 
 
@@ -640,13 +638,13 @@ const SalesReportsTable = ({ type: initialType }: { type?: 'gold' | 'diamond' | 
                         )}
                         {amountLyd !== 0 && (
                             <div>
-                                <span style={{ fontWeight: 'bold', color: '#555' }}>LYD paid:</span>
+                                <span style={{ fontWeight: 'bold', color: '#555' }}>LYD Due:</span>
                                 <span style={{ marginLeft: 6 }}>{formatNumber(amountLyd)}</span>
                             </div>
                         )}
                         {amountCurrency !== 0 && (
                             <div>
-                                <span style={{ fontWeight: 'bold', color: '#555' }}>USD paid:</span>
+                                <span style={{ fontWeight: 'bold', color: '#555' }}>USD Due:</span>
                                 <span style={{ marginLeft: 6 }}>{formatNumber(amountCurrency)}</span>
                                 {amountCurrencyLyd !== 0 && (
                                     <>
@@ -658,7 +656,7 @@ const SalesReportsTable = ({ type: initialType }: { type?: 'gold' | 'diamond' | 
                         )}
                         {amountEur !== 0 && (
                             <div>
-                                <span style={{ fontWeight: 'bold', color: '#555' }}>EUR Paid:</span>
+                                <span style={{ fontWeight: 'bold', color: '#555' }}>EUR Due:</span>
                                 <span style={{ marginLeft: 6 }}>{formatNumber(amountEur)}</span>
                                 {amountEurLyd !== 0 && (
                                     <>
@@ -739,8 +737,8 @@ const SalesReportsTable = ({ type: initialType }: { type?: 'gold' | 'diamond' | 
         };
     }
 
-    // --- Export Table to HTML with all data, details, and images ---
-    async function exportTableToHtml() {
+    // Build styled HTML with embedded images for export (used by HTML and Excel exports)
+    async function generateExportHtml(): Promise<string> {
         // Convert all product images to base64 for export
         async function blobUrlToBase64(blobUrl: string): Promise<string> {
             return new Promise((resolve, reject) => {
@@ -768,30 +766,29 @@ const SalesReportsTable = ({ type: initialType }: { type?: 'gold' | 'diamond' | 
                 }
             }
         }
-        // Logo path (use your actual logo path or a public URL)
         const logoUrl = '/logo.png';
-        // Build HTML content
         let html = `
         <html>
         <head>
+            <meta charset="utf-8" />
             <title>Sales Report Export</title>
             <style>
-                body { font-family: 'Segoe UI', Arial, sans-serif; background: #f8f9fa; color: #222; margin: 0; padding: 0; }
-                .export-header { display: flex; align-items: center; gap: 20px; background: #fff; padding: 24px 32px 12px 32px; border-bottom: 2px solid #1976d2; }
-                .export-logo { height: 60px; }
-                .export-title { font-size: 2.2rem; font-weight: 700; color: #1976d2; letter-spacing: 1px; }
-                .export-table { width: 98%; margin: 24px auto; border-collapse: collapse; background: #fff; box-shadow: 0 2px 12px #0001; border-radius: 8px; overflow: hidden; }
-                .export-table th, .export-table td { border: 1px solid #e0e0e0; padding: 10px 14px; font-size: 1rem; vertical-align: top; }
-                .export-table th { background: #1976d2; color: #fff; font-weight: 600; }
-                .export-table tr:nth-child(even) { background: #f4f8fb; }
-                .export-table tr:hover { background: #e3f2fd; }
-                .export-footer { margin: 32px auto 0 auto; text-align: center; color: #888; font-size: 1rem; }
-                .export-img-row { display: flex; flex-direction: row; gap: 6px; overflow-x: auto; }
-                .export-img-row img { width: 60px; height: 60px; object-fit: cover; border-radius: 4px; border: 1px solid #eee; }
-                .export-product-table { width: 100%; border-collapse: collapse; margin-bottom: 8px; }
-                .export-product-table th, .export-product-table td { border: 1px solid #e0e0e0; padding: 4px 8px; font-size: 0.95rem; }
-                .export-product-table th { background: #e3f2fd; color: #1976d2; font-weight: 600; }
-                .export-product-label { font-weight: 600; color: #1976d2; margin-bottom: 2px; display: block; }
+                body { font-family: Roboto, 'Segoe UI', Arial, sans-serif; background: #fafafa; color: #212121; margin: 0; padding: 0; }
+                .export-header { display: flex; align-items: center; gap: 16px; background: #fff; padding: 16px 24px; border-bottom: 1px solid #e0e0e0; }
+                .export-logo { height: 48px; }
+                .export-title { font-size: 1.5rem; font-weight: 600; color: #1976d2; letter-spacing: .3px; }
+                .export-table { width: 98%; margin: 16px auto; border-collapse: collapse; background: #fff; border: 1px solid #e0e0e0; }
+                .export-table th, .export-table td { border: 1px solid #e0e0e0; padding: 8px 12px; font-size: 0.95rem; vertical-align: top; }
+                .export-table th { background: #f5f5f5; color: #424242; font-weight: 600; text-align: left; }
+                .export-table tr:nth-child(even) { background: #fafafa; }
+                .export-footer { margin: 16px auto 0 auto; text-align: center; color: #757575; font-size: 0.9rem; }
+                .export-img-row { display: flex; flex-direction: row; gap: 6px; flex-wrap: wrap; }
+                .export-img-row img { width: 64px; height: 64px; object-fit: cover; border-radius: 4px; border: 1px solid #e0e0e0; }
+                .export-product-table { width: 100%; border-collapse: collapse; margin: 0; }
+                .export-product-table th, .export-product-table td { border: 1px solid #eeeeee; padding: 4px 6px; font-size: 0.9rem; }
+                .export-product-table th { background: #f0f7ff; color: #1976d2; font-weight: 600; }
+                .export-product-label { font-weight: 600; color: #1976d2; margin: 6px 0 4px; display: block; }
+                .chip { display:inline-block; padding: 2px 6px; font-size:.8rem; border-radius: 12px; border:1px solid #e0e0e0; background:#fafafa; color:#616161 }
             </style>
         </head>
         <body>
@@ -802,13 +799,11 @@ const SalesReportsTable = ({ type: initialType }: { type?: 'gold' | 'diamond' | 
             <table class="export-table">
                 <thead>
                     <tr>
-                        <th>Date</th>
-                        <th>Invoice No</th>
-                        <th>Client</th>
+                        <th>Invoice Info</th>
                         <th>Product Details</th>
-                        <th>Product Images</th>
-                        <th>Amounts</th>
+                        <th>Client</th>
                         <th>Is Closed</th>
+                        <th>Amounts</th>
                         <th>Source Mark</th>
                     </tr>
                 </thead>
@@ -816,40 +811,86 @@ const SalesReportsTable = ({ type: initialType }: { type?: 'gold' | 'diamond' | 
         `;
         sortedData.forEach((row: any) => {
             const client = row.Client ? `${row.Client.client_name || ''}${row.Client.client_name && row.Client.tel_client ? ' - ' : ''}${row.Client.tel_client || ''}` : '';
-            // Product details: render as a nested table
+
+            // Build Invoice Info block (mimics on-screen cell)
+            const created = row.d_time ? new Date(row.d_time) : null;
+            let createdStr = '';
+            if (created) {
+                let hours = created.getHours();
+                const minutes = created.getMinutes().toString().padStart(2, '0');
+                const ampm = hours >= 12 ? 'PM' : 'AM';
+                hours = hours % 12; hours = hours ? hours : 12;
+                createdStr = `${hours}:${minutes} ${ampm}`;
+            }
+            const user = row.Utilisateur && row.Utilisateur.name_user ? row.Utilisateur.name_user : '';
+            const isChiraFlag = row.is_chira === true || row.is_chira === 1;
+            const returnChira = row.return_chira;
+            const commentChira = row.comment_chira;
+            const usrReceiveChira = row.usr_receive_chira;
+            const invoiceInfoHtml = `
+                <div style="font-size:12px;line-height:1.35">
+                    <div><b>Date:</b> <span class="chip">${row.date_fact || ''}</span></div>
+                    <div><b>Invoice No:</b> <span class="chip">${row.num_fact || ''}</span></div>
+                    <div><b>Time:</b> ${createdStr}</div>
+                    <div><b>Point Of Sale:</b> ${row.ps || ''}</div>
+                    ${user ? `<div><b>Created by:</b> ${user}</div>` : ''}
+                    <div><b>Is Chira:</b> <span style="color:${isChiraFlag ? '#388e3c' : '#d32f2f'};font-weight:600">${isChiraFlag ? 'Yes' : 'No'}</span></div>
+                    ${(!isChiraFlag && (returnChira || commentChira || usrReceiveChira)) ? `
+                        <div style="margin-top:4px;background:#f9fbe7;border-radius:4px;padding:6px 8px">
+                            ${returnChira ? `<div><b style='color:#388e3c'>Return Date:</b> ${returnChira}</div>` : ''}
+                            ${usrReceiveChira ? `<div><b style='color:#d32f2f'>Return By:</b> ${usrReceiveChira}</div>` : ''}
+                            ${commentChira ? `<div><b style='color:#1976d2'>Comment Chira:</b> ${commentChira}</div>` : ''}
+                        </div>` : ''}
+                </div>
+            `;
+
+            // Product Details with inline images (mimics on-screen layout)
             let detailsHtml = '';
             if (row._productDetails && row._productDetails.length > 0) {
-                detailsHtml = `<table class='export-product-table'><thead><tr><th>Design</th><th>Weight</th><th>Code</th><th>Type</th><th>Picint</th></tr></thead><tbody>`;
-                row._productDetails.forEach((d: any) => {
-                    detailsHtml += `<tr><td>${d.design}</td><td>${d.weight}</td><td>${d.code}</td><td>${d.typeSupplier}</td><td>${d.picint ?? ''}</td></tr>`;
+                detailsHtml = `<table class='export-product-table'><thead><tr><th>Design | Weight | Code | Type | Price</th></tr></thead><tbody>`;
+                row._productDetails.forEach((d: any, idx: number) => {
+                    const price = row.prix_vente_remise ? `${row.prix_vente_remise} ${d.typeSupplier?.toLowerCase().includes('gold') ? 'LYD' : 'USD'}` : '';
+                    const lineText = `${d.design} | ${d.weight || ''} | ${d.code} | ${d.typeSupplier} ${price ? ' | ' + price : ''}`;
+                    const picint = d.picint;
+                    const urls = picint && picintToBase64[picint] ? picintToBase64[picint] : [];
+                    const gift = d.IS_GIFT === true ? ' <span title="Gift">🎁</span>' : '';
+                    const imagesRow = urls.length > 0
+                        ? `<div class='export-img-row'>${urls.map((u: string) => `<img src='${u}' alt='Product' />`).join('')}</div>`
+                        : `<span style='color:#9e9e9e'>No Image</span>`;
+                    detailsHtml += `<tr><td>${lineText}${gift}<div style='margin-top:4px'>${imagesRow}</div></td></tr>`;
                 });
                 detailsHtml += `</tbody></table>`;
             }
-            // Product images: for each product, show images in a flex row with a label
-            let imagesHtml = '';
-            if (row._productDetails && row._productDetails.length > 0) {
-                imagesHtml = row._productDetails.map((d: any, idx: number) => {
-                    const picint = d.picint;
-                    const urls = picint && picintToBase64[picint] ? picintToBase64[picint] : [];
-                    let label = `<span class='export-product-label'>Product ${idx + 1} (picint: ${picint ?? '-'})</span>`;
-                    if (urls.length > 0) {
-                        return `${label}<div class='export-img-row'>${urls.map((url: string) => `<img src='${url}' alt='Product' />`).join('')}</div>`;
-                    } else {
-                        return `${label}<span style='color:#aaa;'>No Image</span>`;
-                    }
-                }).join('<br/>');
+
+            const isClosed = row.IS_OK
+                ? '<span style="color:#388e3c;font-weight:600">🔒 Closed Invoice</span>'
+                : '<span style="color:#fbc02d;font-weight:600">🔓 Open invoice</span>';
+
+            // Amounts block matches screen content
+            const isGold = !!row?.ACHATs?.[0]?.Fournisseur?.TYPE_SUPPLIER?.toLowerCase().includes('gold');
+            const total = Number(row.total_remise_final) || 0;
+            let pricePerG = '';
+            if (isGold) {
+                const qtyG = Number(row?.ACHATs?.[0]?.qty);
+                if (!isNaN(qtyG) && qtyG > 0 && total > 0) pricePerG = (total / qtyG).toFixed(2);
             }
-            const isClosed = row.IS_OK ? '<span style="color:#388e3c;font-weight:600;">Closed</span>' : '<span style="color:#fbc02d;font-weight:600;">Open</span>';
-            const amounts = `${row.total_remise_final} ${row?.ACHATs?.[0]?.Fournisseur?.TYPE_SUPPLIER?.toLowerCase().includes('gold') ? 'LYD' : 'USD'}`;
+            const amountsHtml = `
+                <div style='font-size:12px;line-height:1.4'>
+                    ${total ? `<div><b style='color:#1976d2'>Total Invoice:</b> ${total.toLocaleString('en-US', {minimumFractionDigits:2, maximumFractionDigits:2})} ${isGold ? 'LYD' : 'USD'} ${pricePerG ? `<span style='margin-left:8px;color:#388e3c;font-weight:600'>Price/g: ${pricePerG}</span>` : ''}</div>` : ''}
+                    ${row.remise > 0 ? `<div><b style='color:#d32f2f'>Discount Value:</b> ${Number(row.remise).toLocaleString('en-US', {minimumFractionDigits:2, maximumFractionDigits:2})}</div>` : ''}
+                    ${row.remise_per > 0 ? `<div><b style='color:#d32f2f'>Discount %:</b> ${Number(row.remise_per).toLocaleString('en-US', {minimumFractionDigits:2, maximumFractionDigits:2})}</div>` : ''}
+                    ${row.amount_lyd ? `<div><b>LYD Due:</b> ${Number(row.amount_lyd).toLocaleString('en-US', {minimumFractionDigits:2, maximumFractionDigits:2})}</div>` : ''}
+                    ${row.amount_currency ? `<div><b>USD Due:</b> ${Number(row.amount_currency).toLocaleString('en-US', {minimumFractionDigits:2, maximumFractionDigits:2})}${row.amount_currency_LYD ? `<span style='margin-left:8px;color:#616161'><b>Equi. in LYD:</b> ${Number(row.amount_currency_LYD).toLocaleString('en-US', {minimumFractionDigits:2, maximumFractionDigits:2})}</span>` : ''}</div>` : ''}
+                    ${row.amount_EUR ? `<div><b>EUR Due:</b> ${Number(row.amount_EUR).toLocaleString('en-US', {minimumFractionDigits:2, maximumFractionDigits:2})}${row.amount_EUR_LYD ? `<span style='margin-left:8px;color:#616161'><b>Equi. in LYD:</b> ${Number(row.amount_EUR_LYD).toLocaleString('en-US', {minimumFractionDigits:2, maximumFractionDigits:2})}</span>` : ''}</div>` : ''}
+                </div>`;
+
             html += `
                 <tr>
-                    <td>${row.date_fact || ''}</td>
-                    <td>${row.num_fact || ''}</td>
-                    <td>${client}</td>
+                    <td>${invoiceInfoHtml}</td>
                     <td>${detailsHtml}</td>
-                    <td>${imagesHtml}</td>
-                    <td>${amounts}</td>
+                    <td>${client}</td>
                     <td>${isClosed}</td>
+                    <td>${amountsHtml}</td>
                     <td>${row.SourceMark || ''}</td>
                 </tr>
             `;
@@ -875,12 +916,257 @@ const SalesReportsTable = ({ type: initialType }: { type?: 'gold' | 'diamond' | 
         </body>
         </html>
         `;
-        // Open in new window for user to save/print
+        return html;
+    }
+
+    // --- Export Table to HTML with all data, details, and images ---
+    async function exportTableToHtml() {
+        const html = await generateExportHtml();
         const win = window.open('', '_blank');
         if (win) {
             win.document.write(html);
             win.document.close();
         }
+    }
+
+    // --- Export to Excel (.xls via HTML) with styles and images ---
+    async function exportTableToExcel() {
+        // Build MHTML so images render in Excel
+        const mhtml = await generateExportMhtml();
+        const blob = new Blob([mhtml], { type: 'application/vnd.ms-excel;charset=utf-8;' });
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        const stamp = new Date().toISOString().replace(/[:T]/g, '-').split('.')[0];
+        link.href = url;
+        link.download = `SalesReport_${stamp}.xls`;
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        URL.revokeObjectURL(url);
+    }
+
+    // Generate an MHTML document with embedded images (cid) for Excel
+    async function generateExportMhtml(): Promise<string> {
+        // 1) Collect images as base64
+        async function blobUrlToBase64(blobUrl: string): Promise<string> {
+            return new Promise((resolve, reject) => {
+                fetch(blobUrl)
+                    .then(res => res.blob())
+                    .then(blob => {
+                        const reader = new FileReader();
+                        reader.onloadend = () => resolve(reader.result as string);
+                        reader.onerror = reject;
+                        reader.readAsDataURL(blob);
+                    })
+                    .catch(reject);
+            });
+        }
+        const parseDataUrl = (dataUrl: string): { mime: string; base64: string } | null => {
+            const match = dataUrl.match(/^data:(.*?);base64,(.*)$/);
+            if (!match) return null;
+            return { mime: match[1] || 'image/png', base64: match[2] };
+        };
+
+        // Map picint -> [{ cid, mime, base64 }]
+        const picintToCidImages: Record<string, { cid: string; mime: string; base64: string }[]> = {};
+        const allImages: { cid: string; mime: string; base64: string }[] = [];
+        let idx = 1;
+        for (const [picint, urls] of Object.entries(imageBlobUrls)) {
+            picintToCidImages[picint] = [];
+            for (const url of urls) {
+                try {
+                    const b64url = await blobUrlToBase64(url);
+                    const parsed = parseDataUrl(b64url);
+                    if (!parsed) continue;
+                    const cid = `image${String(idx++).padStart(4, '0')}`;
+                    const part = { cid, mime: parsed.mime, base64: parsed.base64 };
+                    picintToCidImages[picint].push(part);
+                    allImages.push(part);
+                } catch {
+                    // skip
+                }
+            }
+        }
+
+        // 2) Build HTML body that references images by cid
+    // optional: embed a logo if desired by adding a cid image part and referencing it here
+        const headerHtml = `
+            <div class="export-header">
+                <span class="export-title">Sales Report</span>
+            </div>`;
+
+        // Reuse same styles and table structure as generateExportHtml
+        let htmlBody = `
+        <html>
+        <head>
+            <meta charset="utf-8" />
+            <title>Sales Report Export</title>
+            <style>
+                body { font-family: Roboto, 'Segoe UI', Arial, sans-serif; background: #fafafa; color: #212121; margin: 0; padding: 0; }
+                .export-header { display: flex; align-items: center; gap: 16px; background: #fff; padding: 16px 24px; border-bottom: 1px solid #e0e0e0; }
+                .export-title { font-size: 1.5rem; font-weight: 600; color: #1976d2; letter-spacing: .3px; }
+                .export-table { width: 98%; margin: 16px auto; border-collapse: collapse; background: #fff; border: 1px solid #e0e0e0; }
+                .export-table th, .export-table td { border: 1px solid #e0e0e0; padding: 8px 12px; font-size: 0.95rem; vertical-align: top; }
+                .export-table th { background: #f5f5f5; color: #424242; font-weight: 600; text-align: left; }
+                .export-table tr:nth-child(even) { background: #fafafa; }
+                .export-footer { margin: 16px auto 0 auto; text-align: center; color: #757575; font-size: 0.9rem; }
+                .export-img-row { display: flex; flex-direction: row; gap: 6px; flex-wrap: wrap; }
+                .export-img-row img { width: 64px; height: 64px; object-fit: cover; border-radius: 4px; border: 1px solid #e0e0e0; }
+                .export-product-table { width: 100%; border-collapse: collapse; margin: 0; }
+                .export-product-table th, .export-product-table td { border: 1px solid #eeeeee; padding: 4px 6px; font-size: 0.9rem; }
+                .export-product-table th { background: #f0f7ff; color: #1976d2; font-weight: 600; }
+                .export-product-label { font-weight: 600; color: #1976d2; margin: 6px 0 4px; display: block; }
+                .chip { display:inline-block; padding: 2px 6px; font-size:.8rem; border-radius: 12px; border:1px solid #e0e0e0; background:#fafafa; color:#616161 }
+            </style>
+        </head>
+        <body>
+            ${headerHtml}
+            <table class="export-table">
+                <thead>
+                    <tr>
+                        <th>Invoice Info</th>
+                        <th>Product Details</th>
+                        <th>Client</th>
+                        <th>Is Closed</th>
+                        <th>Amounts</th>
+                        <th>Source Mark</th>
+                    </tr>
+                </thead>
+                <tbody>`;
+
+        sortedData.forEach((row: any) => {
+            const client = row.Client ? `${row.Client.client_name || ''}${row.Client.client_name && row.Client.tel_client ? ' - ' : ''}${row.Client.tel_client || ''}` : '';
+            const created = row.d_time ? new Date(row.d_time) : null;
+            let createdStr = '';
+            if (created) {
+                let hours = created.getHours();
+                const minutes = created.getMinutes().toString().padStart(2, '0');
+                const ampm = hours >= 12 ? 'PM' : 'AM';
+                hours = hours % 12; hours = hours ? hours : 12;
+                createdStr = `${hours}:${minutes} ${ampm}`;
+            }
+            const user = row.Utilisateur && row.Utilisateur.name_user ? row.Utilisateur.name_user : '';
+            const isChiraFlag = row.is_chira === true || row.is_chira === 1;
+            const returnChira = row.return_chira;
+            const commentChira = row.comment_chira;
+            const usrReceiveChira = row.usr_receive_chira;
+            const invoiceInfoHtml = `
+                <div style="font-size:12px;line-height:1.35">
+                    <div><b>Date:</b> <span class="chip">${row.date_fact || ''}</span></div>
+                    <div><b>Invoice No:</b> <span class="chip">${row.num_fact || ''}</span></div>
+                    <div><b>Time:</b> ${createdStr}</div>
+                    <div><b>Point Of Sale:</b> ${row.ps || ''}</div>
+                    ${user ? `<div><b>Created by:</b> ${user}</div>` : ''}
+                    <div><b>Is Chira:</b> <span style="color:${isChiraFlag ? '#388e3c' : '#d32f2f'};font-weight:600">${isChiraFlag ? 'Yes' : 'No'}</span></div>
+                    ${(!isChiraFlag && (returnChira || commentChira || usrReceiveChira)) ? `
+                        <div style="margin-top:4px;background:#f9fbe7;border-radius:4px;padding:6px 8px">
+                            ${returnChira ? `<div><b style='color:#388e3c'>Return Date:</b> ${returnChira}</div>` : ''}
+                            ${usrReceiveChira ? `<div><b style='color:#d32f2f'>Return By:</b> ${usrReceiveChira}</div>` : ''}
+                            ${commentChira ? `<div><b style='color:#1976d2'>Comment Chira:</b> ${commentChira}</div>` : ''}
+                        </div>` : ''}
+                </div>`;
+
+            // Build details with cid images
+            let detailsHtml = '';
+            if (row._productDetails && row._productDetails.length > 0) {
+                detailsHtml = `<table class='export-product-table'><thead><tr><th>Design | Weight | Code | Type | Price</th></tr></thead><tbody>`;
+                row._productDetails.forEach((d: any) => {
+                    const price = row.prix_vente_remise ? `${row.prix_vente_remise} ${d.typeSupplier?.toLowerCase().includes('gold') ? 'LYD' : 'USD'}` : '';
+                    const lineText = `${d.design} | ${d.weight || ''} | ${d.code} | ${d.typeSupplier}${price ? ' | ' + price : ''}`;
+                    const picint = d.picint;
+                    const imgs = picint && picintToCidImages[String(picint)] ? picintToCidImages[String(picint)] : [];
+                    const gift = d.IS_GIFT === true ? ' <span title="Gift">🎁</span>' : '';
+                    const imagesRow = imgs.length > 0
+                        ? `<div class='export-img-row'>${imgs.map((p) => `<img src='cid:${p.cid}' alt='Product' />`).join('')}</div>`
+                        : `<span style='color:#9e9e9e'>No Image</span>`;
+                    detailsHtml += `<tr><td>${lineText}${gift}<div style='margin-top:4px'>${imagesRow}</div></td></tr>`;
+                });
+                detailsHtml += `</tbody></table>`;
+            }
+
+            const isClosed = row.IS_OK
+                ? '<span style="color:#388e3c;font-weight:600">🔒 Closed Invoice</span>'
+                : '<span style="color:#fbc02d;font-weight:600">🔓 Open invoice</span>';
+
+            const isGold = !!row?.ACHATs?.[0]?.Fournisseur?.TYPE_SUPPLIER?.toLowerCase().includes('gold');
+            const total = Number(row.total_remise_final) || 0;
+            let pricePerG = '';
+            if (isGold) {
+                const qtyG = Number(row?.ACHATs?.[0]?.qty);
+                if (!isNaN(qtyG) && qtyG > 0 && total > 0) pricePerG = (total / qtyG).toFixed(2);
+            }
+            const amountsHtml = `
+                <div style='font-size:12px;line-height:1.4'>
+                    ${total ? `<div><b style='color:#1976d2'>Total Invoice:</b> ${total.toLocaleString('en-US', {minimumFractionDigits:2, maximumFractionDigits:2})} ${isGold ? 'LYD' : 'USD'} ${pricePerG ? `<span style='margin-left:8px;color:#388e3c;font-weight:600'>Price/g: ${pricePerG}</span>` : ''}</div>` : ''}
+                    ${row.remise > 0 ? `<div><b style='color:#d32f2f'>Discount Value:</b> ${Number(row.remise).toLocaleString('en-US', {minimumFractionDigits:2, maximumFractionDigits:2})}</div>` : ''}
+                    ${row.remise_per > 0 ? `<div><b style='color:#d32f2f'>Discount %:</b> ${Number(row.remise_per).toLocaleString('en-US', {minimumFractionDigits:2, maximumFractionDigits:2})}</div>` : ''}
+                    ${row.amount_lyd ? `<div><b>LYD Due:</b> ${Number(row.amount_lyd).toLocaleString('en-US', {minimumFractionDigits:2, maximumFractionDigits:2})}</div>` : ''}
+                    ${row.amount_currency ? `<div><b>USD Due:</b> ${Number(row.amount_currency).toLocaleString('en-US', {minimumFractionDigits:2, maximumFractionDigits:2})}${row.amount_currency_LYD ? `<span style='margin-left:8px;color:#616161'><b>Equi. in LYD:</b> ${Number(row.amount_currency_LYD).toLocaleString('en-US', {minimumFractionDigits:2, maximumFractionDigits:2})}</span>` : ''}</div>` : ''}
+                    ${row.amount_EUR ? `<div><b>EUR Due:</b> ${Number(row.amount_EUR).toLocaleString('en-US', {minimumFractionDigits:2, maximumFractionDigits:2})}${row.amount_EUR_LYD ? `<span style='margin-left:8px;color:#616161'><b>Equi. in LYD:</b> ${Number(row.amount_EUR_LYD).toLocaleString('en-US', {minimumFractionDigits:2, maximumFractionDigits:2})}</span>` : ''}</div>` : ''}
+                </div>`;
+
+            htmlBody += `
+                <tr>
+                    <td>${invoiceInfoHtml}</td>
+                    <td>${detailsHtml}</td>
+                    <td>${client}</td>
+                    <td>${isClosed}</td>
+                    <td>${amountsHtml}</td>
+                    <td>${row.SourceMark || ''}</td>
+                </tr>`;
+        });
+
+        htmlBody += `
+                </tbody>
+                <tfoot>
+                    <tr style="background:#f0f7ff;font-weight:bold;">
+                        <td colspan="4" style="text-align:right;">Total Gold:</td>
+                        <td colspan="2" style="text-align:left; color:#1976d2;">${formatNumber(totalGold)} LYD</td>
+                    </tr>
+                    <tr style="background:#f0f7ff;font-weight:bold;">
+                        <td colspan="4" style="text-align:right;">Total Diamond:</td>
+                        <td colspan="2" style="text-align:left; color:#1976d2;">${formatNumber(totalDiamond)} USD</td>
+                    </tr>
+                    <tr style="background:#f0f7ff;font-weight:bold;">
+                        <td colspan="4" style="text-align:right;">Total Watch:</td>
+                        <td colspan="2" style="text-align:left; color:#1976d2;">${formatNumber(totalWatch)} USD</td>
+                    </tr>
+                </tfoot>
+            </table>
+            <div class="export-footer">Generated on ${new Date().toLocaleString()}</div>
+        </body>
+        </html>`;
+
+        // 3) Assemble MHTML
+        const boundary = '----=_NextPart_000_0000';
+        const EOL = '\r\n';
+        let mhtml = '';
+        mhtml += 'MIME-Version: 1.0' + EOL;
+        mhtml += `Content-Type: multipart/related; boundary="${boundary}"; type="text/html"` + EOL + EOL;
+
+        // HTML part
+        mhtml += `--${boundary}` + EOL;
+        mhtml += 'Content-Type: text/html; charset="utf-8"' + EOL;
+        mhtml += 'Content-Transfer-Encoding: 8bit' + EOL + EOL;
+        mhtml += htmlBody + EOL + EOL;
+
+        // Image parts
+        allImages.forEach((img, i) => {
+            mhtml += `--${boundary}` + EOL;
+            mhtml += `Content-Location: file:///image${i + 1}` + EOL;
+            mhtml += `Content-Transfer-Encoding: base64` + EOL;
+            mhtml += `Content-Type: ${img.mime}` + EOL;
+            mhtml += `Content-ID: <${img.cid}>` + EOL + EOL;
+            // Excel tolerates unwrapped base64; still split by 76 chars for safety
+            for (let p = 0; p < img.base64.length; p += 76) {
+                mhtml += img.base64.substring(p, p + 76) + EOL;
+            }
+            mhtml += EOL;
+        });
+
+        // Closing boundary
+        mhtml += `--${boundary}--` + EOL;
+        return mhtml;
     }
 
     // Add a ref for the table container
@@ -960,6 +1246,14 @@ const SalesReportsTable = ({ type: initialType }: { type?: 'gold' | 'diamond' | 
                     >
                         Export to HTML
                     </Button>
+                    <Button
+                        variant="contained"
+                        color="success"
+                        sx={{ fontWeight: 600, boxShadow: 2 }}
+                        onClick={exportTableToExcel}
+                    >
+                        Export to EXcel
+                    </Button>
                 </Box>
                 {/* Wrap the table in a div with a ref for export */}
                 <div ref={tableRef} id="export-table-container">
@@ -1018,6 +1312,7 @@ const SalesReportsTable = ({ type: initialType }: { type?: 'gold' | 'diamond' | 
                         data={buildPrintDialogData(selectedInvoice)}
                         printRef={printRef}
                         onClose={() => setPrintDialogOpen(false)}
+                        onInvoiceClosed={() => setInvoiceRefreshFlag((f) => f + 1)}
                         showCloseInvoiceActions={true}
                         showCloseInvoice={selectedInvoice && selectedInvoice.IS_OK === false}
                     />

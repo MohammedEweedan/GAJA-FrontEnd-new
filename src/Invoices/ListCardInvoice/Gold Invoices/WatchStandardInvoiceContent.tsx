@@ -100,12 +100,20 @@ const WatchStandardInvoiceContent = forwardRef<HTMLDivElement, Props>(({ data, n
     };
 
     useEffect(() => {
+        // Refetch details when invoice number changes so status reflects latest state
         fetchDataINV();
         // eslint-disable-next-line
-    }, []);
+    }, [invoiceNumFact]);
 
     // Find the invoice in pdata that matches the current invoice number
     const currentInvoiceData = pdata.find((inv: any) => inv.num_fact === invoiceNumFact) || {};
+
+    // Derive closed status from current invoice data using common flags
+    const isClosed = (() => {
+        const v = currentInvoiceData;
+        const candidates = [v?.is_closed, v?.IS_CLOSED, v?.IS_OK, v?.is_ok];
+        return candidates.some((c: any) => c === true || c === 1 || c === '1' || c === 'true');
+    })();
 
     const qrData = JSON.stringify({
         invoiceNo: invoice.num_fact,
@@ -209,6 +217,16 @@ const WatchStandardInvoiceContent = forwardRef<HTMLDivElement, Props>(({ data, n
                         Invoice No: {invoiceNumFact === 0 ? (
                             <span style={{ color: 'red' }}>In Progress</span>
                         ) : invoiceNumFact}
+                        {invoiceNumFact !== 0 && (
+                            <>
+                                {' '}
+                                {isClosed ? (
+                                    <span style={{ color: '#2e7d32', fontWeight: 700 }}>(Closed)</span>
+                                ) : (
+                                    <span style={{ color: '#ed6c02', fontWeight: 700 }}>(Open)</span>
+                                )}
+                            </>
+                        )}
                     </Typography>
                     <Typography variant="subtitle2">Date: {currentInvoiceData.date_fact || invoice.date_fact}</Typography>
                     <Typography variant="subtitle2">

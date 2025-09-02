@@ -171,6 +171,13 @@ const PrintInvoiceDialog: React.FC<PrintInvoiceDialogProps> = ({
   const [closeWarningOpen, setCloseWarningOpen] = React.useState(false);
   const [showImage, setShowImage] = React.useState(true);
 
+  // Initialize invoice number from the provided invoice when available
+  React.useEffect(() => {
+    if (invoice?.num_fact && Number(invoice.num_fact) > 0) {
+      setInvoiceNumFact(Number(invoice.num_fact));
+    }
+  }, [invoice]);
+
   // Print only the DialogContent (invoice area)
   const handlePrint = () => {
     // Find the DialogContent DOM node
@@ -248,39 +255,54 @@ const PrintInvoiceDialog: React.FC<PrintInvoiceDialogProps> = ({
   // Handler for closing this invoice
   const handleCloseInvoice = async () => {
     const token = localStorage.getItem('token');
-    if (!ps || !Cuser) {
+    // Prefer ps/usr from current invoice when present
+    const psParam = invoice?.ps != null ? String(invoice.ps) : String(ps ?? '');
+    const usrParam = invoice?.usr != null ? String(invoice.usr) : String(Cuser ?? '');
+    if (!psParam || !usrParam) {
       alert('User info missing. Cannot close invoice.');
       return;
     }
     try {
       // Optionally show a loading indicator here
-let num_fact ;
-      if (invoice && invoice.num_fact) {
-        num_fact = invoice.num_fact;
-      } else {
-        num_fact = invoiceNumFact;
+      // Ensure we have a valid invoice number
+      let num_fact: number | null = (invoice && invoice.num_fact) ? invoice.num_fact : (invoiceNumFact ?? null);
+      if (!num_fact || Number(num_fact) === 0) {
+        const newNum = await handleAddNew();
+        if (!newNum) {
+          alert('Failed to generate invoice number.');
+          return;
+        }
+        num_fact = newNum;
       }
 
+
+
+
+
+
+
+      const qs = new URLSearchParams({
+        ps: psParam,
+        usr: usrParam,
+        num_fact: String(num_fact),
+        MakeCashVoucher: String(!!makeTransactionToCashier),
+      });
+      const response = await fetch(`${apiUrlinv}/CloseNF?${qs.toString()}`,
+        { method: 'GET', headers: { Authorization: `Bearer ${token}` } });
       
-
- 
-
-
-
-      const response = await fetch(
-        `${apiUrlinv}/CloseNF?ps=${ps}&usr=${Cuser}&num_fact=${num_fact}&MakeCashVoucher=${makeTransactionToCashier}`,
-        {
-          method: 'GET',
-          headers: { Authorization: `Bearer ${token}` },
-        }
-      ); if (!response.ok) {
+      if (!response.ok) {
         const errorData = await response.json();
         throw new Error(errorData.message || 'Failed to close invoice');
       }
+
+
       const result = await response.json();
 
       // Optionally update state/UI here
-      setInvoiceNumFact(Number(result.new_num_fact));
+      if (result?.new_num_fact) setInvoiceNumFact(Number(result.new_num_fact));
+      if (Number(result?.gltranRowsCreated ?? 0) <= 0) {
+        console.warn('CloseNF completed but no journal entries were created.');
+      }
       if (onInvoiceClosed) onInvoiceClosed(); // Refresh parent page
       if (onCartRefresh) onCartRefresh(); // Refresh cart
       onClose(); // Close the dialog
@@ -312,17 +334,21 @@ let num_fact ;
 
 
   const apiUrlinv = `http://${apiIp}/invoices`;
-  const handleAddNew = async () => {
+  const handleAddNew = async (): Promise<number | null> => {
     const token = localStorage.getItem('token');
+    const psParam = invoice?.ps != null ? String(invoice.ps) : String(ps ?? '');
+    const usrParam = invoice?.usr != null ? String(invoice.usr) : String(Cuser ?? '');
     try {
-      const response = await fetch(`${apiUrlinv}/SetNF?ps=${ps}&usr=${Cuser}`, {
+      const response = await fetch(`${apiUrlinv}/SetNF?ps=${encodeURIComponent(psParam)}&usr=${encodeURIComponent(usrParam)}`, {
         headers: { Authorization: `Bearer ${token}` },
       });
       if (!response.ok) throw new Error("Failed to fetch new invoice number");
       const result = await response.json();
       setInvoiceNumFact(result.new_num_fact); // Set the new invoice number in state
+      return Number(result.new_num_fact) || null;
     } catch (error) {
       console.error("Error creating new invoice:", error);
+      return null;
     }
   };
 
@@ -330,7 +356,10 @@ let num_fact ;
   const handleConfirmClose = () => setConfirmOpen(false);
   const handleConfirmYes = async () => {
     setConfirmOpen(false);
-    await handleAddNew();
+    const nf = await handleAddNew();
+    if (!nf) {
+      alert('Failed to generate invoice number.');
+    }
   };
 
   const handleCloseInvoiceClick = () => setCloseWarningOpen(true);
@@ -345,17 +374,21 @@ let num_fact ;
       <DialogTitle sx={{ p: 3, background: '#fff', color: '#000' }}>
         <Box sx={{ display: 'flex', gap: 2, justifyContent: 'flex-end', alignItems: 'center', background: '#fff' }}>
 
-          {/* Show Image Checkbox */}
-          <FormControlLabel
+          {/* Show Image Checkbox
+          
+            <FormControlLabel
             control={<Checkbox checked={showImage} onChange={e => setShowImage(e.target.checked)} size="small" color="primary" />}
             label="Do you want to show image?"
             sx={{ mr: 2 }}
           />
+          
+          */}
+
 
           {/* Show close invoice button if invoice is not closed */}
           {invoice && showCloseInvoice && (
-<>
-            <FormControlLabel
+            <>
+              <FormControlLabel
                 control={
                   <Checkbox
                     checked={makeTransactionToCashier}
@@ -364,7 +397,7 @@ let num_fact ;
                     size="small"
                   />
                 }
-                label="Do you want to complete the financial closing of the invoice automatically?"
+                label="Do you want to Receive money in cashbox?"
                 sx={{
                   mb: 0,
                   fontSize: 14,
@@ -374,13 +407,13 @@ let num_fact ;
                 }}
               />
 
-            <Button
-              variant="contained"
-              color="error"
-              onClick={handleCloseInvoiceClick}
-            >
-              Close This Invoice
-            </Button></>
+              <Button
+                variant="contained"
+                color="error"
+                onClick={handleCloseInvoiceClick}
+              >
+                Close This Invoice
+              </Button></>
           )}
 
           {!showCloseInvoiceActions && (!invoiceNumFact || invoiceNumFact === 0) && (
@@ -405,7 +438,7 @@ let num_fact ;
                     size="small"
                   />
                 }
-                label="Do you want to complete the financial closing of the invoice automatically?"
+                label="Do you want to Receive money in cashbox?"
                 sx={{
                   mb: 0,
                   fontSize: 14,

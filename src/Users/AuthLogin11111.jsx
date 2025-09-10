@@ -32,7 +32,11 @@ function AuthLogin({ ...others }) {
 
   async function SignIn(email, password) {
     try {
-      const res = await axios.post("http://localhost:9000/api/login", { email, password });
+      const res = await axios.post(
+        "http://102.213.182.8:9000/api/login",
+        { email, password },
+        { headers: { 'Content-Type': 'application/json' } }
+      );
 
       if (res.data.token) {
 

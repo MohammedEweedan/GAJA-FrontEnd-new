@@ -220,7 +220,7 @@ const OPurchase = () => {
     const fetchPsList = async () => {
       const token = localStorage.getItem('token');
       try {
-        const res = await axios.get('http://102.213.182.8:9000/ps/all', {
+        const res = await axios.get('http://localhost:9000/ps/all', {
           headers: { Authorization: `Bearer ${token}` }
         });
         setPsList(res.data);
@@ -429,7 +429,7 @@ const OPurchase = () => {
     setLoadingDistributions(true);
     try {
       const token = localStorage.getItem('token');
-      const res = await axios.get('http://102.213.182.8:9000/Dpurchases/all', {
+      const res = await axios.get('http://localhost:9000/Dpurchases/all', {
         headers: { Authorization: `Bearer ${token}` }
       });
       // Filter by PurchaseID and PurchaseType === 'Gold Purchase'
@@ -549,7 +549,7 @@ const OPurchase = () => {
                     }, 200);
 
                     try {
-                      await axios.post('http://102.213.182.8:9000/Opurchases/send-approval', {
+                      await axios.post('http://localhost:9000/Opurchases/send-approval', {
                         id_achat: row.original.id_achat,
                         email,
                         purchaseInfo: {
@@ -960,7 +960,7 @@ const OPurchase = () => {
 
                     const token = localStorage.getItem('token');
                     try {
-                      await axios.post('http://102.213.182.8:9000/Dpurchases/Add', {
+                      await axios.post('http://localhost:9000/Dpurchases/Add', {
                         ...newDistribution,
                         usr: Cuser,
                         PurchaseID: distributionDialog.purchase.id_achat
@@ -969,7 +969,7 @@ const OPurchase = () => {
                       });
                       setSnackbar({ open: true, message: 'Distribution added', severity: 'success' });
                       // Refresh list
-                      const res = await axios.get(`http://102.213.182.8:9000/Dpurchases/all`, {
+                      const res = await axios.get(`http://localhost:9000/Dpurchases/all`, {
                         headers: { Authorization: `Bearer ${token}` }
                       });
                       setDistributions(res.data.filter(
@@ -1221,7 +1221,7 @@ const OPurchase = () => {
                 if (!pendingDeleteDist) return;
                 const token = localStorage.getItem('token');
                 try {
-                  await axios.delete(`http://102.213.182.8:9000/Dpurchases/Delete/${pendingDeleteDist.distributionID}`, {
+                  await axios.delete(`http://localhost:9000/Dpurchases/Delete/${pendingDeleteDist.distributionID}`, {
                     headers: { Authorization: `Bearer ${token}` }
                   });
                   setSnackbar({ open: true, message: 'Distribution deleted', severity: 'success' });

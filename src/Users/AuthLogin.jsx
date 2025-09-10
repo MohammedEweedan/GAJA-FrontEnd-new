@@ -61,7 +61,7 @@ function AuthLogin({ ...others }) {
       }
     } catch (e) {
 
-      console.log(e)
+      console.log('testtttttttttttttttt',e)
       setis_not_found("Login or Password is wrong. Please try again!");
     }
   }

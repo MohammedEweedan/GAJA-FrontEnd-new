@@ -1,1556 +1,573 @@
-import React, { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, useCallback } from 'react';
+import { useNavigate } from 'react-router-dom';
 import {
-  Box, Card, CardContent, CardHeader, Divider, IconButton, InputAdornment,
-  TextField, Typography, Tabs, Tab, Button, Avatar, Chip, MenuItem, Select,
-  FormControl, FormHelperText, Dialog, DialogTitle, DialogContent, DialogActions,
-  LinearProgress, Tooltip, Stack, Alert, Snackbar, FormControlLabel, Switch, TextareaAutosize
-} from "@mui/material";
-import SearchIcon from "@mui/icons-material/Search";
-import RefreshIcon from "@mui/icons-material/Refresh";
-import EditIcon from "@mui/icons-material/Edit";
-import SaveIcon from "@mui/icons-material/Save";
-import CloudUploadIcon from "@mui/icons-material/CloudUpload";
-import PersonOffIcon from "@mui/icons-material/PersonOff";
-import PersonIcon from "@mui/icons-material/Person";
-import FileUploadIcon from "@mui/icons-material/FileUpload";
-import DeleteIcon from "@mui/icons-material/Delete";
-import AddIcon from "@mui/icons-material/Add";
-import CancelIcon from "@mui/icons-material/Cancel";
-import Grid from '@mui/material/Grid';
-import axios from "axios";
+  MaterialReactTable,
+  useMaterialReactTable,
+  type MRT_ColumnDef,
+} from 'material-react-table';
+import {
+  Box, IconButton, Tooltip, Button, Dialog, DialogActions, DialogContent, DialogTitle,
+  TextField, Divider, Typography, Select, MenuItem, FormControl, InputLabel, Switch,
+  FormControlLabel, Chip, Avatar, Stack, Stepper, Step, StepLabel, Paper, 
+  Alert, Snackbar
+} from '@mui/material';
+import EditIcon from '@mui/icons-material/Edit';
+import DeleteOutlineIcon from '@mui/icons-material/DeleteOutline';
+import AddIcon from '@mui/icons-material/Add';
+import ImportExportIcon from '@mui/icons-material/ImportExport';
+import RefreshIcon from '@mui/icons-material/Refresh';
+import PersonAddIcon from '@mui/icons-material/PersonAdd';
+import * as XLSX from 'xlsx';
+import axios from 'axios';
 
-// DB-aligned type with all fields from your model
 export type Employee = {
   ID_EMP?: number;
-  NAME?: string;
-  ADDRESS?: string;
-  PHONE?: string;
-  EMAIL?: string;
-  COMMENT?: string;
-  CONTRACT_START?: string;
-  CONTRACT_END?: string;
-  TITLE?: string;
-  NATIONALITY?: string;
-  NUM_OF_CHILDREN?: number;
-  EMPLOYER_REF?: string;
-  BANK?: number;
-  INVESTMENT?: string;
-  FINANCE_NUM?: string;
-  TYPE_OF_RECRUITMENT?: string;
-  DEGREE?: string;
-  TYPE_OF_INSURANCE?: string;
-  NUM_OF_INSURANCE?: string;
-  ACCOUNT_NUMBER?: string;
-  DATE_OF_BIRTH?: string;
-  PICTURE?: any; // BLOB
-  MARITAL_STATUS?: string;
-  PLACE_OF_BIRTH?: string;
-  NUM_CIN?: string;
-  ISSUING_AUTH?: string;
-  FAM_BOOK_NUM?: string;
-  FAM_BOOK_ISSUING_AUTH?: string;
-  PASSPORT_NUM?: string;
-  PASSPORT_ISSUING_AUTH?: string;
-  ANNUAL_LEAVE_BAL?: number;
-  GENDER?: string;
-  BLOOD_TYPE?: string;
-  DRIVER_LIC_NUM?: string;
-  NAME_ENGLISH?: string;
-  SCIENTIFIC_CERT?: string;
-  BASIC_SALARY?: number;
-  STATE?: boolean;
-  NUM_NATIONAL?: string;
-  IS_FOREINGHT?: boolean;
-  RENEWABLE_CONTRACT?: string;
-  FINGERPRINT_NEEDED?: boolean;
-  ATTACHED_NUMBER?: string;
-  JOB_AIM?: string;
-  JOB_DESCRIPTION?: string;
-  JO_RELATION?: string;
-  REQUEST_DEGREE?: string;
-  PREFERRED_LANG?: string;
-  COST_CENTER?: string;
-  MEDICAL_COMMENT?: string;
-  OUTFIT_NUM?: string;
-  FOOTWEAR_NUM?: string;
-  FOOD?: number;
-  FUEL?: number;
-  COMMUNICATION?: number;
-  num_kid?: string;
-  T_START?: string;
-  T_END?: string;
-  GOLD_COMM?: string;
-  DIAMOND_COMM?: number;
-  FOOD_ALLOWANCE?: number;
-  GOLD_COMM_VALUE?: number;
-  PS?: number;
-  DIAMOND_COMM_TYPE?: string;
-  PICTURE_URL?: string | null; // virtual from backend
-};
-
-const useApi = () => {
-  const apiIp = process.env.REACT_APP_API_IP;
-  const client = useMemo(() => {
-    const instance = axios.create({ baseURL: `http://${apiIp}/employees` });
-    instance.interceptors.request.use((config) => {
-      const token = localStorage.getItem("token") || "";
-      if (config.headers) {
-        config.headers.Authorization = `Bearer ${token}`;
-      }
-      return config;
-    });
-    return instance;
-  }, [apiIp]);
-
-  return { client };
-};
-
-const toMsg = (err: unknown): string => {
-  if (axios.isAxiosError(err)) {
-    const data = (err.response?.data as any) || {};
-    return data?.message || err.response?.statusText || err.message || "Request failed";
-  }
-  return (err as any)?.message || "Something went wrong";
-};
-
-export default function EmployeeProfile() {
-  const { client } = useApi();
-  const [loading, setLoading] = useState(false);
-  const [listLoading, setListLoading] = useState(false);
-  const [tab, setTab] = useState(0);
-
-  const [query, setQuery] = useState("");
-  const [employees, setEmployees] = useState<Employee[]>([]);
-  const [selected, setSelected] = useState<Employee | null>(null);
-  const [edit, setEdit] = useState(false);
-  const [snack, setSnack] = useState<{ open: boolean; msg: string; severity: 'success' | 'error' }>({ 
-    open: false, msg: "", severity: 'success' 
-  });
-
-  const [statusFilter, setStatusFilter] = useState<"all" | "active" | "inactive">("all");
-  const [costCenter, setCostCenter] = useState<string>("");
-
-  // Delete confirmation dialog
-  const [deleteOpen, setDeleteOpen] = useState(false);
-  const [employeeToDelete, setEmployeeToDelete] = useState<Employee | null>(null);
-
-  const list = async (opts?: { state?: string; cost_center?: string; search?: string }) => {
-    setListLoading(true);
-    try {
-      const params: any = {};
-      if (opts?.state && opts.state !== "all") params.state = opts.state;
-      if (opts?.cost_center) params.cost_center = opts.cost_center;
-      if (opts?.search) params.search = opts.search;
-      const res = await client.get("/", { params });
-      setEmployees(Array.isArray(res.data) ? res.data : []);
-    } catch (e) {
-      setSnack({ open: true, msg: toMsg(e), severity: 'error' });
-    } finally {
-      setListLoading(false);
-    }
-  };
-
-  const refresh = () => list({ 
-    state: statusFilter, 
-    cost_center: costCenter || undefined, 
-    search: query || undefined 
-  });
-
-  useEffect(() => { 
-    list({ state: "all" }); 
-  }, []); // eslint-disable-line
-
-  const loadById = async (id: number | string) => {
-    setLoading(true);
-    try {
-      const res = await client.get(`/${id}`);
-      setSelected(res.data);
-      setEdit(false); // Reset edit mode when loading new employee
-    } catch (e) {
-      setSnack({ open: true, msg: toMsg(e), severity: 'error' });
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const save = async () => {
-    if (!selected?.ID_EMP) return;
-    setLoading(true);
-    try {
-      await client.put(`/${selected.ID_EMP}`, selected);
-      setSnack({ open: true, msg: "Employee updated successfully", severity: 'success' });
-      await loadById(selected.ID_EMP);
-      await refresh();
-      setEdit(false);
-    } catch (e) {
-      setSnack({ open: true, msg: toMsg(e), severity: 'error' });
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const activate = async (on: boolean) => {
-    if (!selected?.ID_EMP) return;
-    setLoading(true);
-    try {
-      await client.put(`/${selected.ID_EMP}`, { STATE: on });
-      setSnack({ 
-        open: true, 
-        msg: on ? "Employee activated" : "Employee deactivated", 
-        severity: 'success' 
-      });
-      await loadById(selected.ID_EMP);
-      await refresh();
-    } catch (e) {
-      setSnack({ open: true, msg: toMsg(e), severity: 'error' });
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const renewContract = async () => {
-    if (!selected?.ID_EMP) return;
-    setLoading(true);
-    try {
-      await client.put(`/${selected.ID_EMP}`, { CONTRACT_END: selected.CONTRACT_END });
-      setSnack({ open: true, msg: "Contract renewed successfully", severity: 'success' });
-      await loadById(selected.ID_EMP);
-    } catch (e) {
-      setSnack({ open: true, msg: toMsg(e), severity: 'error' });
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  // Picture upload via base64 -> PUT /employees/:id { PICTURE_B64 }
-  const [picOpen, setPicOpen] = useState(false);
-  const [picFile, setPicFile] = useState<File | null>(null);
-
-// uploadPicture (includes severity on success/error)
-const uploadPicture = async () => {
-  if (!selected?.ID_EMP || !picFile) return;
-
-  const id = selected.ID_EMP;
-  setLoading(true);
-  try {
-    const base64 = await new Promise<string>((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onload = () => {
-        try {
-          const result = String(reader.result ?? "");
-          const comma = result.indexOf(",");
-          resolve(comma >= 0 ? result.slice(comma + 1) : result);
-        } catch (err) { reject(err); }
-      };
-      reader.onerror = () => reject(reader.error || new Error("Failed to read file"));
-      reader.readAsDataURL(picFile);
-    });
-
-    await client.put(`/${id}`, { PICTURE_B64: base64 });
-
-    setPicOpen(false);
-    setPicFile(null);
-    setSnack({ open: true, msg: "Profile picture updated", severity: "success" });
-
-    await loadById(id);
-  } catch (e) {
-    setSnack({ open: true, msg: toMsg(e), severity: "error" });
-  } finally {
-    setLoading(false);
-  }
-};
-
-// when closing the dialog, preserve severity
-// (so TS doesn't complain that it's missing)
-<Dialog
-  open={snack.open}
-  onClose={() => setSnack((s) => ({ ...s, open: false }))}
-/>
-
-  // A minimal shape that your controller.create accepts
-type NewEmployee = {
   NAME: string;
-  STATE: boolean;
-  TITLE: string | null;
-  EMPLOYER_REF: string | null;
-  EMAIL: string | null;
-  PHONE: string | null;
-  COST_CENTER: string | null;
-  CONTRACT_START: string | null; // yyyy-mm-dd
-  CONTRACT_END: string | null;   // yyyy-mm-dd
-  BASIC_SALARY: number | null;
-  NATIONALITY: string | null;
-  MARITAL_STATUS: string | null;
-  DEGREE: string | null;
-  TYPE_OF_RECRUITMENT: string | null;
+  TITLE?: string | null;
+  EMAIL?: string | null;
+  PHONE?: string | null;
+  COST_CENTER?: string | null;
+  STATE?: boolean | null;
+  CONTRACT_START?: string | null;
+  CONTRACT_END?: string | null;
+  BASIC_SALARY?: number | null;
+  NATIONALITY?: string | null;
+  MARITAL_STATUS?: string | null;
+  DEGREE?: string | null;
+  TYPE_OF_RECRUITMENT?: string | null;
+  ADDRESS?: string | null;
+  DATE_OF_BIRTH?: string | null;
+  GENDER?: string | null;
+  NUM_OF_CHILDREN?: number | null;
+  PLACE_OF_BIRTH?: string | null;
+  BLOOD_TYPE?: string | null;
+  IS_FOREINGHT?: boolean | null;
+  FINGERPRINT_NEEDED?: boolean | null;
+  PICTURE_URL?: string | null;
 };
 
-const [createOpen, setCreateOpen] = useState(false);
-const [creating, setCreating] = useState(false);
-const [newEmp, setNewEmp] = useState<NewEmployee>({
-  NAME: "",
+const emptyEmployee: Employee = {
+  NAME: '',
+  TITLE: '',
+  EMAIL: '',
+  PHONE: '',
+  COST_CENTER: '',
   STATE: true,
-  TITLE: null,
-  EMPLOYER_REF: null,
-  EMAIL: null,
-  PHONE: null,
-  COST_CENTER: null,
-  CONTRACT_START: null,
-  CONTRACT_END: null,
+  CONTRACT_START: '',
+  CONTRACT_END: '',
   BASIC_SALARY: null,
-  NATIONALITY: null,
-  MARITAL_STATUS: null,
-  DEGREE: null,
-  TYPE_OF_RECRUITMENT: null,
+  NATIONALITY: '',
+  MARITAL_STATUS: '',
+  DEGREE: '',
+  TYPE_OF_RECRUITMENT: '',
+  ADDRESS: '',
+  DATE_OF_BIRTH: '',
+  GENDER: '',
+  NUM_OF_CHILDREN: null,
+  PLACE_OF_BIRTH: '',
+  BLOOD_TYPE: '',
+  IS_FOREINGHT: false,
+  FINGERPRINT_NEEDED: false,
+};
+
+const steps = ['Basic Info', 'HR & Contract', 'Personal'];
+
+const BASE_URL = ('http://localhost:9000').replace(/\/+$/, '');
+const api = axios.create({
+  baseURL: BASE_URL,
 });
-const [createErrors, setCreateErrors] = useState<Record<string,string>>({});
 
+api.interceptors.request.use((config) => {
+  const token = localStorage.getItem('token');
+  if (token) {
+    config.headers = config.headers ?? {};
+    (config.headers as any).Authorization = `Bearer ${token}`;
+  }
+  return config;
+});
 
-  const deleteEmployee = async () => {
-    if (!employeeToDelete?.ID_EMP) return;
+const Employees = () => {
+  const navigate = useNavigate();
+
+  const [data, setData] = useState<Employee[]>([]);
+  const [loading, setLoading] = useState<boolean>(true);
+  const [error, setError] = useState<string>('');
+
+  const [search, setSearch] = useState('');
+  const [stateFilter, setStateFilter] = useState<'all' | 'active' | 'inactive'>('all');
+  const [costCenter, setCostCenter] = useState('');
+
+  const [open, setOpen] = useState(false);
+  const [isEdit, setIsEdit] = useState(false);
+  const [form, setForm] = useState<Employee>(emptyEmployee);
+  const [step, setStep] = useState(0);
+  const [errors, setErrors] = useState<Record<string, string>>({});
+  const [photoFile, setPhotoFile] = useState<File | null>(null);
+  const [photoPreview, setPhotoPreview] = useState<string | null>(null);
+
+  // Snackbar state for success/error messages
+  const [snackbar, setSnackbar] = useState<{
+    open: boolean;
+    message: string;
+    severity: 'success' | 'error' | 'info';
+  }>({ open: false, message: '', severity: 'info' });
+
+  const showSnackbar = (message: string, severity: 'success' | 'error' | 'info' = 'info') => {
+    setSnackbar({ open: true, message, severity });
+  };
+
+  const fetchEmployees = useCallback(async () => {
     setLoading(true);
+    setError('');
     try {
-      await client.delete(`/${employeeToDelete.ID_EMP}`);
-      setSnack({ open: true, msg: "Employee deleted successfully", severity: 'success' });
-      setDeleteOpen(false);
-      setEmployeeToDelete(null);
-      // Clear selected if it was the deleted employee
-      if (selected?.ID_EMP === employeeToDelete.ID_EMP) {
-        setSelected(null);
+      const params: Record<string, string> = {};
+      if (search) params.search = search;
+      if (stateFilter !== 'all') params.state = stateFilter;
+      if (costCenter) params.cost_center = costCenter;
+
+      const res = await api.get('/employees', { params });
+      
+      // Handle both direct array and data wrapper response formats
+      const employeesData = Array.isArray(res.data) ? res.data : res.data.data || [];
+      setData(employeesData);
+      
+    } catch (err: any) {
+      console.error('Employees fetch failed:', err);
+      
+      if (err?.response?.status === 401) {
+        localStorage.removeItem('token');
+        navigate('/');
+        return;
       }
-      await refresh();
-    } catch (e) {
-      setSnack({ open: true, msg: toMsg(e), severity: 'error' });
+      
+      const errorMessage = err?.response?.data?.message || 'Error loading employees';
+      setError(errorMessage);
+      showSnackbar(errorMessage, 'error');
+      
     } finally {
       setLoading(false);
     }
+  }, [search, stateFilter, costCenter, navigate]);
+
+  useEffect(() => {
+    fetchEmployees();
+  }, [fetchEmployees]);
+
+  const resetDialog = () => {
+    setOpen(false);
+    setIsEdit(false);
+    setForm(emptyEmployee);
+    setErrors({});
+    setStep(0);
+    setPhotoFile(null);
+    setPhotoPreview(null);
   };
 
-  // UI
+  const openAdd = () => {
+    setForm(emptyEmployee);
+    setIsEdit(false);
+    setOpen(true);
+  };
+
+  const openEdit = (row: Employee) => {
+    setForm({ ...row });
+    setIsEdit(true);
+    setOpen(true);
+    setStep(0);
+    setPhotoFile(null);
+    setPhotoPreview(row.PICTURE_URL || null);
+  };
+
+  const validate = (currentStep = step) => {
+    const e: Record<string, string> = {};
+    if (currentStep === 0) {
+      // if (!form.NAME?.trim()) e.NAME = 'Name is required';
+      if (form.EMAIL && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(form.EMAIL)) e.EMAIL = 'Invalid email';
+    } else if (currentStep === 1) {
+      if (form.BASIC_SALARY !== undefined && form.BASIC_SALARY !== null) {
+        if (Number.isNaN(Number(form.BASIC_SALARY))) e.BASIC_SALARY = 'Salary must be a number';
+      }
+    } else if (currentStep === 2) {
+      if (form.NUM_OF_CHILDREN !== undefined && form.NUM_OF_CHILDREN !== null) {
+        if (Number.isNaN(Number(form.NUM_OF_CHILDREN))) e.NUM_OF_CHILDREN = 'Must be a number';
+      }
+    }
+    setErrors(e);
+    return Object.keys(e).length === 0;
+  };
+
+  const payload: Employee = { ...form };
+
+  const handleNext = () => {
+    if (!validate(step)) return;
+    setStep((s) => Math.min(s + 1, steps.length - 1));
+  };
+  const handleBack = () => setStep((s) => Math.max(s - 1, 0));
+
+  const handleSave = async () => {
+  const payload: Employee = { ...form };
+  console.log('TEST payload:', payload); // Debug log
+    if (!validate(0) || !validate(1) || !validate(2)) return;
+
+    try {
+      const payload: Employee = { ...form };
+      
+      // Normalize empty strings to null
+      Object.keys(payload).forEach(key => {
+        if (typeof payload[key as keyof Employee] === 'string' && payload[key as keyof Employee] === '') {
+          (payload as any)[key] = null;
+        }
+      });
+
+      if (isEdit && form.ID_EMP) {
+        await api.put(`/employees/${form.ID_EMP}`, payload, {
+          headers: {
+            'Content-Type': 'application/json',
+          }
+        });
+        showSnackbar('Employee updated successfully!', 'success');
+      } else {
+        const token = localStorage.getItem('token');
+        await api.post('/employees/add', form, {
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${token}`
+          }
+        });
+        showSnackbar('Employee created successfully!', 'success');
+      }
+
+      await fetchEmployees();
+      resetDialog();
+      
+    } catch (err: any) {
+      console.error('Save failed:', err);
+      console.error('Response data:', err?.response?.data);
+      console.error('Request payload was:', payload);
+      
+      const errorMessage = err?.response?.data?.message || 'Failed to save employee';
+      showSnackbar(errorMessage, 'error');
+    }
+  };
+
+  const handleDelete = async (row: Employee) => {
+    if (!row.ID_EMP) return;
+    if (!window.confirm(`Delete employee "${row.NAME}"?`)) return;
+    
+    try {
+      await api.delete(`/employees/${row.ID_EMP}`);
+      showSnackbar('Employee deleted successfully!', 'success');
+      await fetchEmployees();
+    } catch (err: any) {
+      const errorMessage = err?.response?.data?.message || 'Delete failed';
+      showSnackbar(errorMessage, 'error');
+    }
+  };
+
+  const handleExportExcel = () => {
+    if (data.length === 0) {
+      showSnackbar('No data to export', 'info');
+      return;
+    }
+    
+    const headers = [
+      'ID', 'Name', 'Title', 'Email', 'Phone', 'Cost Center', 'Active', 'Salary', 'Contract Start', 'Contract End',
+    ];
+    const rows = data.map((e) => [
+      e.ID_EMP, e.NAME, e.TITLE || '', e.EMAIL || '', e.PHONE || '', e.COST_CENTER || '',
+      e.STATE ? 'Yes' : 'No', e.BASIC_SALARY ?? '', e.CONTRACT_START || '', e.CONTRACT_END || '',
+    ]);
+    const worksheet = XLSX.utils.aoa_to_sheet([headers, ...rows]);
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, worksheet, 'employees');
+    XLSX.writeFile(workbook, 'employees.xlsx');
+    showSnackbar('Export completed!', 'success');
+  };
+
+  const columns = useMemo<MRT_ColumnDef<Employee>[]>(() => [
+    {
+      accessorKey: 'PICTURE_URL',
+      header: '',
+      size: 50,
+      Cell: ({ row }) => <Avatar src={row.original.PICTURE_URL || undefined} alt={row.original.NAME} />,
+      enableColumnActions: false,
+      enableSorting: false,
+    },
+    { accessorKey: 'ID_EMP', header: 'ID', size: 70 },
+    { accessorKey: 'NAME', header: 'Name', size: 220 },
+    { accessorKey: 'TITLE', header: 'Title', size: 160 },
+    { accessorKey: 'EMAIL', header: 'Email', size: 220 },
+    { accessorKey: 'PHONE', header: 'Phone', size: 140 },
+    { accessorKey: 'COST_CENTER', header: 'Cost Center', size: 120 },
+    {
+      accessorKey: 'STATE',
+      header: 'Status',
+      size: 90,
+      Cell: ({ cell }) =>
+        cell.getValue<boolean | null>() ? (
+          <Chip label="Active" color="success" size="small" />
+        ) : (
+          <Chip label="Inactive" color="default" size="small" />
+        ),
+    },
+    {
+      header: 'Actions',
+      id: 'actions',
+      size: 110,
+      Cell: ({ row }) => (
+        <Box sx={{ display: 'flex', gap: 1 }}>
+          <Tooltip title="Edit">
+            <IconButton color="primary" onClick={() => openEdit(row.original)} size="small">
+              <EditIcon fontSize="small" />
+            </IconButton>
+          </Tooltip>
+          <Tooltip title="Delete">
+            <IconButton color="error" onClick={() => handleDelete(row.original)} size="small">
+              <DeleteOutlineIcon fontSize="small" />
+            </IconButton>
+          </Tooltip>
+        </Box>
+      ),
+    },
+  ], []);
+
+  const table = useMaterialReactTable({
+    columns,
+    data,
+    state: { isLoading: loading },
+    enableDensityToggle: true,
+    initialState: {
+      pagination: { pageIndex: 0, pageSize: 25 },
+      density: 'compact',
+    },
+    // Custom no data message
+    muiTableBodyProps: {
+      sx: {
+        '& .MuiTableRow-root:only-child .MuiTableCell-root': {
+          textAlign: 'center',
+          color: 'text.secondary',
+          fontStyle: 'italic',
+        },
+      },
+    },
+  });
+
+  const setField = (k: keyof Employee, v: any) => setForm((f) => ({ ...f, [k]: v }));
+  const onPhotoChange = (f: File | null) => {
+    setPhotoFile(f);
+    setPhotoPreview(f ? URL.createObjectURL(f) : null);
+  };
+
+  // Custom empty state component
+  const EmptyState = () => (
+    <Paper 
+      elevation={0} 
+      sx={{ 
+        p: 6, 
+        textAlign: 'center', 
+        bgcolor: 'grey.50', 
+        border: '2px dashed',
+        borderColor: 'grey.300',
+        borderRadius: 2
+      }}
+    >
+      <PersonAddIcon sx={{ fontSize: 64, color: 'grey.400', mb: 2 }} />
+      <Typography variant="h6" color="text.secondary" gutterBottom>
+        No employees found
+      </Typography>
+      <Typography variant="body2" color="text.secondary" sx={{ mb: 3 }}>
+        {search || stateFilter !== 'all' || costCenter 
+          ? "Try adjusting your search filters or add a new employee."
+          : "Get started by adding your first employee to the system."
+        }
+      </Typography>
+      <Button 
+        variant="contained" 
+        startIcon={<AddIcon />}
+        onClick={openAdd}
+        sx={{ borderRadius: 3 }}
+      >
+        Add First Employee
+      </Button>
+    </Paper>
+  );
+
   return (
-    <Box sx={{ p: 2 }}>
-      <Box sx={{ display: { xs: "block", md: "grid" }, gridTemplateColumns: { md: "1fr 2fr" }, gap: 2 }}>
-        {/* Left Panel - Employee List */}
-        <Card sx={{ height: "fit-content", display: "flex", flexDirection: "column" }}>
-          <CardHeader
-            title={
-              <Stack direction="row" alignItems="center" gap={1}>
-                <Typography variant="h6">Employees ({employees.length})</Typography>
-                {listLoading && <LinearProgress sx={{ flex: 1 }} />}
-              </Stack>
-            }
-            action={
-              <Stack direction="row" gap={1}>
-                <Tooltip title="Create Employee">
-                  <IconButton onClick={() => setCreateOpen(true)} color="primary">
-                    <AddIcon />
-                  </IconButton>
-                </Tooltip>
-                <Tooltip title="Refresh">
-                  <IconButton onClick={refresh}>
-                    <RefreshIcon />
-                  </IconButton>
-                </Tooltip>
-              </Stack>
-            }
+    <Box p={0.5}>
+      <Box sx={{ display: 'flex', justifyContent: 'space-between', mb: 2, alignItems: 'center' }}>
+        <Typography variant="h5" sx={{ fontWeight: 'bold' }}>
+          Employees
+        </Typography>
+        <Stack direction="row" spacing={1}>
+          <TextField
+            size="small"
+            placeholder="Search name/email/phone/title"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            onKeyDown={(e) => e.key === 'Enter' && fetchEmployees()}
           />
-          <CardContent>
-            <TextField
-              size="small"
-              fullWidth
-              placeholder="Search by name, email, phone..."
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && refresh()}
-              InputProps={{
-                startAdornment: <InputAdornment position="start"><SearchIcon /></InputAdornment>,
-                endAdornment: (
-                  <InputAdornment position="end">
-                    <Button onClick={refresh} size="small">Search</Button>
-                  </InputAdornment>
-                ),
-              }}
-            />
-
-            <Stack direction="row" gap={1} sx={{ my: 1, flexWrap: "wrap" }}>
-              {["all","active","inactive"].map(s => (
-                <Chip 
-                  key={s} 
-                  label={s.charAt(0).toUpperCase() + s.slice(1)}
-                  color={statusFilter === s as any ? "primary" : "default"}
-                  onClick={() => { 
-                    setStatusFilter(s as any); 
-                    list({ state: s, cost_center: costCenter || undefined, search: query || undefined }); 
-                  }}
-                />
-              ))}
-            </Stack>
-
-            <FormControl fullWidth size="small" sx={{ mt: 1 }}>
-              <Select
-                displayEmpty 
-                value={costCenter}
-                onChange={(e) => { 
-                  const v = String(e.target.value); 
-                  setCostCenter(v); 
-                  list({ state: statusFilter, cost_center: v || undefined, search: query || undefined }); 
-                }}
-              >
-                <MenuItem value=""><em>All cost centers</em></MenuItem>
-                <MenuItem value="FIN">Finance</MenuItem>
-                <MenuItem value="HR">Human Resources</MenuItem>
-                <MenuItem value="OPS">Operations</MenuItem>
-                <MenuItem value="SALES">Sales</MenuItem>
-                <MenuItem value="IT">Information Technology</MenuItem>
-              </Select>
-              <FormHelperText>Filter by cost center</FormHelperText>
-            </FormControl>
-
-            <Divider sx={{ my: 2 }} />
-
-            <Box sx={{ maxHeight: 480, overflow: "auto", pr: 1 }}>
-              {(employees ?? []).map((e) => (
-                <Box 
-                  key={e.ID_EMP} 
-                  onClick={() => loadById(e.ID_EMP!)}
-                  sx={{ 
-                    display: "flex", 
-                    alignItems: "center", 
-                    gap: 1.5, 
-                    p: 1, 
-                    borderRadius: 1.5, 
-                    cursor: "pointer", 
-                    backgroundColor: selected?.ID_EMP === e.ID_EMP ? "action.selected" : "transparent",
-                    "&:hover": { backgroundColor: "action.hover" }, 
-                    mb: 0.5 
-                  }}
-                >
-                  <Avatar src={e.PICTURE_URL || undefined} sx={{ width: 40, height: 40 }}>
-                    {e.NAME?.[0]?.toUpperCase()}
-                  </Avatar>
-                  <Box sx={{ minWidth: 0, flex: 1 }}>
-                    <Typography noWrap fontWeight={600}>{e.NAME || 'Unnamed Employee'}</Typography>
-                    <Typography variant="body2" color="text.secondary" noWrap>
-                      {e.TITLE || e.EMAIL || e.EMPLOYER_REF || 'No details'}
-                    </Typography>
-                  </Box>
-                  <Box sx={{ ml: "auto" }}>
-                    <Chip 
-                      size="small" 
-                      label={e.STATE ? "Active" : "Inactive"} 
-                      color={e.STATE ? "success" : "default"} 
-                    />
-                  </Box>
-                </Box>
-              ))}
-              {employees.length === 0 && !listLoading && (
-                <Typography color="text.secondary" textAlign="center" sx={{ py: 2 }}>
-                  No employees found
-                </Typography>
-              )}
-            </Box>
-          </CardContent>
-        </Card>
-
-        {/* Right Panel - Employee Details */}
-        <Card>
-          <CardHeader
-            title={
-              <Stack direction="row" alignItems="center" gap={2}>
-                <Avatar src={selected?.PICTURE_URL || undefined} sx={{ width: 56, height: 56 }}>
-                  {selected?.NAME?.[0]?.toUpperCase()}
-                </Avatar>
-                <Box>
-                  <Typography variant="h6">{selected?.NAME || "Select an employee"}</Typography>
-                  {selected && (
-                    <Typography variant="body2" color="text.secondary">
-                      {selected.TITLE} • {selected.EMPLOYER_REF}
-                    </Typography>
-                  )}
-                </Box>
-              </Stack>
-            }
-            action={selected && (
-              <Stack direction="row" gap={1}>
-                <Tooltip title="Upload picture">
-                  <span>
-                    <IconButton onClick={() => setPicOpen(true)} disabled={!selected}>
-                      <CloudUploadIcon />
-                    </IconButton>
-                  </span>
-                </Tooltip>
-                <Tooltip title={selected?.STATE ? "Deactivate" : "Activate"}>
-                  <IconButton onClick={() => activate(!selected?.STATE)}>
-                    {selected?.STATE ? <PersonOffIcon /> : <PersonIcon />}
-                  </IconButton>
-                </Tooltip>
-                <Tooltip title={edit ? "Cancel edit" : "Edit"}>
-                  <IconButton onClick={() => setEdit(v => !v)}>
-                    {edit ? <CancelIcon /> : <EditIcon />}
-                  </IconButton>
-                </Tooltip>
-                <Tooltip title="Delete employee">
-                  <IconButton 
-                    onClick={() => {
-                      setEmployeeToDelete(selected);
-                      setDeleteOpen(true);
-                    }}
-                    color="error"
-                  >
-                    <DeleteIcon />
-                  </IconButton>
-                </Tooltip>
-              </Stack>
-            )}
+          <FormControl size="small" sx={{ minWidth: 120 }}>
+            <InputLabel id="state-label">State</InputLabel>
+            <Select
+              labelId="state-label"
+              label="State"
+              value={stateFilter}
+              onChange={(e) => setStateFilter(e.target.value as any)}
+            >
+              <MenuItem value="all">All</MenuItem>
+              <MenuItem value="active">Active</MenuItem>
+              <MenuItem value="inactive">Inactive</MenuItem>
+            </Select>
+          </FormControl>
+          <TextField
+            size="small"
+            placeholder="Cost Center"
+            value={costCenter}
+            onChange={(e) => setCostCenter(e.target.value)}
           />
-          {loading && <LinearProgress />}
-
-          <CardContent>
-            {!selected ? (
-              <Box textAlign="center" sx={{ py: 4 }}>
-                <PersonIcon sx={{ fontSize: 64, color: 'text.secondary', mb: 2 }} />
-                <Typography color="text.secondary" variant="h6">
-                  Select an employee from the list to view their profile
-                </Typography>
-                <Typography color="text.secondary" variant="body2" sx={{ mt: 1 }}>
-                  Or create a new employee to get started
-                </Typography>
-              </Box>
-            ) : (
-              <>
-                <Tabs value={tab} onChange={(_, v) => setTab(v)} sx={{ mb: 2 }} variant="scrollable">
-                  <Tab label="Basic Info" />
-                  <Tab label="Contact" />
-                  <Tab label="Personal" />
-                  <Tab label="Contract" />
-                  <Tab label="Financial" />
-                  <Tab label="Job Details" />
-                  <Tab label="Documents" />
-                  <Tab label="Allowances" />
-                  <Tab label="Schedule" />
-                </Tabs>
-
-                {tab === 0 && <SectionBasic selected={selected} setSelected={setSelected} edit={edit} onSave={save} />}
-                {tab === 1 && <SectionContact selected={selected} setSelected={setSelected} edit={edit} onSave={save} />}
-                {tab === 2 && <SectionPersonal selected={selected} setSelected={setSelected} edit={edit} onSave={save} />}
-                {tab === 3 && <SectionContract selected={selected} setSelected={setSelected} edit={edit} onSave={save} onRenew={renewContract} />}
-                {tab === 4 && <SectionFinancial selected={selected} setSelected={setSelected} edit={edit} onSave={save} />}
-                {tab === 5 && <SectionJob selected={selected} setSelected={setSelected} edit={edit} onSave={save} />}
-                {tab === 6 && <SectionDocuments selected={selected} setSelected={setSelected} edit={edit} onSave={save} />}
-                {tab === 7 && <SectionAllowances selected={selected} setSelected={setSelected} edit={edit} onSave={save} />}
-                {tab === 8 && <SectionWorkSchedule selected={selected} setSelected={setSelected} edit={edit} onSave={save} />}
-              </>
-            )}
-          </CardContent>
-        </Card>
+          <Tooltip title="Refresh">
+            <IconButton onClick={fetchEmployees}>
+              <RefreshIcon />
+            </IconButton>
+          </Tooltip>
+          <Button
+            variant="outlined"
+            color="secondary"
+            startIcon={<ImportExportIcon />}
+            onClick={handleExportExcel}
+            sx={{ borderRadius: 3, textTransform: 'none', fontWeight: 'bold', px: 2 }}
+          >
+            Export
+          </Button>
+          <Button
+            variant="outlined"
+            color="primary"
+            startIcon={<AddIcon />}
+            onClick={openAdd}
+            sx={{ borderRadius: 3, textTransform: 'none', fontWeight: 'bold', px: 2 }}
+          >
+            New Employee
+          </Button>
+        </Stack>
       </Box>
 
-      {/* Upload picture dialog */}
-      <Dialog open={picOpen} onClose={() => setPicOpen(false)} fullWidth maxWidth="xs">
-        <DialogTitle>Upload Profile Picture</DialogTitle>
+      {/* Show custom empty state when no data and not loading */}
+      {!loading && data.length === 0 && !error ? (
+        <EmptyState />
+      ) : (
+        <MaterialReactTable table={table} />
+      )}
+
+      <Dialog open={open} onClose={resetDialog} maxWidth="md" fullWidth>
+        <DialogTitle>
+          {isEdit ? 'Edit Employee' : 'New Employee'}
+          <Divider sx={{ mt: 1 }} />
+        </DialogTitle>
+
         <DialogContent>
-          <Button 
-            component="label" 
-            startIcon={<FileUploadIcon />}
-            variant="outlined"
-            fullWidth
-            sx={{ mb: 2 }}
-          >
-            Select Image File
-            <input 
-              type="file" 
-              hidden 
-              accept="image/*" 
-              onChange={(e) => setPicFile(e.target.files?.[0] || null)} 
-            />
-          </Button>
-          {picFile && (
-            <Box sx={{ mt: 1 }}>
-              <Typography variant="body2" color="text.secondary">
-                Selected: {picFile.name}
-              </Typography>
-              <Typography variant="body2" color="text.secondary">
-                Size: {(picFile.size / 1024).toFixed(1)} KB
-              </Typography>
+          <Stepper activeStep={step} alternativeLabel sx={{ mb: 3 }}>
+            {steps.map((label) => (
+              <Step key={label}>
+                <StepLabel>{label}</StepLabel>
+              </Step>
+            ))}
+          </Stepper>
+
+          {step === 0 && (
+            <Box sx={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 2 }}>
+              <TextField label="Name *" value={form.NAME} onChange={(e) => setField('NAME', e.target.value)}
+                error={!!errors.NAME} helperText={errors.NAME} />
+              <TextField label="Title" value={form.TITLE || ''} onChange={(e) => setField('TITLE', e.target.value)} />
+              <TextField label="Email" value={form.EMAIL || ''} onChange={(e) => setField('EMAIL', e.target.value)}
+                error={!!errors.EMAIL} helperText={errors.EMAIL} />
+              <TextField label="Phone" value={form.PHONE || ''} onChange={(e) => setField('PHONE', e.target.value)} />
+              <TextField label="Cost Center" value={form.COST_CENTER || ''} onChange={(e) => setField('COST_CENTER', e.target.value)} />
+              <FormControlLabel control={<Switch checked={!!form.STATE} onChange={(e) => setField('STATE', e.target.checked)} />} label="Active" />
+              <Box sx={{ gridColumn: '1 / -1', display: 'flex', alignItems: 'center', gap: 2, mt: 1 }}>
+                <Avatar src={photoPreview || form.PICTURE_URL || undefined} sx={{ width: 64, height: 64 }} />
+                <Button component="label" variant="outlined" disabled>
+                  {photoFile ? 'Change Photo' : 'Upload Photo'}
+                  <input hidden type="file" accept="image/*" onChange={(e) => onPhotoChange(e.target.files?.[0] || null)} />
+                </Button>
+                <Typography variant="caption" color="text.secondary">
+                  (Photo upload temporarily disabled)
+                </Typography>
+                {photoFile && <Button color="secondary" onClick={() => onPhotoChange(null)}>Remove</Button>}
+              </Box>
+            </Box>
+          )}
+
+          {step === 1 && (
+            <Box sx={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 2 }}>
+              <TextField label="Contract Start" type="date" InputLabelProps={{ shrink: true }}
+                value={form.CONTRACT_START || ''} onChange={(e) => setField('CONTRACT_START', e.target.value)} />
+              <TextField label="Contract End" type="date" InputLabelProps={{ shrink: true }}
+                value={form.CONTRACT_END || ''} onChange={(e) => setField('CONTRACT_END', e.target.value)} />
+              <TextField label="Basic Salary" type="number" value={form.BASIC_SALARY ?? ''}
+                onChange={(e) => setField('BASIC_SALARY', e.target.value === '' ? null : Number(e.target.value))}
+                error={!!errors.BASIC_SALARY} helperText={errors.BASIC_SALARY} />
+              <TextField label="Type of Recruitment" value={form.TYPE_OF_RECRUITMENT || ''} onChange={(e) => setField('TYPE_OF_RECRUITMENT', e.target.value)} />
+              <FormControlLabel control={<Switch checked={!!form.FINGERPRINT_NEEDED}
+                onChange={(e) => setField('FINGERPRINT_NEEDED', e.target.checked)} />} label="Fingerprint Needed" />
+              <TextField label="Address" value={form.ADDRESS || ''} onChange={(e) => setField('ADDRESS', e.target.value)} />
+            </Box>
+          )}
+
+          {step === 2 && (
+            <Box sx={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 2 }}>
+              <TextField label="Nationality" value={form.NATIONALITY || ''} onChange={(e) => setField('NATIONALITY', e.target.value)} />
+              <FormControl>
+                <InputLabel id="gender-label">Gender</InputLabel>
+                <Select labelId="gender-label" label="Gender" value={form.GENDER || ''} onChange={(e) => setField('GENDER', e.target.value)}>
+                  <MenuItem value="">—</MenuItem>
+                  <MenuItem value="Male">Male</MenuItem>
+                  <MenuItem value="Female">Female</MenuItem>
+                  <MenuItem value="Other">Other</MenuItem>
+                </Select>
+              </FormControl>
+              <TextField label="Date of Birth" type="date" InputLabelProps={{ shrink: true }}
+                value={form.DATE_OF_BIRTH || ''} onChange={(e) => setField('DATE_OF_BIRTH', e.target.value)} />
+              <TextField label="Marital Status" value={form.MARITAL_STATUS || ''} onChange={(e) => setField('MARITAL_STATUS', e.target.value)} />
+              <TextField label="Children" type="number" value={form.NUM_OF_CHILDREN ?? ''}
+                onChange={(e) => setField('NUM_OF_CHILDREN', e.target.value === '' ? null : Number(e.target.value))}
+                error={!!errors.NUM_OF_CHILDREN} helperText={errors.NUM_OF_CHILDREN} />
+              <TextField label="Place of Birth" value={form.PLACE_OF_BIRTH || ''} onChange={(e) => setField('PLACE_OF_BIRTH', e.target.value)} />
+              <TextField label="Blood Type" value={form.BLOOD_TYPE || ''} onChange={(e) => setField('BLOOD_TYPE', e.target.value)} />
+              <FormControlLabel control={<Switch checked={!!form.IS_FOREINGHT} onChange={(e) => setField('IS_FOREINGHT', e.target.checked)} />} label="Is Foreigner" />
             </Box>
           )}
         </DialogContent>
-        <DialogActions>
-          <Button onClick={() => setPicOpen(false)}>Cancel</Button>
-          <Button 
-            onClick={uploadPicture} 
-            variant="contained" 
-            disabled={!picFile} 
-            startIcon={<CloudUploadIcon />}
-          >
-            Upload
-          </Button>
-        </DialogActions>
-      </Dialog>
-
-      {/* Delete confirmation dialog */}
-      <Dialog open={deleteOpen} onClose={() => setDeleteOpen(false)} maxWidth="xs">
-        <DialogTitle>Delete Employee</DialogTitle>
-        <DialogContent>
-          <Typography>
-            Are you sure you want to delete employee "{employeeToDelete?.NAME}"? 
-            This action cannot be undone.
-          </Typography>
-        </DialogContent>
-        <DialogActions>
-          <Button onClick={() => setDeleteOpen(false)}>Cancel</Button>
-          <Button onClick={deleteEmployee} color="error" variant="contained">
-            Delete
-          </Button>
-        </DialogActions>
-      </Dialog>
-
-      {/* Employee creation dialog */}
-      <Dialog open={createOpen} onClose={() => setCreateOpen(false)} fullWidth maxWidth="sm">
-        <DialogTitle>New Employee</DialogTitle>
-        <DialogContent dividers>
-          <Grid container spacing={2} sx={{ mt: 0 }}>
-            <Grid container spacing={2}>
-              <TextField
-                label="Full Name *"
-                value={newEmp.NAME}
-                onChange={(e) => setNewEmp(s => ({ ...s, NAME: e.target.value }))}
-                error={!!createErrors.NAME}
-                helperText={createErrors.NAME}
-                size="small"
-                fullWidth
-              />
-            </Grid>
-            <Grid container spacing={2}>
-              <TextField
-                label="Employee Reference"
-                value={newEmp.EMPLOYER_REF ?? ""}
-                onChange={(e) => setNewEmp(s => ({ ...s, EMPLOYER_REF: e.target.value || null }))}
-                size="small"
-                fullWidth
-              />
-            </Grid>
-
-            <Grid container spacing={2}>
-              <TextField
-                label="Title"
-                value={newEmp.TITLE ?? ""}
-                onChange={(e) => setNewEmp(s => ({ ...s, TITLE: e.target.value || null }))}
-                size="small"
-                fullWidth
-              />
-            </Grid>
-            <Grid container spacing={2}>
-              <FormControl size="small" fullWidth>
-                <Select
-                  displayEmpty
-                  value={newEmp.TYPE_OF_RECRUITMENT ?? ""}
-                  onChange={(e) =>
-                    setNewEmp(s => ({ ...s, TYPE_OF_RECRUITMENT: String(e.target.value) || null }))
-                  }
-                >
-                  <MenuItem value=""><em>Recruitment Type</em></MenuItem>
-                  <MenuItem value="Direct">Direct Hire</MenuItem>
-                  <MenuItem value="Contract">Contract</MenuItem>
-                  <MenuItem value="Temporary">Temporary</MenuItem>
-                  <MenuItem value="Internship">Internship</MenuItem>
-                </Select>
-                <FormHelperText>Type of recruitment</FormHelperText>
-              </FormControl>
-            </Grid>
-
-            <Grid container spacing={2}>
-              <TextField
-                label="Email"
-                type="email"
-                value={newEmp.EMAIL ?? ""}
-                onChange={(e) => setNewEmp(s => ({ ...s, EMAIL: e.target.value || null }))}
-                size="small"
-                fullWidth
-              />
-            </Grid>
-            <Grid container spacing={2}>
-              <TextField
-                label="Phone"
-                type="tel"
-                value={newEmp.PHONE ?? ""}
-                onChange={(e) => setNewEmp(s => ({ ...s, PHONE: e.target.value || null }))}
-                size="small"
-                fullWidth
-              />
-            </Grid>
-
-            <Grid container spacing={2}>
-              <FormControl size="small" fullWidth>
-                <Select
-                  displayEmpty
-                  value={newEmp.COST_CENTER ?? ""}
-                  onChange={(e) => setNewEmp(s => ({ ...s, COST_CENTER: String(e.target.value) || null }))}
-                >
-                  <MenuItem value=""><em>Cost Center</em></MenuItem>
-                  <MenuItem value="FIN">Finance</MenuItem>
-                  <MenuItem value="HR">Human Resources</MenuItem>
-                  <MenuItem value="OPS">Operations</MenuItem>
-                  <MenuItem value="SALES">Sales</MenuItem>
-                  <MenuItem value="IT">Information Technology</MenuItem>
-                </Select>
-                <FormHelperText>Assign cost center</FormHelperText>
-              </FormControl>
-            </Grid>
-            <Grid container spacing={2}>
-              <TextField
-                label="Contract Start"
-                type="date"
-                value={newEmp.CONTRACT_START ?? ""}
-                onChange={(e) => setNewEmp(s => ({ ...s, CONTRACT_START: e.target.value || null }))}
-                size="small"
-                fullWidth
-                InputLabelProps={{ shrink: true }}
-              />
-            </Grid>
-            <Grid container spacing={2}>
-              <TextField
-                label="Contract End"
-                type="date"
-                value={newEmp.CONTRACT_END ?? ""}
-                onChange={(e) => setNewEmp(s => ({ ...s, CONTRACT_END: e.target.value || null }))}
-                size="small"
-                fullWidth
-                InputLabelProps={{ shrink: true }}
-              />
-            </Grid>
-
-            <Grid container spacing={2}>
-              <TextField
-                label="Basic Salary"
-                type="number"
-                value={newEmp.BASIC_SALARY ?? ""}
-                onChange={(e) => {
-                  const v = e.target.value.trim();
-                  setNewEmp(s => ({ ...s, BASIC_SALARY: v === "" ? null : Number(v) }));
-                }}
-                size="small"
-                fullWidth
-              />
-            </Grid>
-            <Grid container spacing={2}>
-              <TextField
-                label="Nationality"
-                value={newEmp.NATIONALITY ?? ""}
-                onChange={(e) => setNewEmp(s => ({ ...s, NATIONALITY: e.target.value || null }))}
-                size="small"
-                fullWidth
-              />
-            </Grid>
-            <Grid container spacing={2}>
-              <FormControl size="small" fullWidth>
-                <Select
-                  displayEmpty
-                  value={newEmp.MARITAL_STATUS ?? ""}
-                  onChange={(e) => setNewEmp(s => ({ ...s, MARITAL_STATUS: String(e.target.value) || null }))}
-                >
-                  <MenuItem value=""><em>Marital Status</em></MenuItem>
-                  <MenuItem value="Single">Single</MenuItem>
-                  <MenuItem value="Married">Married</MenuItem>
-                  <MenuItem value="Divorced">Divorced</MenuItem>
-                  <MenuItem value="Widowed">Widowed</MenuItem>
-                </Select>
-                <FormHelperText>Marital status</FormHelperText>
-              </FormControl>
-            </Grid>
-
-            <Grid container spacing={2}>
-              <TextField
-                label="Degree"
-                value={newEmp.DEGREE ?? ""}
-                onChange={(e) => setNewEmp(s => ({ ...s, DEGREE: e.target.value || null }))}
-                size="small"
-                fullWidth
-              />
-            </Grid>
-
-            <Grid container spacing={2}>
-              <FormControlLabel
-                control={
-                  <Switch
-                    checked={!!newEmp.STATE}
-                    onChange={(e) => setNewEmp(s => ({ ...s, STATE: e.target.checked }))}
-                  />
-                }
-                label="Active"
-              />
-            </Grid>
-          </Grid>
-        </DialogContent>
 
         <DialogActions>
-          <Button onClick={() => setCreateOpen(false)} startIcon={<CancelIcon />}>Cancel</Button>
-          <Button
-            variant="contained"
-            startIcon={<AddIcon />}
-            disabled={creating}
-            onClick={async () => {
-              // client-side minimal validation (NAME required)
-              const errs: Record<string,string> = {};
-              if (!newEmp.NAME.trim()) errs.NAME = "Name is required";
-              setCreateErrors(errs);
-              if (Object.keys(errs).length) return;
-
-              setCreating(true);
-              try {
-                // POST /api/hr/employees  (baseURL already set)
-                const res = await client.post("/", newEmp);
-
-                setSnack({ open: true, msg: "Employee created successfully", severity: "success" });
-                setCreateOpen(false);
-                setNewEmp({
-                  NAME: "",
-                  STATE: true,
-                  TITLE: null,
-                  EMPLOYER_REF: null,
-                  EMAIL: null,
-                  PHONE: null,
-                  COST_CENTER: null,
-                  CONTRACT_START: null,
-                  CONTRACT_END: null,
-                  BASIC_SALARY: null,
-                  NATIONALITY: null,
-                  MARITAL_STATUS: null,
-                  DEGREE: null,
-                  TYPE_OF_RECRUITMENT: null,
-                });
-
-                await refresh();
-                if (res.data?.ID_EMP != null) {
-                  await loadById(res.data.ID_EMP);
-                  setEdit(true); // jump into edit mode on the newly created record
-                }
-              } catch (e) {
-                setSnack({ open: true, msg: toMsg(e), severity: "error" });
-              } finally {
-                setCreating(false);
-              }
-            }}
-          >
-            Create
-          </Button>
+          <Button onClick={resetDialog} color="secondary">Cancel</Button>
+          {step > 0 && <Button onClick={handleBack}>Back</Button>}
+          {step < steps.length - 1 ? (
+            <Button onClick={handleNext} variant="contained">Next</Button>
+          ) : (
+            <Button onClick={handleSave} variant="contained" color="primary">
+              {isEdit ? 'Save Changes' : 'Create Employee'}
+            </Button>
+          )}
         </DialogActions>
       </Dialog>
-
 
       {/* Snackbar for notifications */}
-      <Snackbar 
-        open={snack.open} 
-        autoHideDuration={6000} 
-        onClose={() => setSnack(prev => ({ ...prev, open: false }))}
+      <Snackbar
+        open={snackbar.open}
+        autoHideDuration={4000}
+        onClose={() => setSnackbar(prev => ({ ...prev, open: false }))}
         anchorOrigin={{ vertical: 'bottom', horizontal: 'right' }}
       >
         <Alert 
-          onClose={() => setSnack(prev => ({ ...prev, open: false }))} 
-          severity={snack.severity} 
-          sx={{ width: '100%' }}
+          severity={snackbar.severity} 
+          onClose={() => setSnackbar(prev => ({ ...prev, open: false }))}
+          variant="filled"
         >
-          {snack.msg}
+          {snackbar.message}
         </Alert>
       </Snackbar>
     </Box>
   );
-}
+};
 
-// Helper Components
-function Field({ 
-  label, 
-  value, 
-  onChange, 
-  disabled, 
-  type = "text",
-  multiline = false,
-  rows = 1
-}: { 
-  label: string; 
-  value: any; 
-  onChange: (v: any) => void; 
-  disabled?: boolean; 
-  type?: React.InputHTMLAttributes<HTMLInputElement>["type"];
-  multiline?: boolean;
-  rows?: number;
-}) {
-  return (
-    <TextField 
-      label={label} 
-      value={value ?? ""} 
-      onChange={(e) => onChange(e.target.value)} 
-      disabled={disabled} 
-      type={type} 
-      size="small" 
-      fullWidth 
-      multiline={multiline}
-      rows={rows}
-    />
-  );
-}
-
-function SectionWrapper({ 
-  children, 
-  onSave, 
-  extra, 
-  edit 
-}: { 
-  children: React.ReactNode; 
-  onSave?: () => void; 
-  extra?: React.ReactNode; 
-  edit?: boolean;
-}) {
-  return (
-    <Box>
-      <Grid container spacing={2}>
-        {children}
-      </Grid>
-      {edit && (
-        <Stack direction="row" gap={1} justifyContent="flex-end" sx={{ mt: 3 }}>
-          {extra}
-          {onSave && (
-            <Button 
-              onClick={onSave} 
-              variant="contained" 
-              startIcon={<SaveIcon />}
-            >
-              Save Changes
-            </Button>
-          )}
-        </Stack>
-      )}
-    </Box>
-  );
-}
-
-// Section Components
-function SectionBasic({ selected, setSelected, edit, onSave }: any) {
-  return (
-    <SectionWrapper onSave={edit ? onSave : undefined} edit={edit}>
-      <Grid container spacing={2}>
-        <Field 
-          label="Full Name" 
-          value={selected.NAME} 
-          disabled={!edit} 
-          onChange={(v) => setSelected({ ...selected, NAME: v })} 
-        />
-      </Grid>
-      <Grid container spacing={2}>
-        <Field 
-          label="English Name" 
-          value={selected.NAME_ENGLISH} 
-          disabled={!edit} 
-          onChange={(v) => setSelected({ ...selected, NAME_ENGLISH: v })} 
-        />
-      </Grid>
-      <Grid container spacing={2}>
-        <Field 
-          label="Employee Reference" 
-          value={selected.EMPLOYER_REF} 
-          disabled={!edit} 
-          onChange={(v) => setSelected({ ...selected, EMPLOYER_REF: v })} 
-        />
-      </Grid>
-      <Grid container spacing={2}>
-        <FormControl fullWidth size="small" disabled={!edit}>
-          <Select 
-            value={selected.GENDER || ""} 
-            onChange={(e) => setSelected({ ...selected, GENDER: String(e.target.value) })} 
-            displayEmpty
-          >
-            <MenuItem value=""><em>Select Gender</em></MenuItem>
-            <MenuItem value="Male">Male</MenuItem>
-            <MenuItem value="Female">Female</MenuItem>
-            <MenuItem value="Other">Other</MenuItem>
-          </Select>
-        </FormControl>
-      </Grid>
-      <Grid container spacing={2}>
-        <Field 
-          label="Address" 
-          value={selected.ADDRESS} 
-          disabled={!edit} 
-          onChange={(v) => setSelected({ ...selected, ADDRESS: v })} 
-          multiline
-          rows={2}
-        />
-      </Grid>
-    </SectionWrapper>
-  );
-}
-
-function SectionContact({ selected, setSelected, edit, onSave }: any) {
-  return (
-    <SectionWrapper onSave={edit ? onSave : undefined} edit={edit}>
-      <Grid container spacing={2}>
-        <Field 
-          label="Email" 
-          value={selected.EMAIL} 
-          disabled={!edit} 
-          onChange={(v) => setSelected({ ...selected, EMAIL: v })}
-          type="email" 
-        />
-      </Grid>
-      <Grid container spacing={2}>
-        <Field 
-          label="Phone" 
-          value={selected.PHONE} 
-          disabled={!edit} 
-          onChange={(v) => setSelected({ ...selected, PHONE: v })}
-          type="tel" 
-        />
-      </Grid>
-      <Grid container spacing={2}>
-        <Field 
-          label="Comments" 
-          value={selected.COMMENT} 
-          disabled={!edit} 
-          onChange={(v) => setSelected({ ...selected, COMMENT: v })}
-          multiline
-          rows={3}
-        />
-      </Grid>
-    </SectionWrapper>
-  );
-}
-
-function SectionPersonal({ selected, setSelected, edit, onSave }: any) {
-  return (
-    <SectionWrapper onSave={edit ? onSave : undefined} edit={edit}>
-      <Grid container spacing={2}>
-        <Field 
-          label="Date of Birth" 
-          type="date" 
-          value={selected.DATE_OF_BIRTH} 
-          disabled={!edit} 
-          onChange={(v) => setSelected({ ...selected, DATE_OF_BIRTH: v })} 
-        />
-      </Grid>
-      <Grid container spacing={2}>
-        <Field 
-          label="Place of Birth" 
-          value={selected.PLACE_OF_BIRTH} 
-          disabled={!edit} 
-          onChange={(v) => setSelected({ ...selected, PLACE_OF_BIRTH: v })} 
-        />
-      </Grid>
-      <Grid container spacing={2}>
-        <Field 
-          label="Nationality" 
-          value={selected.NATIONALITY} 
-          disabled={!edit} 
-          onChange={(v) => setSelected({ ...selected, NATIONALITY: v })} 
-        />
-      </Grid>
-      <Grid container spacing={2}>
-        <FormControl fullWidth size="small" disabled={!edit}>
-          <Select 
-            value={selected.MARITAL_STATUS || ""} 
-            onChange={(e) => setSelected({ ...selected, MARITAL_STATUS: String(e.target.value) })} 
-            displayEmpty
-          >
-            <MenuItem value=""><em>Marital Status</em></MenuItem>
-            <MenuItem value="Single">Single</MenuItem>
-            <MenuItem value="Married">Married</MenuItem>
-            <MenuItem value="Divorced">Divorced</MenuItem>
-            <MenuItem value="Widowed">Widowed</MenuItem>
-          </Select>
-        </FormControl>
-      </Grid>
-      <Grid container spacing={2}>
-        <Field 
-          label="Number of Children" 
-          type="number" 
-          value={selected.NUM_OF_CHILDREN} 
-          disabled={!edit} 
-          onChange={(v) => setSelected({ ...selected, NUM_OF_CHILDREN: Number(v) })} 
-        />
-      </Grid>
-      <Grid container spacing={2}>
-        <Field 
-          label="Blood Type" 
-          value={selected.BLOOD_TYPE} 
-          disabled={!edit} 
-          onChange={(v) => setSelected({ ...selected, BLOOD_TYPE: v })} 
-        />
-      </Grid>
-      <Grid container spacing={2}>
-        <FormControlLabel
-          control={
-            <Switch 
-              checked={selected.IS_FOREINGHT || false} 
-              onChange={(e) => setSelected({ ...selected, IS_FOREINGHT: e.target.checked })}
-              disabled={!edit}
-            />
-          }
-          label="Foreign Employee"
-        />
-      </Grid>
-    </SectionWrapper>
-  );
-}
-
-function SectionContract({ selected, setSelected, edit, onSave, onRenew }: any) {
-  return (
-    <SectionWrapper onSave={edit ? onSave : undefined} edit={edit} extra={
-      <Button onClick={onRenew} variant="outlined">
-        Renew Contract
-      </Button>
-    }>
-      <Grid container spacing={2}>
-        <Field 
-          label="Contract Start Date" 
-          type="date" 
-          value={selected.CONTRACT_START} 
-          disabled={!edit} 
-          onChange={(v) => setSelected({ ...selected, CONTRACT_START: v })} 
-        />
-      </Grid>
-      <Grid container spacing={2}>
-        <Field 
-          label="Contract End Date" 
-          type="date" 
-          value={selected.CONTRACT_END} 
-          disabled={!edit} 
-          onChange={(v) => setSelected({ ...selected, CONTRACT_END: v })} 
-        />
-      </Grid>
-      <Grid container spacing={2}>
-        <Field 
-          label="Renewable Contract Date" 
-          type="date" 
-          value={selected.RENEWABLE_CONTRACT} 
-          disabled={!edit} 
-          onChange={(v) => setSelected({ ...selected, RENEWABLE_CONTRACT: v })} 
-        />
-      </Grid>
-      <Grid container spacing={2}>
-        <FormControl fullWidth size="small" disabled={!edit}>
-          <Select 
-            value={selected.TYPE_OF_RECRUITMENT || ""} 
-            onChange={(e) => setSelected({ ...selected, TYPE_OF_RECRUITMENT: String(e.target.value) })} 
-            displayEmpty
-          >
-            <MenuItem value=""><em>Recruitment Type</em></MenuItem>
-            <MenuItem value="Direct">Direct Hire</MenuItem>
-            <MenuItem value="Contract">Contract</MenuItem>
-            <MenuItem value="Temporary">Temporary</MenuItem>
-            <MenuItem value="Internship">Internship</MenuItem>
-          </Select>
-        </FormControl>
-      </Grid>
-      <Grid container spacing={2}>
-        <FormControlLabel
-          control={
-            <Switch 
-              checked={selected.FINGERPRINT_NEEDED || false} 
-              onChange={(e) => setSelected({ ...selected, FINGERPRINT_NEEDED: e.target.checked })}
-              disabled={!edit}
-            />
-          }
-          label="Fingerprint Required"
-        />
-      </Grid>
-      <Grid container spacing={2}>
-        <FormControlLabel
-          control={
-            <Switch 
-              checked={selected.STATE || false} 
-              onChange={(e) => setSelected({ ...selected, STATE: e.target.checked })}
-              disabled={!edit}
-            />
-          }
-          label="Active Employee"
-        />
-      </Grid>
-    </SectionWrapper>
-  );
-}
-
-function SectionFinancial({ selected, setSelected, edit, onSave }: any) {
-  return (
-    <SectionWrapper onSave={edit ? onSave : undefined} edit={edit}>
-      <Grid container spacing={2}>
-        <Field 
-          label="Basic Salary" 
-          type="number" 
-          value={selected.BASIC_SALARY} 
-          disabled={!edit} 
-          onChange={(v) => setSelected({ ...selected, BASIC_SALARY: Number(v) || 0 })} 
-        />
-      </Grid>
-      <Grid container spacing={2}>
-        <Field 
-          label="Cost Center" 
-          value={selected.COST_CENTER} 
-          disabled={!edit} 
-          onChange={(v) => setSelected({ ...selected, COST_CENTER: v })} 
-        />
-      </Grid>
-      <Grid container spacing={2}>
-        <Field 
-          label="Bank" 
-          type="number" 
-          value={selected.BANK} 
-          disabled={!edit} 
-          onChange={(v) => setSelected({ ...selected, BANK: Number(v) || null })} 
-        />
-      </Grid>
-      <Grid container spacing={2}>
-        <Field 
-          label="Account Number" 
-          value={selected.ACCOUNT_NUMBER} 
-          disabled={!edit} 
-          onChange={(v) => setSelected({ ...selected, ACCOUNT_NUMBER: v })} 
-        />
-      </Grid>
-      <Grid container spacing={2}>
-        <Field 
-          label="Investment" 
-          value={selected.INVESTMENT} 
-          disabled={!edit} 
-          onChange={(v) => setSelected({ ...selected, INVESTMENT: v })} 
-        />
-      </Grid>
-      <Grid container spacing={2}>
-        <Field 
-          label="Finance Number" 
-          value={selected.FINANCE_NUM} 
-          disabled={!edit} 
-          onChange={(v) => setSelected({ ...selected, FINANCE_NUM: v })} 
-        />
-      </Grid>
-    </SectionWrapper>
-  );
-}
-
-function SectionJob({ selected, setSelected, edit, onSave }: any) {
-  return (
-    <SectionWrapper onSave={edit ? onSave : undefined} edit={edit}>
-      <Grid container spacing={2}>
-        <Field 
-          label="Job Title" 
-          value={selected.TITLE} 
-          disabled={!edit} 
-          onChange={(v) => setSelected({ ...selected, TITLE: v })} 
-        />
-      </Grid>
-      <Grid container spacing={2}>
-        <Field 
-          label="Degree" 
-          value={selected.DEGREE} 
-          disabled={!edit} 
-          onChange={(v) => setSelected({ ...selected, DEGREE: v })} 
-        />
-      </Grid>
-      <Grid container spacing={2}>
-        <Field 
-          label="Scientific Certificate" 
-          value={selected.SCIENTIFIC_CERT} 
-          disabled={!edit} 
-          onChange={(v) => setSelected({ ...selected, SCIENTIFIC_CERT: v })} 
-        />
-      </Grid>
-      <Grid container spacing={2}>
-        <Field 
-          label="Attached Number" 
-          value={selected.ATTACHED_NUMBER} 
-          disabled={!edit} 
-          onChange={(v) => setSelected({ ...selected, ATTACHED_NUMBER: v })} 
-        />
-      </Grid>
-      <Grid container spacing={2}>
-        <Field 
-          label="Job Aim" 
-          value={selected.JOB_AIM} 
-          disabled={!edit} 
-          onChange={(v) => setSelected({ ...selected, JOB_AIM: v })}
-          multiline
-          rows={3}
-        />
-      </Grid>
-      <Grid container spacing={2}>
-        <Field 
-          label="Job Description" 
-          value={selected.JOB_DESCRIPTION} 
-          disabled={!edit} 
-          onChange={(v) => setSelected({ ...selected, JOB_DESCRIPTION: v })}
-          multiline
-          rows={4}
-        />
-      </Grid>
-      <Grid container spacing={2}>
-        <Field 
-          label="Job Relations" 
-          value={selected.JO_RELATION} 
-          disabled={!edit} 
-          onChange={(v) => setSelected({ ...selected, JO_RELATION: v })}
-          multiline
-          rows={2}
-        />
-      </Grid>
-      <Grid container spacing={2}>
-        <Field 
-          label="Required Degree" 
-          value={selected.REQUEST_DEGREE} 
-          disabled={!edit} 
-          onChange={(v) => setSelected({ ...selected, REQUEST_DEGREE: v })}
-          multiline
-          rows={2}
-        />
-      </Grid>
-      <Grid container spacing={2}>
-        <Field 
-          label="Preferred Languages" 
-          value={selected.PREFERRED_LANG} 
-          disabled={!edit} 
-          onChange={(v) => setSelected({ ...selected, PREFERRED_LANG: v })}
-          multiline
-          rows={2}
-        />
-      </Grid>
-    </SectionWrapper>
-  );
-}
-
-function SectionDocuments({ selected, setSelected, edit, onSave }: any) {
-  return (
-    <SectionWrapper onSave={edit ? onSave : undefined} edit={edit}>
-      <Grid container spacing={2}>
-        <Field 
-          label="National ID Number" 
-          value={selected.NUM_CIN} 
-          disabled={!edit} 
-          onChange={(v) => setSelected({ ...selected, NUM_CIN: v })} 
-        />
-      </Grid>
-      <Grid container spacing={2}>
-        <Field 
-          label="ID Issuing Authority" 
-          value={selected.ISSUING_AUTH} 
-          disabled={!edit} 
-          onChange={(v) => setSelected({ ...selected, ISSUING_AUTH: v })} 
-        />
-      </Grid>
-      <Grid container spacing={2}>
-        <Field 
-          label="National Number" 
-          value={selected.NUM_NATIONAL} 
-          disabled={!edit} 
-          onChange={(v) => setSelected({ ...selected, NUM_NATIONAL: v })} 
-        />
-      </Grid>
-      <Grid container spacing={2}>
-        <Field 
-          label="Driver License Number" 
-          value={selected.DRIVER_LIC_NUM} 
-          disabled={!edit} 
-          onChange={(v) => setSelected({ ...selected, DRIVER_LIC_NUM: v })} 
-        />
-      </Grid>
-      <Grid container spacing={2}>
-        <Field 
-          label="Family Book Number" 
-          value={selected.FAM_BOOK_NUM} 
-          disabled={!edit} 
-          onChange={(v) => setSelected({ ...selected, FAM_BOOK_NUM: v })} 
-        />
-      </Grid>
-      <Grid container spacing={2}>
-        <Field 
-          label="Family Book Issuing Authority" 
-          value={selected.FAM_BOOK_ISSUING_AUTH} 
-          disabled={!edit} 
-          onChange={(v) => setSelected({ ...selected, FAM_BOOK_ISSUING_AUTH: v })} 
-        />
-      </Grid>
-      <Grid container spacing={2}>
-        <Field 
-          label="Passport Number" 
-          value={selected.PASSPORT_NUM} 
-          disabled={!edit} 
-          onChange={(v) => setSelected({ ...selected, PASSPORT_NUM: v })} 
-        />
-      </Grid>
-      <Grid container spacing={2}>
-        <Field 
-          label="Passport Issuing Authority" 
-          value={selected.PASSPORT_ISSUING_AUTH} 
-          disabled={!edit} 
-          onChange={(v) => setSelected({ ...selected, PASSPORT_ISSUING_AUTH: v })} 
-        />
-      </Grid>
-      <Grid container spacing={2}>
-        <Field 
-          label="Insurance Type" 
-          value={selected.TYPE_OF_INSURANCE} 
-          disabled={!edit} 
-          onChange={(v) => setSelected({ ...selected, TYPE_OF_INSURANCE: v })} 
-        />
-      </Grid>
-      <Grid container spacing={2}>
-        <Field 
-          label="Insurance Number" 
-          value={selected.NUM_OF_INSURANCE} 
-          disabled={!edit} 
-          onChange={(v) => setSelected({ ...selected, NUM_OF_INSURANCE: v })} 
-        />
-      </Grid>
-      <Grid container spacing={2}>
-        <Field 
-          label="Medical Comments" 
-          value={selected.MEDICAL_COMMENT} 
-          disabled={!edit} 
-          onChange={(v) => setSelected({ ...selected, MEDICAL_COMMENT: v })}
-          multiline
-          rows={3}
-        />
-      </Grid>
-    </SectionWrapper>
-  );
-}
-
-function SectionAllowances({ selected, setSelected, edit, onSave }: any) {
-  return (
-    <SectionWrapper onSave={edit ? onSave : undefined} edit={edit}>
-      <Grid container spacing={2}>
-        <Field 
-          label="Food Allowance" 
-          type="number" 
-          value={selected.FOOD_ALLOWANCE} 
-          disabled={!edit} 
-          onChange={(v) => setSelected({ ...selected, FOOD_ALLOWANCE: Number(v) || 0 })} 
-        />
-      </Grid>
-      <Grid container spacing={2}>
-        <Field 
-          label="Food" 
-          type="number" 
-          value={selected.FOOD} 
-          disabled={!edit} 
-          onChange={(v) => setSelected({ ...selected, FOOD: Number(v) || 0 })} 
-        />
-      </Grid>
-      <Grid container spacing={2}>
-        <Field 
-          label="Fuel" 
-          type="number" 
-          value={selected.FUEL} 
-          disabled={!edit} 
-          onChange={(v) => setSelected({ ...selected, FUEL: Number(v) || 0 })} 
-        />
-      </Grid>
-      <Grid container spacing={2}>
-        <Field 
-          label="Communication" 
-          type="number" 
-          value={selected.COMMUNICATION} 
-          disabled={!edit} 
-          onChange={(v) => setSelected({ ...selected, COMMUNICATION: Number(v) || 0 })} 
-        />
-      </Grid>
-      <Grid container spacing={2}>
-        <Field 
-          label="Gold Commission" 
-          value={selected.GOLD_COMM} 
-          disabled={!edit} 
-          onChange={(v) => setSelected({ ...selected, GOLD_COMM: v })} 
-        />
-      </Grid>
-      <Grid container spacing={2}>
-        <Field 
-          label="Gold Commission Value" 
-          type="number" 
-          value={selected.GOLD_COMM_VALUE} 
-          disabled={!edit} 
-          onChange={(v) => setSelected({ ...selected, GOLD_COMM_VALUE: Number(v) || 0 })} 
-        />
-      </Grid>
-      <Grid container spacing={2}>
-        <Field 
-          label="Diamond Commission" 
-          type="number" 
-          value={selected.DIAMOND_COMM} 
-          disabled={!edit} 
-          onChange={(v) => setSelected({ ...selected, DIAMOND_COMM: Number(v) || 0 })} 
-        />
-      </Grid>
-      <Grid container spacing={2}>
-        <Field 
-          label="Diamond Commission Type" 
-          value={selected.DIAMOND_COMM_TYPE} 
-          disabled={!edit} 
-          onChange={(v) => setSelected({ ...selected, DIAMOND_COMM_TYPE: v })} 
-        />
-      </Grid>
-      <Grid container spacing={2}>
-        <Field 
-          label="Outfit Number" 
-          value={selected.OUTFIT_NUM} 
-          disabled={!edit} 
-          onChange={(v) => setSelected({ ...selected, OUTFIT_NUM: v })} 
-        />
-      </Grid>
-      <Grid container spacing={2}>
-        <Field 
-          label="Footwear Number" 
-          value={selected.FOOTWEAR_NUM} 
-          disabled={!edit} 
-          onChange={(v) => setSelected({ ...selected, FOOTWEAR_NUM: v })} 
-        />
-      </Grid>
-    </SectionWrapper>
-  );
-}
-
-function SectionWorkSchedule({ selected, setSelected, edit, onSave }: any) {
-  return (
-    <SectionWrapper onSave={edit ? onSave : undefined} edit={edit}>
-      <Grid container spacing={2}>
-        <Field 
-          label="Start Time" 
-          type="time" 
-          value={selected.T_START} 
-          disabled={!edit} 
-          onChange={(v) => setSelected({ ...selected, T_START: v })} 
-        />
-      </Grid>
-      <Grid container spacing={2}>
-        <Field 
-          label="End Time" 
-          type="time" 
-          value={selected.T_END} 
-          disabled={!edit} 
-          onChange={(v) => setSelected({ ...selected, T_END: v })} 
-        />
-      </Grid>
-      <Grid container spacing={2}>
-        <Field 
-          label="Annual Leave Balance" 
-          type="number" 
-          value={selected.ANNUAL_LEAVE_BAL} 
-          disabled={!edit} 
-          onChange={(v) => setSelected({ ...selected, ANNUAL_LEAVE_BAL: Number(v) || 0 })} 
-        />
-      </Grid>
-      <Grid container spacing={2}>
-        <Field 
-          label="PS" 
-          type="number" 
-          value={selected.PS} 
-          disabled={!edit} 
-          onChange={(v) => setSelected({ ...selected, PS: Number(v) || null })} 
-        />
-      </Grid>
-      <Grid container spacing={2}>
-        <Field 
-          label="Kid Number" 
-          value={selected.num_kid} 
-          disabled={!edit} 
-          onChange={(v) => setSelected({ ...selected, num_kid: v })} 
-        />
-      </Grid>
-    </SectionWrapper>
-  );
-}
+export default Employees;

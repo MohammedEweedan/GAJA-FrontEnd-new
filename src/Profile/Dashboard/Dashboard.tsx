@@ -31,7 +31,7 @@ const [balances, setBalances] = useState<BalanceItem[]>([]);  const [loading, se
       setLoading(true);
       try {
         const token = localStorage.getItem('token') || '';
-        const apiUrl = `http://${apiIp}/Gls/BlancesCash`;
+        const apiUrl = `http://localhost:9000/Gls/BlancesCash`;
         const res = await axios.get(apiUrl, {
           params: { acc_no, lenghtleft },
           headers: { Authorization: `Bearer ${token}` },

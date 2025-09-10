@@ -263,7 +263,7 @@ const DOPurchase = () => {
   const fetchAllDistributions = async () => {
     const token = localStorage.getItem('token');
     try {
-      const res = await axios.get('http://102.213.182.8:9000/Dpurchases/all', {
+      const res = await axios.get('http://localhost:9000/Dpurchases/all', {
         headers: { Authorization: `Bearer ${token}` }
       });
       setDistributions(res.data.filter((d: any) => d.PurchaseType === 'Diamond Purchase'));
@@ -303,7 +303,7 @@ const DOPurchase = () => {
     const fetchPsList = async () => {
       const token = localStorage.getItem('token');
       try {
-        const res = await axios.get('http://102.213.182.8:9000/ps/all', {
+        const res = await axios.get('http://localhost:9000/ps/all', {
           headers: { Authorization: `Bearer ${token}` }
         });
         setPsList(res.data);
@@ -595,7 +595,7 @@ const DOPurchase = () => {
         setSnackbar({ open: true, message: 'Distribution updated successfully', severity: 'success' });
       } else {
         // Add a new distribution
-        await axios.post('http://102.213.182.8:9000/Dpurchases/Add', {
+        await axios.post('http://localhost:9000/Dpurchases/Add', {
           PurchaseID: distributionDialog.purchase?.id_achat,
           ps: newDistribution.ps,
           distributionDate: newDistribution.distributionDate,

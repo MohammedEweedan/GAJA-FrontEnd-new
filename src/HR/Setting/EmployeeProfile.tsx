@@ -227,11 +227,9 @@ const Employees = () => {
         });
         showSnackbar('Employee updated successfully!', 'success');
       } else {
-        const token = localStorage.getItem('token');
-        await api.post('/employees/add', form, {
+        await api.post('/employees', form, {
           headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${token}`
+            'Content-Type': 'application/json'
           }
         });
         showSnackbar('Employee created successfully!', 'success');

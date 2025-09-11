@@ -9,7 +9,6 @@ import Button from '@mui/material/Button';
 import StoreIcon from '@mui/icons-material/Store';
 import LocalOfferIcon from '@mui/icons-material/LocalOffer';
 import PointOfSaleIcon from '@mui/icons-material/PointOfSale';
-import InventoryIcon from '@mui/icons-material/Inventory';
 import EmojiEventsIcon from '@mui/icons-material/EmojiEvents';
 import AccessTimeIcon from '@mui/icons-material/AccessTime';
 import RouteIcon from '@mui/icons-material/Route';

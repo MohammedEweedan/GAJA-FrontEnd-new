@@ -1,5 +1,5 @@
 import * as React from 'react';
-import { createTheme, ThemeProvider } from '@mui/material/styles';
+import { createTheme } from '@mui/material/styles';
 import {
   AppProvider,
   Navigation,
@@ -7,9 +7,10 @@ import {
   DashboardLayout,
   PageContainer,
 } from '@toolpad/core';
+import { Tooltip } from '@mui/material';
 
 import Wpage from '../Purchase/OriginalAchat/WOPurchase/Wpage';
-
+import LanguageSwitcher from '../components/LanguageSwitcher';
 import DashboardIcon from '@mui/icons-material/Dashboard';
 import SettingsIcon from '@mui/icons-material/Settings';
 import Diversity3Icon from '@mui/icons-material/Diversity3';
@@ -39,7 +40,6 @@ import Brightness7Icon from '@mui/icons-material/Brightness7';
 import Logo from '../ui-component/Logo2';
 import GeneralSettings from '../Setup/GS/GeneralSettings';
 import HRSettings from '../Setup/HR/HRSettings';
-import EmployeeProfile from '../HR/Setting/EmployeeProfile';
 import FinanceSettings from '../Setup/Finance/FinanceSettings';
 import SCSSettings from '../Setup/SCS/SCSSettings';
 import ShoppingCartIcon from '@mui/icons-material/ShoppingCart';
@@ -48,7 +48,7 @@ import DiamondIcon from '@mui/icons-material/Diamond';
 import WatchIcon from '@mui/icons-material/Watch';
 import Inventory2Icon from '@mui/icons-material/Inventory2';
 import GPurchase from '../Purchase/Types/GPurchase';
-import { CurrencyExchange, GifBox, History, Inventory2, Logout, NewLabel, Paid, PaidTwoTone, PreviewOutlined, Report, Sailing, Sell, Shop, TransitEnterexit } from '@mui/icons-material';
+import { CurrencyExchange, GifBox, History, Inventory2, Logout, NewLabel, Paid, PaidTwoTone, Sell, TransitEnterexit } from '@mui/icons-material';
 
 import InvoiceTypeSelector from '../Invoices/InvoiceTypeSelector';
 import { useNavigate } from 'react-router-dom';
@@ -109,11 +109,6 @@ const NAVIGATION: Navigation = [
       showHR && {
         segment: 'hrSetting',
         title: 'HR Settings',
-        icon: <PeopleAltIcon />,
-      },
-      showHR && {
-        segment: 'employeeprofile',
-        title: 'Employee Profile',
         icon: <PeopleAltIcon />,
       },
       showFin && {
@@ -423,7 +418,6 @@ const realRoutes = [
   '/home',
   '/setting/generals',
   '/setting/hrSetting',
-  '/setting/employeeprofile',
   '/setting/finSetting',
   '/setting/spySetting',
   '/receiveProducts/goldPurchase',
@@ -587,8 +581,6 @@ function getPageComponent(pathname: string) {
       return <DashboardPage />;
     case '/setting/hrSetting':
       return <HRSettings />;
-    case '/setting/employeeprofile':
-      return <EmployeeProfile />;
     case '/setting/finSetting':
       return <FinanceSettings />;
     case '/setting/spySetting':
@@ -743,63 +735,47 @@ export default function Home(props: any) {
             <Logo />
           </Box>
         ),
-        title: 'Gaja Sys 1.0',
+        title: '',
         homeUrl: '/home',
       }}
     >
       <DashboardLayout
         sx={{
-          '& .MuiContainer-root': {
-            maxWidth: '100%',
-          },
-          '& .MuiDrawer-root': {
-            position: 'relative',
-            height: '100vh',
-          },
-          '& .MuiDrawer-paper': {
-            display: 'flex',
-            flexDirection: 'column',
-            justifyContent: 'space-between',
-          },
+          // remove clamps that shrink the header area
+          '& .MuiDrawer-root': { position: 'relative', height: '100vh' },
+          '& .MuiDrawer-paper': { display: 'flex', flexDirection: 'column', justifyContent: 'space-between' },
         }}
         navigation={NAVIGATION}
+        // put the buttons in the top bar
         slots={{
-          sidebarFooter: () => (
-            <Box
-              sx={{
-                position: 'absolute',
-                bottom: 0,
-                left: 0,
-                right: 0,
-                padding: 2,
-                borderTop: `1px solid ${theme.palette.divider}`,
-                display: 'grid',
-                justifyContent: 'space-between'
-              }}
-            >
-              <IconButton
-                onClick={colorMode.toggleColorMode}
-                color="inherit"
-                aria-label="Toggle theme"
-                sx={{ mr: 1 }}
-              >
-                {mode === 'dark' ? (
-                  <Brightness7Icon sx={{ color: 'text.primary' }} />
-                ) : (
-                  <Brightness4Icon sx={{ color: 'text.primary' }} />
-                )}
-              </IconButton>
-              <IconButton
-                onClick={handleLogout}
-                color="inherit"
-                aria-label="Toggle theme"
-                sx={{ mr: 1 }}
-              >
-                <Logout sx={{ color: 'text.primary' }} />
+          toolbarActions: () => (
+            <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+              <Tooltip title={mode === 'dark' ? 'Light mode' : 'Dark mode'}>
+                <IconButton
+                  onClick={colorMode.toggleColorMode}
+                  color="inherit"
+                  sx={{ color: 'text.primary', '&:hover': { backgroundColor: 'action.hover' } }}
+                  aria-label="Toggle theme"
+                >
+                  {mode === 'dark' ? <Brightness7Icon /> : <Brightness4Icon />}
+                </IconButton>
+              </Tooltip>
 
-              </IconButton>
+              <LanguageSwitcher />
+
+              <Tooltip title="Logout">
+                <IconButton
+                  onClick={handleLogout}
+                  color="inherit"
+                  aria-label="Logout"
+                  sx={{ color: 'text.primary', '&:hover': { backgroundColor: 'action.hover' } }}
+                >
+                  <Logout />
+                </IconButton>
+              </Tooltip>
             </Box>
           ),
+          // no sidebarFooter — we moved those buttons up top
         }}
       >
         <PageContainer title=''>

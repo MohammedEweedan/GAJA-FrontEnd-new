@@ -1,0 +1,32 @@
+{
+  "login": {
+    "welcome": "Welcome Back",
+    "signInToContinue": "Sign in to continue to GAJA ERP",
+    "email": "Email address",
+    "password": "Password",
+    "rememberMe": "Remember me",
+    "forgotPassword": "Forgot password?",
+    "signIn": "Sign in",
+    "signingIn": "Signing in...",
+    "togglePassword": "Toggle password visibility",
+    "loginFailed": "Login or Password is wrong. Please try again!",
+    "tokenMissing": "Login failed: Token is missing!",
+    "privacyNotice": "We'll never share your email and password with anyone else.",
+    "logOut": "Log out"
+  },
+  "header": {
+    "profile": "Profile",
+    "settings": "Settings",
+    "messages": "Messages",
+    "notifications": "Notifications",
+    "accountOfUser": "Account of current user",
+    "switchToLight": "Switch to light mode",
+    "switchToDark": "Switch to dark mode",
+    "help": "Help",
+    "search": "Search..."
+  },
+  "footer": {
+    "createdBy": "This Portal was created by IT Dept.",
+    "copyright": "©2025 Copyright:"
+  }
+}

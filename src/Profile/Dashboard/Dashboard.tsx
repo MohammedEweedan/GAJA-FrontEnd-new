@@ -31,7 +31,7 @@ const [balances, setBalances] = useState<BalanceItem[]>([]);  const [loading, se
       setLoading(true);
       try {
         const token = localStorage.getItem('token') || '';
-        const apiUrl = `http://localhost:9000/Gls/BlancesCash`;
+        const apiUrl = `${apiIp}/Gls/BlancesCash`;
         const res = await axios.get(apiUrl, {
           params: { acc_no, lenghtleft },
           headers: { Authorization: `Bearer ${token}` },
@@ -74,10 +74,10 @@ const [balances, setBalances] = useState<BalanceItem[]>([]);  const [loading, se
 
   return (
     <Box sx={{ flexGrow: 1, color: 'inherit', background: 'inherit', minHeight: '100vh' }}>
-      <Typography variant="h4" fontWeight="bold" gutterBottom sx={{ color: 'primary.main', mb: 3, letterSpacing: 1 }}>
+      <Typography variant="h4" fontWeight="bold" gutterBottom color="gaja.200">
         Dashboard
       </Typography>
-      <Typography variant="h5" fontWeight="bold" gutterBottom sx={{ color: '#388e3c', mb: 2, letterSpacing: 1 }}>
+      <Typography variant="h5" fontWeight="bold" gutterBottom color="gaja.200">
         Watches Cash
       </Typography>
       <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 2 }}>

@@ -18,6 +18,7 @@ import LeaderboardIcon from '@mui/icons-material/Leaderboard';
 import Positions from './Pages/Positions';
 import { Divider } from '@mui/material';
 import AddIcon from '@mui/icons-material/Add';
+import EmployeeProfile from '../../../src/HR/Setting/EmployeeProfile';
 
 const cards = [
   {
@@ -29,10 +30,10 @@ const cards = [
   },
   {
     id: 2,
-    title: 'Cost Centers',
-    description: 'Set up the cost centers for the company.',
+    title: 'Employee Profile',
+    description: 'Set up the employee profile.',
     icon: <AccountBalanceIcon fontSize="large" />,
-    component: <div>Cost Centers Page</div>,
+    component: <EmployeeProfile />,
   },
   {
     id: 3,
@@ -68,6 +69,13 @@ const cards = [
     description: 'Set up the positions levels.',
     icon: <LeaderboardIcon fontSize="large" />,
     component: <div>Positions Levels Page</div>,
+  },
+  {
+    id: 8,
+    title: 'Cost Centers',
+    description: 'Set up the cost centers for all employees.',
+    icon: <LeaderboardIcon fontSize="large" />,
+    component: <div>Cost Centers</div>,
   },
 ];
 

@@ -132,13 +132,14 @@ const Expenses = (props: Props) => {
     const [loadingCustomers, setLoadingCustomers] = useState(false);
 
     const apiIp = process.env.REACT_APP_API_IP;
-    const apiUrlcustomers = `http://${apiIp}/customers`;
+    const apiUrl = "http://localhost:9000/Expense";
+    const apiUrlAccounts = `${apiIp}/Accounts`;
 
     const fetchCustomers = useCallback(async () => {
         const token = localStorage.getItem('token');
         try {
             setLoadingCustomers(true);
-            const res = await axios.get<Client[]>(`${apiUrlcustomers}/all`, {
+            const res = await axios.get<Client[]>(`${apiUrlAccounts}/all`, {
                 headers: { Authorization: `Bearer ${token}` }
             });
             setCustomers(res.data);
@@ -148,10 +149,10 @@ const Expenses = (props: Props) => {
         } finally {
             setLoadingCustomers(false);
         }
-    }, [apiUrlcustomers]);
+    }, [apiUrlAccounts]);
 
 
-   const apiUrlemployee = `http://${apiIp}/employees`;
+   const apiUrlemployee = `${apiIp}/employees`;
     const fetchEmployee = useCallback(async () => {
        
         const token = localStorage.getItem('token');
@@ -193,9 +194,6 @@ const Expenses = (props: Props) => {
 
 
 
-
-    const apiUrl = "http://localhost:9000/Expense";
-    const apiUrlAccounts = `http://${apiIp}/Accounts`;
 
     const showSnackbar = (message: string, severity: SnackbarState['severity']) => {
         setSnackbar({ open: true, message, severity });

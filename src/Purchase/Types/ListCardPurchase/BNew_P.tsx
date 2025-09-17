@@ -187,8 +187,8 @@ const BNew_p = (props: NewPProps) => {
         Cuser = localStorage.getItem('Cuser');
     }
     const apiIp = process.env.REACT_APP_API_IP;
-const apiUrl = `http://${apiIp}/purchases`;
-const apiUrlProducts = `http://${apiIp}/boxes`;
+const apiUrl = `${apiIp}/purchases`;
+const apiUrlProducts = `${apiIp}/boxes`;
 
     const isUsedSupplier = useMemo(() => {
         return editPurchase.Fournisseur?.TYPE_SUPPLIER?.toLowerCase().includes('used') ?? false;
@@ -306,7 +306,7 @@ const apiUrlProducts = `http://${apiIp}/boxes`;
     };
 
     const fetchSuppliers = async () => {
-        const apiUrlsuppliers = `http://${apiIp}/suppliers`;
+        const apiUrlsuppliers = `${apiIp}/suppliers`;
         const token = localStorage.getItem('token');
         try {
             setLoadingSuppliers(true);
@@ -350,7 +350,7 @@ const apiUrlProducts = `http://${apiIp}/boxes`;
     const handleAddNew = async () => {
         const token = localStorage.getItem('token');
         try {
-            const response = await fetch(`http://${apiIp}/purchases/NewNF`, {
+            const response = await fetch(`${apiIp}/purchases/NewNF`, {
                 headers: { Authorization: `Bearer ${token}` },
             });
             if (!response.ok) throw new Error("Failed to fetch new purchase number");

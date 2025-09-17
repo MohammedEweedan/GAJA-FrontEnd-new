@@ -39,7 +39,7 @@ const Sm = () => {
   const [errors, setErrors] = useState<any>({});
   const navigate = useNavigate();
   const apiIp = process.env.REACT_APP_API_IP;
-  const apiUrl = `http://${apiIp}/sm`;
+  const apiUrl = `${apiIp}/sm`;
 
   const [themeMode, setThemeMode] = useState<'light' | 'dark'>(
     (localStorage.getItem('themeMode') as 'light' | 'dark') || 'light'

@@ -188,7 +188,7 @@ const GInvoices = (props: Props) => {
 
 
     const apiIp = process.env.REACT_APP_API_IP;
-    const apiUrl = `http://${apiIp}/invoices`;
+    const apiUrl = `${apiIp}/invoices`;
 
     const showSnackbar = (message: string, severity: SnackbarState['severity']) => {
         setSnackbar({ open: true, message, severity });

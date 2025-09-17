@@ -71,7 +71,7 @@ type Supplier = {
     TYPE_SUPPLIER?: string;
 };
 const apiIp = process.env.REACT_APP_API_IP;
-const apiUrl = `http://${apiIp}/Suppliersettlement`;
+const apiUrl = `${apiIp}/Suppliersettlement`;
 
 const VendorsSettlment = () => {
     const [data, setData] = useState<SupplierSettlement[]>([]);

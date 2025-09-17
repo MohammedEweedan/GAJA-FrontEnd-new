@@ -176,7 +176,7 @@ const GPurchase = (props: Props) => {
     }
 
     const apiIp = process.env.REACT_APP_API_IP;
-    const apiUrl = `http://${apiIp}/purchases`;
+    const apiUrl = `${apiIp}/purchases`;
 
     const showSnackbar = (message: string, severity: SnackbarState['severity']) => {
         setSnackbar({ open: true, message, severity });
@@ -240,7 +240,7 @@ const GPurchase = (props: Props) => {
     }, [navigate, ps]);
 
     const fetchSuppliers = useCallback(async () => {
-        const apiUrlsuppliers = `http://${apiIp}/suppliers`;
+        const apiUrlsuppliers = `${apiIp}/suppliers`;
         const token = localStorage.getItem('token');
         try {
             setLoadingSuppliers(true);
@@ -270,7 +270,7 @@ const GPurchase = (props: Props) => {
             else if (Type === 'watches') type = 'Watche Purchase';
             else type = 'boxes Purchase';
             try {
-                const res = await axios.get(`http://${apiIp}/Dpurchases/not-received`, {
+                const res = await axios.get(`${apiIp}/Dpurchases/not-received`, {
                     headers: { Authorization: `Bearer ${token}` },
                     params: { type }
                 });
@@ -334,7 +334,7 @@ const GPurchase = (props: Props) => {
     const handleAddNew = async () => {
         const token = localStorage.getItem('token');
         try {
-            const response = await fetch(`http://${apiIp}/purchases/NewNF`, {
+            const response = await fetch(`${apiIp}/purchases/NewNF`, {
                 headers: { Authorization: `Bearer ${token}` },
             });
              if (!response.ok) throw new Error("Failed to fetch new purchase number");
@@ -487,7 +487,7 @@ const GPurchase = (props: Props) => {
             const token = localStorage.getItem('token');
             try {
                 // 1. Check if purchase with original_invoice exists
-                const res = await axios.get(`http://${apiIp}/purchases/findByOriginalInvoice`, {
+                const res = await axios.get(`${apiIp}/purchases/findByOriginalInvoice`, {
                     headers: { Authorization: `Bearer ${token}` },
                     params: { original_invoice: distribution.distributionID }
                 });
@@ -502,7 +502,7 @@ const GPurchase = (props: Props) => {
                     setDistributionToReceive(distribution); // <-- Ensure this is set for referencePurchase
                 } else {
                     // 3. Else, create new purchase as before
-                    const response = await fetch(`http://${apiIp}/purchases/NewNF`, {
+                    const response = await fetch(`${apiIp}/purchases/NewNF`, {
                         headers: { Authorization: `Bearer ${token}` },
                     });
                     if (!response.ok) throw new Error("Failed to fetch new purchase number");
@@ -537,7 +537,7 @@ const GPurchase = (props: Props) => {
             await Promise.all(
                 notReceivedDistributions.map(async (dist) => {
                     try {
-                        const res = await axios.get(`http://${apiIp}/purchases/findByOriginalInvoice`, {
+                        const res = await axios.get(`${apiIp}/purchases/findByOriginalInvoice`, {
                             headers: { Authorization: `Bearer ${token}` },
                             params: { original_invoice: dist.distributionID }
                         });

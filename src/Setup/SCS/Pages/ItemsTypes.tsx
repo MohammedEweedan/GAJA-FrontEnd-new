@@ -36,7 +36,7 @@ const ItemsTypes = () => {
   const [selectedMainType, setSelectedMainType] = useState<string | null>(null);
 
   const apiIp = process.env.REACT_APP_API_IP;
-  const apiUrl = `http://${apiIp}/itemstypes`;
+  const apiUrl = `${apiIp}/itemstypes`;
   const themeMode = localStorage.getItem('themeMode') as 'light' | 'dark' || 'dark';
 
   const theme = createTheme({

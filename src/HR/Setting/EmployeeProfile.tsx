@@ -9,12 +9,12 @@ import {
   TextField, Divider, Typography, Select, MenuItem, FormControl, InputLabel, Switch,
   FormControlLabel, Avatar, Stack, Stepper, Step, StepLabel, Paper, 
   Alert, Snackbar, useMediaQuery, useTheme, ToggleButtonGroup, ToggleButton,
-  Chip, LinearProgress, List, ListItem, ListItemAvatar, ListItemText, Grid
+  Chip, LinearProgress, List, ListItem, ListItemAvatar, ListItemText, Grid,
+  Card
 } from '@mui/material';
 import { DndContext, closestCenter, KeyboardSensor, PointerSensor, useSensor, useSensors } from '@dnd-kit/core';
 import { arrayMove, SortableContext, sortableKeyboardCoordinates, verticalListSortingStrategy } from '@dnd-kit/sortable';
 import { restrictToVerticalAxis } from '@dnd-kit/modifiers';
-import { EmployeeCard } from '../../components/EmployeeCard';
 import ViewListIcon from '@mui/icons-material/ViewList';
 import GridViewIcon from '@mui/icons-material/GridView';
 import AddIcon from '@mui/icons-material/Add';
@@ -33,6 +33,12 @@ import CancelIcon from '@mui/icons-material/Cancel';
 import * as XLSX from 'xlsx';
 import axios from 'axios';
 import { useTranslation } from 'react-i18next';
+// Components
+import { EmployeeCard } from "../../components/EmployeeCard";
+import CalendarLogScreen from '../../components/LeaveManagement/CalendarLogScreen';
+import LeaveStatusScreen from '../../components/LeaveManagement/LeaveStatusScreen';
+import LeaveRequestScreen from '../../components/LeaveManagement/LeaveRequestScreen';
+import LeaveBalanceScreen from '../../components/LeaveManagement/LeaveBalanceScreen';
 
 export type Employee = {
   ID_EMP?: number;
@@ -102,6 +108,17 @@ export type Employee = {
   COST_CENTER?: string | null;
   CREATED_AT?: string | null;
   UPDATED_AT?: string | null;
+};
+
+export type JobRow = {
+  id_job: number;
+  job_name: string;
+  year_job: number;
+  Job_degree: number;
+  Job_level: string;
+  Job_title: string;
+  Job_code: string;
+  job_categories: string;
 };
 
 const emptyEmployee: Employee = {
@@ -181,7 +198,8 @@ const steps = [
   'Other Information'
 ];
 
-const BASE_URL = ('http://localhost:9000').replace(/\/+$/, '');
+const apiIp = process.env.REACT_APP_API_IP;
+const BASE_URL = (`${apiIp}`).replace(/\/+$/, '');
 const api = axios.create({ baseURL: BASE_URL });
 api.interceptors.request.use((config) => {
   const token = localStorage.getItem('token');
@@ -250,13 +268,11 @@ function buildHierarchy(employees: Employee[]) {
 }
 
 const OrgCard: React.FC<{ e: Employee; posName?: string }> = ({ e, posName }) => {
-  const theme = useTheme();
   return (
     <Paper
       elevation={0}
       sx={{
         p: 1.5,
-        borderRadius: theme.shape.borderRadius * 2,
         border: '1px solid',
         borderColor: 'divider',
         bgcolor: 'background.paper',
@@ -320,6 +336,9 @@ const Employees = () => {
   const [search, setSearch] = useState('');
   const [stateFilter, setStateFilter] = useState<'all' | 'active' | 'inactive'>('all');
   const [pointsOfSale, setPointsOfSale] = useState<Array<{ Id_point: number; name_point: string }>>([]);
+  const [jobs, setJobs] = useState<JobRow[]>([]);
+  const [jobDialogOpen, setJobDialogOpen] = useState(false);
+  const [jobForm, setJobForm] = useState<Partial<JobRow>>({ job_name: '', year_job: new Date().getFullYear(), Job_degree: 1, Job_level: '', Job_title: '', Job_code: '', job_categories: '' });
 
   // NEW: top-level navigation tabs
   const [tab, setTab] = useState(0); // 0 Directory, 1 Profile, 2 Org, 3 Calendar
@@ -342,6 +361,7 @@ const Employees = () => {
   // Snackbar
   const [snackbar, setSnackbar] = useState<{ open: boolean; message: string; severity: 'success' | 'error' | 'info' | 'warning'; }>({ open: false, message: '', severity: 'info' });
   const showSnackbar = (message: string, severity: 'success' | 'error' | 'info' = 'info') => setSnackbar({ open: true, message, severity });
+  const [leaveTab, setLeaveTab] = useState(0);
 
   // POS name map
   const posNameById = useMemo(() => {
@@ -388,6 +408,18 @@ const Employees = () => {
 
   useEffect(() => { fetchEmployees(); }, [fetchEmployees]);
 
+  // Fetch jobs
+  const fetchJobs = useCallback(async () => {
+    try {
+      const res = await api.get('/jobs/jobs');
+      const arr = Array.isArray(res.data) ? res.data : res.data?.data || [];
+      setJobs(arr);
+    } catch (e) {
+      console.error('Error fetching jobs', e);
+    }
+  }, []);
+  useEffect(() => { fetchJobs(); }, [fetchJobs]);
+
   // Dialog helpers
   const resetDialog = () => {
     setOpen(false);
@@ -405,6 +437,7 @@ const Employees = () => {
   const validate = (currentStep = step) => {
     const e: Record<string, string> = {};
     if (currentStep === 0) {
+      if (!form.NAME || String(form.NAME).trim() === '') e.NAME = t('employees.errors.nameRequired', 'Name is required');
       if (form.EMAIL && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(form.EMAIL)) e.EMAIL = t('hr.errors.email', 'Invalid email');
     } else if (currentStep === 1) {
       if (form.BASIC_SALARY !== undefined && form.BASIC_SALARY !== null) {
@@ -431,7 +464,20 @@ const Employees = () => {
         await api.put(`/employees/${form.ID_EMP}`, employeeData);
         setSnackbar({ open: true, message: t('hr.toast.updated', 'Employee updated successfully'), severity: 'success' });
       } else {
-        await api.post('/employees', employeeData);
+        // Send minimal payload expected by backend to avoid DB type issues
+        const clamp = (s: string | null | undefined, max: number) => (s ? s.slice(0, max) : s ?? null);
+        const toStr = (v: any) => (v === undefined || v === null ? null : String(v).trim());
+        const payload = {
+          NAME: String(form.NAME || '').trim(),
+          TITLE: clamp(toStr(form.TITLE), 20),
+          EMAIL: clamp(toStr(form.EMAIL), 300),
+          PHONE: clamp(toStr(form.PHONE), 100),
+          COST_CENTER: clamp(toStr((form as any).COST_CENTER ?? form.PS), 50),
+          STATE: typeof form.STATE === 'boolean' ? form.STATE : true,
+        } as any;
+        // Convert empty strings to null
+        Object.keys(payload).forEach((k) => { if ((payload as any)[k] === '') (payload as any)[k] = null; });
+        await api.post('/employees', payload);
         setSnackbar({ open: true, message: t('hr.toast.created', 'Employee created successfully'), severity: 'success' });
       }
       fetchEmployees();
@@ -563,7 +609,6 @@ const Employees = () => {
         bgcolor: 'background.paper',
         border: '2px dashed',
         borderColor: 'divider',
-        borderRadius: theme.shape.borderRadius * 2,
         m: 1
       }}
     >
@@ -581,30 +626,57 @@ const Employees = () => {
   );
 
   // Compact row renderer
-  const Row: React.FC<{ icon: React.ReactNode; label: string; value?: string | null }> = ({ icon, label, value }) => (
-    <Stack direction="row" spacing={1.25} alignItems="center">
-      <Box sx={{ color: 'text.secondary' }}>{icon}</Box>
-      <Typography variant="body2" sx={{ minWidth: 110, color: 'text.secondary' }}>{label}</Typography>
-      <Typography variant="body2" fontWeight={600}>{value || '—'}</Typography>
+  const Row: React.FC<{
+    icon: React.ReactNode;
+    label: string;
+    value?: string | null;
+  }> = ({ icon, label, value }) => (
+    <Stack direction="row" spacing={2} alignItems="center">
+      <Box sx={{ color: accent, display: "flex", alignItems: "center" }}>
+        {icon}
+      </Box>
+      <Box sx={{ flex: 1 }}>
+        <Typography
+          variant="caption"
+          sx={{
+            color: "text.secondary",
+            fontWeight: 600,
+            display: "block",
+            textTransform: "uppercase",
+            letterSpacing: 0.5,
+          }}
+        >
+          {label}
+        </Typography>
+        <Typography
+          variant="body1"
+          sx={{
+            fontWeight: 600,
+            color: "text.primary",
+          }}
+        >
+          {value || t("common.notSpecified", "—")}
+        </Typography>
+      </Box>
     </Stack>
   );
 
   // ====== NEW: All Details (renders every field from the record with i18n labels) ======
   const AllDetails: React.FC<{ record: Employee }> = ({ record }) => {
-    // Prepare entries excluding heavy/binary fields
     const entries = Object.entries(record)
-      .filter(([k]) => k !== 'PICTURE') // exclude raw buffer
+      .filter(([k]) => k !== "PICTURE")
       .sort(([a], [b]) => a.localeCompare(b));
 
     const formatValue = (k: string, v: any): React.ReactNode => {
-      if (v === null || v === undefined || v === '') return '—';
-      if (typeof v === 'boolean') return <BoolChip value={v} />;
-      if (typeof v === 'number') {
-        // salary & allowance hints -> currency; else plain
-        if (/_SALARY|_ALLOWANCE|_VALUE|^FOOD$|^FUEL$|^COMMUNICATION$/i.test(k)) return currency(v);
+      if (v === null || v === undefined || v === "")
+        return t("common.notSpecified", "—");
+      if (typeof v === "boolean") return <BoolChip value={v} />;
+      if (typeof v === "number") {
+        if (/_SALARY|_ALLOWANCE|_VALUE|^FOOD$|^FUEL$|^COMMUNICATION$/i.test(k))
+          return currency(v);
         return new Intl.NumberFormat().format(v);
       }
-      if (typeof v === 'string') {
+      if (typeof v === "string") {
         if (isDateKey(k) && !isNaN(Date.parse(v))) return fmtDate(v);
         return v;
       }
@@ -612,138 +684,550 @@ const Employees = () => {
     };
 
     return (
-      <Paper variant="outlined" sx={{ p: 2, borderRadius: 2 }}>
-        <Typography variant="subtitle1" fontWeight={700} sx={{ mb: 1.5 }}>
-          {t('hr.profile.allDetails', 'All Details')}
-        </Typography>
-        <Grid container spacing={1.25}>
-          {entries.map(([k, v]) => (
-            <Grid container spacing={1.25}>
-              <Stack spacing={0.5}>
-                <Typography variant="caption" color="text.secondary">
-                  {t(`employees.fields.${k}`, labelize(k))}
-                </Typography>
-                <Typography variant="body2" sx={{ fontWeight: 600, wordBreak: 'break-word' }}>
-                  {k === 'PS' && v ? (posNameById.get(Number(v)) || v) : formatValue(k, v)}
-                </Typography>
-              </Stack>
-            </Grid>
-          ))}
-        </Grid>
-      </Paper>
+      <Grid container spacing={3}>
+        {entries.map(([k, v]) => (
+          <Grid container key={k}>
+            <Box
+              sx={{
+                p: 2,
+                borderRadius: 2,
+                border: "1px solid",
+                borderColor: "divider",
+                backgroundColor: "background.default",
+                transition: "all 0.2s",
+                "&:hover": {
+                  borderColor: accent,
+                  backgroundColor: "background.paper",
+                },
+              }}
+            >
+              <Typography
+                variant="caption"
+                sx={{
+                  color: "text.secondary",
+                  fontWeight: 600,
+                  textTransform: "uppercase",
+                  letterSpacing: 0.5,
+                }}
+              >
+                {t(`employees.fields.${k}`, labelize(k))}
+              </Typography>
+              <Typography
+                variant="body1"
+                sx={{
+                  fontWeight: 600,
+                  wordBreak: "break-word",
+                  mt: 0.5,
+                  color: "text.primary",
+                }}
+              >
+                {k === "PS" && v
+                  ? posNameById.get(Number(v)) || v
+                  : formatValue(k, v)}
+              </Typography>
+            </Box>
+          </Grid>
+        ))}
+      </Grid>
     );
   };
 
   // Profile view
   const ProfileView = (
-    <Box sx={{ p: 2 }}>
+    <Box sx={{ p: 3, width: "100%" }}>
       {selected ? (
-        <Stack spacing={2}>
-          <Paper
-            variant="outlined"
+        <Stack spacing={3}>
+          {/* Main Profile Card */}
+          <Card
             sx={{
-              p: 3,
+              boxShadow: 3,
               borderRadius: 3,
-              bgcolor: 'background.paper',
+              backgroundColor: "background.paper",
+              border: "1px solid",
+              borderColor: accent,
+              transition: "transform 0.2s, box-shadow 0.2s, border-color 0.2s",
+              "&:hover": {
+                transform: "translateY(-2px)",
+                boxShadow: 6,
+                borderColor: accent,
+              },
             }}
           >
-            <Stack direction={{ xs: 'column', md: 'row' }} spacing={3} alignItems={{ md: 'center' }}>
-              <Avatar src={selected.PICTURE_URL || undefined} sx={{ width: 96, height: 96 }}>{initials(selected.NAME)}</Avatar>
-              <Box sx={{ flex: 1 }}>
-                <Typography variant="h5" fontWeight={900}>{selected.NAME}</Typography>
-                <Typography color="text.secondary">{selected.TITLE || '—'}</Typography>
-                <Stack direction="row" spacing={1} mt={1}>
-                  {!!selected.STATE && <Chip color="success" size="small" label={t('common.active', 'Active')} />}
-                  {selected.PS && <Chip size="small" label={posNameById.get(Number(selected.PS)) || selected.PS} />}
+            <Box sx={{ p: 3 }}>
+              <Stack
+                direction={{ xs: "column", md: "row" }}
+                spacing={3}
+                alignItems={{ md: "center" }}
+              >
+                <Avatar
+                  src={selected.PICTURE_URL || undefined}
+                  sx={{
+                    width: 96,
+                    height: 96,
+                    border: "2px solid",
+                    borderColor: accent,
+                  }}
+                >
+                  {initials(selected.NAME)}
+                </Avatar>
+                <Box sx={{ flex: 1 }}>
+                  <Typography
+                    variant="h4"
+                    fontWeight={700}
+                    sx={{ color: accent }}
+                  >
+                    {selected.NAME}
+                  </Typography>
+                  <Typography
+                    variant="h6"
+                    sx={{ color: "text.secondary", mt: 0.5 }}
+                  >
+                    {selected.TITLE || t("common.notSpecified", "—")}
+                  </Typography>
+                  <Stack direction="row" spacing={1} mt={2}>
+                    {selected.STATE && (
+                      <Chip
+                        color="success"
+                        size="small"
+                        label={t("common.active", "Active")}
+                        sx={{ fontWeight: 600 }}
+                      />
+                    )}
+                    {selected.PS && (
+                      <Chip
+                        size="small"
+                        label={
+                          posNameById.get(Number(selected.PS)) || selected.PS
+                        }
+                        sx={{
+                          backgroundColor: accent,
+                          color: "white",
+                          fontWeight: 600,
+                        }}
+                      />
+                    )}
+                  </Stack>
+                </Box>
+                <Stack direction="row" spacing={2}>
+                  <Button
+                    variant="contained"
+                    onClick={() => openEdit(selected)}
+                    sx={{
+                      backgroundColor: accent,
+                      color: "white",
+                      "&:hover": {
+                        backgroundColor: accent,
+                        opacity: 0.9,
+                      },
+                    }}
+                  >
+                    {t("common.edit", "Edit")}
+                  </Button>
+                  <Button
+                    variant="outlined"
+                    color="error"
+                    onClick={() => handleDelete(selected)}
+                  >
+                    {t("common.delete", "Delete")}
+                  </Button>
                 </Stack>
-              </Box>
-              <Stack direction="row" spacing={1}>
-                <Button variant="contained" onClick={() => openEdit(selected)}>{t('common.edit', 'Edit')}</Button>
-                <Button color="error" onClick={() => handleDelete(selected)}>{t('common.delete', 'Delete')}</Button>
               </Stack>
-            </Stack>
+            </Box>
+          </Card>
 
-            <Divider sx={{ my: 3 }} />
+          {/* Information Cards Grid */}
+          <Box sx={{ display: "flex", flexWrap: "wrap", gap: 3 }}>
+            {/* Contact Information */}
+            <Box sx={{ flex: "1 1 320px", minWidth: 300 }}>
+              <Card
+                sx={{
+                  boxShadow: 3,
+                  borderRadius: 2,
+                  backgroundColor: "background.paper",
+                  border: "1px solid",
+                  borderColor: accent,
+                  height: "100%",
+                  transition:
+                    "transform 0.2s, box-shadow 0.2s, border-color 0.2s",
+                  "&:hover": {
+                    transform: "translateY(-4px)",
+                    boxShadow: 6,
+                    borderColor: accent,
+                  },
+                }}
+              >
+                <Box sx={{ p: 3 }}>
+                  <Typography
+                    variant="h6"
+                    fontWeight={700}
+                    sx={{
+                      color: accent,
+                      mb: 2,
+                      display: "flex",
+                      alignItems: "center",
+                    }}
+                  >
+                    <EmailIcon sx={{ mr: 1, color: accent }} />
+                    {t("hr.profile.contact", "Contact Information")}
+                  </Typography>
+                  <Stack spacing={2}>
+                    <Row
+                      icon={<EmailIcon fontSize="small" />}
+                      label={t("employees.fields.EMAIL", "Email")}
+                      value={selected.EMAIL}
+                    />
+                    <Row
+                      icon={<PhoneIcon fontSize="small" />}
+                      label={t("employees.fields.PHONE", "Phone")}
+                      value={selected.PHONE}
+                    />
+                  </Stack>
+                </Box>
+              </Card>
+            </Box>
 
-            <Stack direction={{ xs: 'column', md: 'row' }} spacing={3}>
-              <Paper variant="outlined" sx={{ p: 2, borderRadius: 2, flex: 1 }}>
-                <Typography fontWeight={700} gutterBottom>{t('hr.profile.contact', 'Contact')}</Typography>
-                <Stack spacing={1.25}>
-                  <Row icon={<EmailIcon fontSize="small" />} label={t('employees.fields.EMAIL', 'Email')} value={selected.EMAIL} />
-                  <Row icon={<PhoneIcon fontSize="small" />} label={t('employees.fields.PHONE', 'Phone')} value={selected.PHONE} />
-                </Stack>
-              </Paper>
-              <Paper variant="outlined" sx={{ p: 2, borderRadius: 2, flex: 1 }}>
-                <Typography fontWeight={700} gutterBottom>{t('hr.profile.employment', 'Employment')}</Typography>
-                <Stack spacing={1.25}>
-                  <Row
-                    icon={<WorkOutlineIcon fontSize="small" />}
-                    label={t('hr.profile.contract', 'Contract')}
-                    value={`${fmtDate(selected.CONTRACT_START)} → ${fmtDate(selected.CONTRACT_END)}`}
-                  />
-                  <Row
-                    icon={<LocalAtmIcon fontSize="small" />}
-                    label={t('employees.fields.BASIC_SALARY', 'Basic Salary')}
-                    value={currency(selected.BASIC_SALARY)}
-                  />
-                  <Row
-                    icon={<BadgeIcon fontSize="small" />}
-                    label={t('employees.fields.ID_EMP', 'Employee ID')}
-                    value={String(selected.ID_EMP ?? '—')}
-                  />
-                </Stack>
-              </Paper>
-            </Stack>
+            {/* Employment Information */}
+            <Box sx={{ flex: "1 1 320px", minWidth: 300 }}>
+              <Card
+                sx={{
+                  boxShadow: 3,
+                  borderRadius: 2,
+                  backgroundColor: "background.paper",
+                  border: "1px solid",
+                  borderColor: accent,
+                  height: "100%",
+                  transition:
+                    "transform 0.2s, box-shadow 0.2s, border-color 0.2s",
+                  "&:hover": {
+                    transform: "translateY(-4px)",
+                    boxShadow: 6,
+                    borderColor: accent,
+                  },
+                }}
+              >
+                <Box sx={{ p: 3 }}>
+                  <Typography
+                    variant="h6"
+                    fontWeight={700}
+                    sx={{
+                      color: accent,
+                      mb: 2,
+                      display: "flex",
+                      alignItems: "center",
+                    }}
+                  >
+                    <WorkOutlineIcon sx={{ mr: 1, color: accent }} />
+                    {t("hr.profile.employment", "Employment Details")}
+                  </Typography>
+                  <Stack spacing={2}>
+                    <Row
+                      icon={<CalendarMonthIcon fontSize="small" />}
+                      label={t("hr.profile.contract", "Contract Period")}
+                      value={`${fmtDate(selected.CONTRACT_START)} → ${fmtDate(selected.CONTRACT_END)}`}
+                    />
+                    <Row
+                      icon={<LocalAtmIcon fontSize="small" />}
+                      label={t("employees.fields.BASIC_SALARY", "Basic Salary")}
+                      value={currency(selected.BASIC_SALARY)}
+                    />
+                    <Row
+                      icon={<BadgeIcon fontSize="small" />}
+                      label={t("employees.fields.ID_EMP", "Employee ID")}
+                      value={String(
+                        selected.ID_EMP ?? t("common.notSpecified", "—")
+                      )}
+                    />
+                  </Stack>
+                </Box>
+              </Card>
+            </Box>
 
-            <Paper variant="outlined" sx={{ p: 2, borderRadius: 2, mt: 3 }}>
-              <Typography fontWeight={700} gutterBottom>{t('hr.profile.notes', 'Notes')}</Typography>
-              <Typography variant="body2" whiteSpace="pre-wrap">{selected.COMMENT || '—'}</Typography>
-            </Paper>
-          </Paper>
+            {/* Personal Information */}
+            <Box sx={{ flex: "1 1 320px", minWidth: 300 }}>
+              <Card
+                sx={{
+                  boxShadow: 3,
+                  borderRadius: 2,
+                  backgroundColor: "background.paper",
+                  border: "1px solid",
+                  borderColor: accent,
+                  height: "100%",
+                  transition:
+                    "transform 0.2s, box-shadow 0.2s, border-color 0.2s",
+                  "&:hover": {
+                    transform: "translateY(-4px)",
+                    boxShadow: 6,
+                    borderColor: accent,
+                  },
+                }}
+              >
+                <Box sx={{ p: 3 }}>
+                  <Typography
+                    variant="h6"
+                    fontWeight={700}
+                    sx={{
+                      color: accent,
+                      mb: 2,
+                      display: "flex",
+                      alignItems: "center",
+                    }}
+                  >
+                    <PersonAddIcon sx={{ mr: 1, color: accent }} />
+                    {t("hr.profile.personal", "Personal Information")}
+                  </Typography>
+                  <Stack spacing={2}>
+                    <Row
+                      icon={<CalendarMonthIcon fontSize="small" />}
+                      label={t(
+                        "employees.fields.DATE_OF_BIRTH",
+                        "Date of Birth"
+                      )}
+                      value={fmtDate(selected.DATE_OF_BIRTH)}
+                    />
+                    <Row
+                      icon={<BadgeIcon fontSize="small" />}
+                      label={t("employees.fields.NATIONALITY", "Nationality")}
+                      value={selected.NATIONALITY}
+                    />
+                    <Row
+                      icon={<PersonAddIcon fontSize="small" />}
+                      label={t(
+                        "employees.fields.MARITAL_STATUS",
+                        "Marital Status"
+                      )}
+                      value={
+                        selected.MARITAL_STATUS
+                          ? t(
+                              `employees.enums.${selected.MARITAL_STATUS}`,
+                              selected.MARITAL_STATUS
+                            )
+                          : null
+                      }
+                    />
+                  </Stack>
+                </Box>
+              </Card>
+            </Box>
+          </Box>
 
-          {/* NEW: All fields section */}
-          <AllDetails record={selected} />
+          {/* Notes Card - Full Width */}
+          <Card
+            sx={{
+              boxShadow: 3,
+              borderRadius: 2,
+              backgroundColor: "background.paper",
+              border: "1px solid",
+              borderColor: accent,
+              transition: "transform 0.2s, box-shadow 0.2s, border-color 0.2s",
+              "&:hover": {
+                transform: "translateY(-2px)",
+                boxShadow: 6,
+                borderColor: accent,
+              },
+            }}
+          >
+            <Box sx={{ p: 3 }}>
+              <Typography
+                variant="h6"
+                fontWeight={700}
+                sx={{
+                  color: accent,
+                  mb: 2,
+                  display: "flex",
+                  alignItems: "center",
+                }}
+              >
+                <BadgeIcon sx={{ mr: 1, color: accent }} />
+                {t("hr.profile.notes", "Notes & Comments")}
+              </Typography>
+              <Typography
+                variant="body1"
+                sx={{
+                  whiteSpace: "pre-wrap",
+                  color: "text.primary",
+                  lineHeight: 1.6,
+                }}
+              >
+                {selected.COMMENT ||
+                  t("hr.profile.noNotes", "No notes available")}
+              </Typography>
+            </Box>
+          </Card>
+
+          {/* All Details Card - Full Width */}
+          <Card
+            sx={{
+              boxShadow: 3,
+              borderRadius: 2,
+              backgroundColor: "background.paper",
+              border: "1px solid",
+              borderColor: accent,
+              transition: "transform 0.2s, box-shadow 0.2s, border-color 0.2s",
+              "&:hover": {
+                transform: "translateY(-2px)",
+                boxShadow: 6,
+                borderColor: accent,
+              },
+            }}
+          >
+            <Box sx={{ p: 3 }}>
+              <Typography
+                variant="h6"
+                fontWeight={700}
+                sx={{
+                  color: accent,
+                  mb: 3,
+                  display: "flex",
+                  alignItems: "center",
+                }}
+              >
+                <BadgeIcon sx={{ mr: 1, color: accent }} />
+                {t("hr.profile.allDetails", "Complete Employee Record")}
+              </Typography>
+              <AllDetails record={selected} />
+            </Box>
+          </Card>
+
+          {/* Leave Management Card - Full Width */}
+          <Card
+            sx={{
+              boxShadow: 3,
+              borderRadius: 2,
+              backgroundColor: "background.paper",
+              border: "1px solid",
+              borderColor: accent,
+              transition: "transform 0.2s, box-shadow 0.2s, border-color 0.2s",
+              "&:hover": {
+                transform: "translateY(-2px)",
+                boxShadow: 6,
+                borderColor: accent,
+              },
+            }}
+          >
+            <Box sx={{ p: 3 }}>
+              <Typography
+                variant="h6"
+                fontWeight={700}
+                sx={{
+                  color: accent,
+                  mb: 2,
+                  display: "flex",
+                  alignItems: "center",
+                }}
+              >
+                <CalendarMonthIcon sx={{ mr: 1, color: accent }} />
+                {t("hr.leave.title", "Leave Management")}
+              </Typography>
+              <Tabs
+                value={leaveTab}
+                onChange={(_e, v) => setLeaveTab(v)}
+                aria-label="leave management tabs"
+                variant="scrollable"
+                scrollButtons="auto"
+                sx={{
+                  borderBottom: 1,
+                  borderColor: "divider",
+                  mb: 2,
+                  "& .MuiTab-root": {
+                    color: "text.secondary",
+                    "&.Mui-selected": {
+                      color: accent,
+                    },
+                  },
+                  "& .MuiTabs-indicator": {
+                    backgroundColor: accent,
+                  },
+                }}
+              >
+                <Tab label={t("leave.tabs.calendar", "Calendar")} />
+                <Tab label={t("leave.tabs.status", "Status")} />
+                <Tab label={t("leave.tabs.request", "Request")} />
+                <Tab label={t("leave.tabs.balance", "Balance")} />
+              </Tabs>
+
+              <Box hidden={leaveTab !== 0}>
+                <CalendarLogScreen employeeId={selected?.ID_EMP} />
+              </Box>
+              <Box hidden={leaveTab !== 1}>
+                <LeaveStatusScreen employeeId={selected?.ID_EMP} />
+              </Box>
+              <Box hidden={leaveTab !== 2}>
+                <LeaveRequestScreen employeeId={selected?.ID_EMP} />
+              </Box>
+              <Box hidden={leaveTab !== 3}>
+                <LeaveBalanceScreen employeeId={selected?.ID_EMP} />
+              </Box>
+            </Box>
+          </Card>
         </Stack>
       ) : (
-        <Paper variant="outlined" sx={{ p: 6, borderRadius: 3, textAlign: 'center' }}>
-          <Typography>{t('hr.profile.selectPrompt', 'Select an employee from Directory to view the profile.')}</Typography>
-        </Paper>
+        <Card
+          sx={{
+            boxShadow: 3,
+            borderRadius: 3,
+            backgroundColor: "background.paper",
+            border: "2px dashed",
+            borderColor: "divider",
+            p: 6,
+            textAlign: "center",
+            transition: "transform 0.2s, box-shadow 0.2s",
+            "&:hover": {
+              transform: "translateY(-2px)",
+              boxShadow: 6,
+            },
+          }}
+        >
+          <PersonAddIcon
+            sx={{
+              fontSize: { xs: 48, sm: 64 },
+              color: "action.disabled",
+              mb: 2,
+            }}
+          />
+          <Typography
+            variant="h5"
+            sx={{ color: accent, fontWeight: 700, mb: 1 }}
+          >
+            {t("hr.profile.selectPrompt", "Select an Employee")}
+          </Typography>
+          <Typography variant="body1" color="text.secondary">
+            {t(
+              "hr.profile.selectDescription",
+              "Choose an employee from the Directory to view their complete profile and details."
+            )}
+          </Typography>
+        </Card>
       )}
     </Box>
   );
 
-  // Calendar view
+  // Calendar view (Company-wide time off calendar with legend & filters)
   const CalendarView = (
     <Box sx={{ p: 2 }}>
-      <Paper variant="outlined" sx={{ p: 2, borderRadius: 2, mb: 2 }}>
-        <Typography fontWeight={700}>{t('hr.calendar.title', 'People Calendar')}</Typography>
-        <Typography variant="body2" color="text.secondary">{t('hr.calendar.subtitle', 'Key dates: contracts and birthdays.')}</Typography>
-      </Paper>
-      <List sx={{ bgcolor: 'background.paper', borderRadius: 2, border: '1px solid', borderColor: 'divider' }}>
-        {filteredEmployees.flatMap((e) => {
-          const items: { k: string; label: string; date?: string | null }[] = [
-            { k: 'cs', label: `${e.NAME} – ${t('hr.calendar.contractStart', 'Contract Start')}`, date: e.CONTRACT_START },
-            { k: 'ce', label: `${e.NAME} – ${t('hr.calendar.contractEnd', 'Contract End')}`, date: e.CONTRACT_END },
-            { k: 'bd', label: `${e.NAME} – ${t('hr.calendar.birthday', 'Birthday')}`, date: e.DATE_OF_BIRTH },
-          ];
-          return items.filter((i) => !!i.date).map((i) => ({ ...i, id: `${e.ID_EMP}-${i.k}` }));
-        }).sort((a, b) => new Date(a.date!).getTime() - new Date(b.date!).getTime())
-        .map((i) => (
-          <Box key={i.id} component="li">
-            <ListItem>
-              <ListItemAvatar><Avatar><CalendarMonthIcon /></Avatar></ListItemAvatar>
-              <ListItemText primary={i.label} secondary={fmtDate(i.date)} />
-            </ListItem>
-            <Divider component="div" />
-          </Box>
-        ))}
-      </List>
+      <CalendarLogScreen />
     </Box>
   );
 
   // ===== JSX =====
   return (
-    <Box sx={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
+    <Box
+      dir={theme.direction}
+      sx={{
+        bgcolor: 'background.default',
+        color: 'text.primary',
+        width: '100%',
+        display: 'flex',
+        flexDirection: 'column',
+        // Safe area top padding (DesktopDynamicIsland / notched screens)
+        pt: 'max(env(safe-area-inset-top, 0px), 16px)',
+        // Responsive page paddings
+        px: { xs: 1, sm: 2, md: 3 },
+        pb: { xs: 2, md: 3 },
+        // Sidebar-aware spacing using CSS var from layout (Toolpad DashboardLayout)
+        ml: theme.direction === 'ltr' ? 'var(--sidebar-width, 0px)' : 0,
+        mr: theme.direction === 'rtl' ? 'var(--sidebar-width, 0px)' : 0,
+      }}
+    >
       {/* Premium Top App Bar (theme.ts aware) */}
       <AppBar
         position="static"
@@ -848,9 +1332,22 @@ const Employees = () => {
           </Tabs>
           <Box sx={{ flex: 1 }} />
           {!isMobile && (
-            <ToggleButtonGroup value={viewMode} exclusive onChange={(_, m) => m && setViewMode(m)} size="small">
-              <ToggleButton value="list"><ViewListIcon fontSize="small" /></ToggleButton>
-              <ToggleButton value="grid"><GridViewIcon fontSize="small" /></ToggleButton>
+            <ToggleButtonGroup
+              size="small"
+              value={viewMode}
+              exclusive
+              onChange={(_, v) => v && setViewMode(v)}
+              sx={{
+                direction: theme.direction,
+                '& .MuiToggleButton-root': { borderColor: 'divider' },
+              }}
+            >
+              <ToggleButton value="list" aria-label="list" sx={{ px: 1.5 }}>
+                <ViewListIcon fontSize="small" />
+              </ToggleButton>
+              <ToggleButton value="grid" aria-label="grid" sx={{ px: 1.5 }}>
+                <GridViewIcon fontSize="small" />
+              </ToggleButton>
             </ToggleButtonGroup>
           )}
         </Toolbar>
@@ -920,6 +1417,53 @@ const Employees = () => {
         </DialogActions>
       </Dialog>
 
+      {/* Job Create Dialog */}
+      <Dialog open={jobDialogOpen} onClose={() => setJobDialogOpen(false)} maxWidth="sm" fullWidth>
+        <DialogTitle>{t('hr.jobs.new', 'Create Job')}</DialogTitle>
+        <DialogContent>
+          <TextField margin="normal" fullWidth label={t('hr.jobs.job_name', 'Job Name')} value={jobForm.job_name || ''} onChange={(e) => setJobForm({ ...jobForm, job_name: e.target.value })} />
+          <TextField margin="normal" fullWidth label={t('hr.jobs.Job_title', 'Job Title')} value={jobForm.Job_title || ''} onChange={(e) => setJobForm({ ...jobForm, Job_title: e.target.value })} />
+          <Stack direction={{ xs: 'column', sm: 'row' }} spacing={2}>
+            <TextField margin="normal" fullWidth label={t('hr.jobs.year_job', 'Year')} type="number" value={jobForm.year_job || ''} onChange={(e) => setJobForm({ ...jobForm, year_job: Number(e.target.value) })} />
+            <TextField margin="normal" fullWidth label={t('hr.jobs.Job_degree', 'Degree')} type="number" value={jobForm.Job_degree || ''} onChange={(e) => setJobForm({ ...jobForm, Job_degree: Number(e.target.value) })} />
+          </Stack>
+          <Stack direction={{ xs: 'column', sm: 'row' }} spacing={2}>
+            <TextField margin="normal" fullWidth label={t('hr.jobs.Job_level', 'Level')} value={jobForm.Job_level || ''} onChange={(e) => setJobForm({ ...jobForm, Job_level: e.target.value })} />
+            <TextField margin="normal" fullWidth label={t('hr.jobs.Job_code', 'Code')} value={jobForm.Job_code || ''} onChange={(e) => setJobForm({ ...jobForm, Job_code: e.target.value })} />
+          </Stack>
+          <TextField margin="normal" fullWidth label={t('hr.jobs.job_categories', 'Category')} value={jobForm.job_categories || ''} onChange={(e) => setJobForm({ ...jobForm, job_categories: e.target.value })} />
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setJobDialogOpen(false)}>{t('common.cancel', 'Cancel')}</Button>
+          <Button
+            variant="contained"
+            onClick={async () => {
+              try {
+                const payload = {
+                  job_name: jobForm.job_name,
+                  year_job: jobForm.year_job,
+                  job_degree: jobForm.Job_degree,
+                  job_level: jobForm.Job_level,
+                  job_title: jobForm.Job_title,
+                  job_code: jobForm.Job_code,
+                  job_categories: jobForm.job_categories,
+                };
+                await api.post('/jobs/job', payload);
+                await fetchJobs();
+                // If a title was provided, pre-apply it to employee form
+                if (payload.job_title) setField('TITLE', String(payload.job_title));
+                setJobDialogOpen(false);
+                showSnackbar(t('hr.jobs.created', 'Job created'), 'success');
+              } catch (e: any) {
+                showSnackbar(e?.response?.data?.message || t('hr.jobs.createError', 'Error creating job'), 'error');
+              }
+            }}
+          >
+            {t('common.save', 'Save')}
+          </Button>
+        </DialogActions>
+      </Dialog>
+
       {/* Snackbar */}
       <Snackbar
         open={snackbar.open}
@@ -959,10 +1503,58 @@ const Employees = () => {
         return (<>
           <FormControl fullWidth margin="normal">
             <InputLabel>{t('employees.fields.PS', 'Point of Sale')}</InputLabel>
-            <Select name="PS" value={form.PS || ''} onChange={(e) => setField('PS', e.target.value)} label={t('employees.fields.PS', 'Point of Sale')}>
+            <Select
+              label={t('employees.fields.PS', 'Point of Sale')}
+              value={form.PS || ''}
+              onChange={(e) => setField('PS', e.target.value)}
+            >
               {pointsOfSale.map((pos) => (<MenuItem key={pos.Id_point} value={pos.Id_point}>{pos.name_point}</MenuItem>))}
             </Select>
           </FormControl>
+          {/* Job selector: populates TITLE from selected job */}
+          <FormControl fullWidth margin="normal">
+            <InputLabel>{t('employees.fields.JOB', 'Job')}</InputLabel>
+            <Select
+              label={t('employees.fields.JOB', 'Job')}
+              value={form.TITLE || ''}
+              onChange={(e) => setField('TITLE', e.target.value)}
+            >
+              {jobs.map((j) => (
+                <MenuItem key={j.id_job} value={j.Job_title}>
+                  {`${j.Job_title} (${j.job_name})`}
+                </MenuItem>
+              ))}
+            </Select>
+          </FormControl>
+          <Stack direction="row" spacing={1} alignItems="center">
+            <Button variant="outlined" size="small" onClick={() => setJobDialogOpen(true)}>
+              {t('hr.jobs.create', 'Create Job')}
+            </Button>
+            {form.TITLE && (
+              <Chip size="small" label={t('hr.jobs.appliesTitle', { defaultValue: 'Will set Title to: {{t}}', t: form.TITLE })} />
+            )}
+            {/* Assign job immediately to existing employee */}
+            <Button
+              variant="contained"
+              size="small"
+              onClick={async () => {
+                if (!form.ID_EMP) { showSnackbar(t('hr.jobs.assignNeedsEmployee', 'Save the employee first, then assign a job.'), 'info'); return; }
+                if (!form.NAME || String(form.NAME).trim() === '') { showSnackbar(t('employees.errors.nameRequired', 'Name is required'), 'error'); return; }
+                try {
+                  const clamp = (s: string | null | undefined, max: number) => (s ? s.slice(0, max) : s ?? null);
+                  await api.put(`/employees/${form.ID_EMP}`,
+                    { NAME: String(form.NAME).trim(), TITLE: clamp(form.TITLE || null, 20) }
+                  );
+                  showSnackbar(t('hr.jobs.assigned', 'Job assigned'), 'success');
+                  await fetchEmployees();
+                } catch (e: any) {
+                  showSnackbar(e?.response?.data?.message || t('hr.jobs.assignFailed', 'Failed to assign job'), 'error');
+                }
+              }}
+            >
+              {t('hr.jobs.assign', 'Assign Job')}
+            </Button>
+          </Stack>
           <TextField margin="normal" fullWidth label={t('employees.fields.TITLE', 'Job Title')} name="TITLE" value={form.TITLE || ''} onChange={(e) => setField('TITLE', e.target.value)} />
           <TextField margin="normal" fullWidth label={t('employees.fields.TYPE_OF_RECRUITMENT', 'Type of Recruitment')} name="TYPE_OF_RECRUITMENT" value={form.TYPE_OF_RECRUITMENT || ''} onChange={(e) => setField('TYPE_OF_RECRUITMENT', e.target.value)} />
           <TextField margin="normal" fullWidth label={t('employees.fields.CONTRACT_START', 'Contract Start Date')} name="CONTRACT_START" type="date" InputLabelProps={{ shrink: true }} value={form.CONTRACT_START || ''} onChange={(e) => setField('CONTRACT_START', e.target.value)} />

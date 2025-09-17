@@ -44,7 +44,7 @@ const Vendors = () => {
   const [errors, setErrors] = useState<any>({});
   const navigate = useNavigate();
   const apiIp = process.env.REACT_APP_API_IP;
-  const apiUrl = `http://${apiIp}/vendors`;
+  const apiUrl = `${apiIp}/vendors`;
 
   // Get theme mode from localStorage or default to 'dark'
  

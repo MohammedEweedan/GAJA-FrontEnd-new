@@ -29,7 +29,7 @@ const initialBoxeState: Boxe = {
 };
 
 const apiIp = process.env.REACT_APP_API_IP;
-const apiUrl = `http://${apiIp}/boxes`;
+const apiUrl = `${apiIp}/boxes`;
 
 const Boxes = () => {
   const [data, setData] = useState<Boxe[]>([]);

@@ -333,7 +333,7 @@ const PrintInvoiceDialog: React.FC<PrintInvoiceDialogProps> = ({
 
 
 
-  const apiUrlinv = `http://${apiIp}/invoices`;
+  const apiUrlinv = `${apiIp}/invoices`;
   const handleAddNew = async (): Promise<number | null> => {
     const token = localStorage.getItem('token');
     const psParam = invoice?.ps != null ? String(invoice.ps) : String(ps ?? '');

@@ -130,7 +130,7 @@ const Suppliers = () => {
 
   const navigate = useNavigate();
   const apiIp = process.env.REACT_APP_API_IP;
-  const apiUrl = `http://${apiIp}/suppliers`;
+  const apiUrl = `${apiIp}/suppliers`;
   const savedThemeMode = localStorage.getItem('themeMode') as 'light' | 'dark' || 'dark';
   const [themeMode, setThemeMode] = useState<'light' | 'dark'>(savedThemeMode);
 
@@ -151,7 +151,7 @@ const Suppliers = () => {
   };
 
 
-  const apiUrlT = `http://${apiIp}/itemstypes`;
+  const apiUrlT = `${apiIp}/itemstypes`;
 
   const fetchDataT = async () => {
     try {

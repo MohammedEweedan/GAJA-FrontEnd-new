@@ -184,8 +184,8 @@ const DNew_p = (props: NewPProps) => {
     const navigate = useNavigate();
     const { ps, Cuser } = useLocation().state || {};
     const apiIp = process.env.REACT_APP_API_IP;
-    const apiUrl = `http://${apiIp}/purchases`;
-    const apiUrlProducts = `http://${apiIp}/products`;
+    const apiUrl = `${apiIp}/purchases`;
+    const apiUrlProducts = `${apiIp}/products`;
 
     const isUsedSupplier = useMemo(() => {
         return editPurchase.Fournisseur?.TYPE_SUPPLIER?.toLowerCase().includes('used') ?? false;
@@ -303,7 +303,7 @@ const DNew_p = (props: NewPProps) => {
     };
 
     const fetchSuppliers = async () => {
-        const apiUrlsuppliers = `http://${apiIp}/suppliers`;
+        const apiUrlsuppliers = `${apiIp}/suppliers`;
         const token = localStorage.getItem('token');
         try {
             setLoadingSuppliers(true);
@@ -331,7 +331,7 @@ const DNew_p = (props: NewPProps) => {
 
         try {
             const response = await axios.get(
-                `http://${apiIp}/Dpurchases/ProductDetails`,
+                `${apiIp}/Dpurchases/ProductDetails`,
                 {
                     headers: { Authorization: `Bearer ${token}` },
                     params: { distributionID, type }
@@ -561,7 +561,7 @@ const DNew_p = (props: NewPProps) => {
 
 
                 await axios.put(
-                    `http://${apiIp}/Dpurchases/UpdateStatus/${distribution.distributionID}`,
+                    `${apiIp}/Dpurchases/UpdateStatus/${distribution.distributionID}`,
                     { DistributionISOK: true },
                     { headers: { Authorization: `Bearer ${token}` } }
                 ).catch((error) => {

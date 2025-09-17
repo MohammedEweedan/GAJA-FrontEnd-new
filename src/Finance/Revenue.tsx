@@ -117,7 +117,7 @@ const Revenue = (props: Props) => {
     const [loadingCustomers, setLoadingCustomers] = useState(false);
 
     const apiIp = process.env.REACT_APP_API_IP;
-    const apiUrlcustomers = `http://${apiIp}/customers`;
+    const apiUrlcustomers = `${apiIp}/customers`;
 
     const fetchCustomers = async () => {
         const token = localStorage.getItem('token');
@@ -160,7 +160,7 @@ const Revenue = (props: Props) => {
 
 
     const apiUrl = "http://localhost:9000/Revenue";
-    const apiUrlAccounts = `http://${apiIp}/Accounts`;
+    const apiUrlAccounts = `${apiIp}/Accounts`;
 
     const showSnackbar = (message: string, severity: SnackbarState['severity']) => {
         setSnackbar({ open: true, message, severity });

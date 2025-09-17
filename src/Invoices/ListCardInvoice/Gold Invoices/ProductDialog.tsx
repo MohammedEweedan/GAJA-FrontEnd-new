@@ -106,7 +106,7 @@ const ProductDialog: React.FC<ProductDialogProps> = ({ open, onClose, onSelect, 
                 await Promise.all(
                     idsToFetch.map(async (id_fact) => {
                         try {
-                            const res = await axios.get(`http://${apiIp}/GetPICs/PIC/${id_fact}`, {
+                            const res = await axios.get(`${apiIp}/GetPICs/PIC/${id_fact}`, {
                                 headers: { Authorization: `Bearer ${token}` }
                             });
                             let picData = res.data && res.data.PIC1;

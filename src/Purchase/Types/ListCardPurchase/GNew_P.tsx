@@ -209,8 +209,8 @@ const GNew_p = (props: NewPProps) => {
     }
 
     const apiIp = process.env.REACT_APP_API_IP;
-    const apiUrl = `http://${apiIp}/purchases`;
-    const apiUrlProducts = `http://${apiIp}/products`;
+    const apiUrl = `${apiIp}/purchases`;
+    const apiUrlProducts = `${apiIp}/products`;
 
     const isUsedSupplier = useMemo(() => {
         return editPurchase.Fournisseur?.TYPE_SUPPLIER?.toLowerCase().includes('used') ?? false;
@@ -328,7 +328,7 @@ const GNew_p = (props: NewPProps) => {
     };
 
     const fetchSuppliers = async () => {
-        const apiUrlsuppliers = `http://${apiIp}/suppliers`;
+        const apiUrlsuppliers = `${apiIp}/suppliers`;
         const token = localStorage.getItem('token');
         try {
             const res = await axios.get<Supplier[]>(`${apiUrlsuppliers}/all`, {
@@ -472,7 +472,7 @@ const GNew_p = (props: NewPProps) => {
             // If this was a distribution receive, mark as received
             if (distribution && distribution.distributionID) {
                 await axios.put(
-                    `http://${apiIp}/Dpurchases/UpdateStatus/${distribution.distributionID}`,
+                    `${apiIp}/Dpurchases/UpdateStatus/${distribution.distributionID}`,
                     { DistributionISOK: true },
                     { headers: { Authorization: `Bearer ${token}` } }
                 ).catch((error) => {

@@ -53,7 +53,7 @@ const ChiraReturnPage = ({ id_fact, onClose, onUpdated }: ChiraReturnPageProps) 
         setLoading(true);
         try {
             const token = localStorage.getItem('token');
-            await axios.put(`http://${apiIp}/invoices/UpdateCh/${id_fact}`, {
+            await axios.put(`${apiIp}/invoices/UpdateCh/${id_fact}`, {
                 return_chira: returnChira,
                 comment_chira: commentChira,
                 usr_receive_chira: Cuser,

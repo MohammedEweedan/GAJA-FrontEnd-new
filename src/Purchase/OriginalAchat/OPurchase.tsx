@@ -172,7 +172,7 @@ const OPurchase = () => {
 
   const navigate = useNavigate();
   const apiIp = process.env.REACT_APP_API_IP;
-  const apiUrl = `http://${apiIp}/Opurchases`;
+  const apiUrl = `${apiIp}/Opurchases`;
 
   const fetchData = async () => {
     const token = localStorage.getItem('token');

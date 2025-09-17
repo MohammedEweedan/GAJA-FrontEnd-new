@@ -97,7 +97,7 @@ const CashBookReports = () => {
     useEffect(() => {
       fetchCustomers();
         const token = localStorage.getItem('token') || '';
-        const apiUrlAccounts = `http://${apiIp}/Accounts`;
+        const apiUrlAccounts = `${apiIp}/Accounts`;
         axios.get<Accounts[]>(`${apiUrlAccounts}/all`, {
             headers: { Authorization: `Bearer ${token}` },
         })
@@ -110,7 +110,7 @@ const CashBookReports = () => {
         setLoading(true);
         try {
             const token = localStorage.getItem('token') || '';
-            const apiUrlGls = `http://${apiIp}/Gls/allGlAP`;
+            const apiUrlGls = `${apiIp}/Gls/allGlAP`;
             // Get transactions in period
             const res = await axios.get(apiUrlGls, {
                 params: {
@@ -124,7 +124,7 @@ const CashBookReports = () => {
             setTransactions(res.data);
 
             // Get opening balance before 'fromDate'
-            const apiUrlGlsOpening = `http://${apiIp}/Gls/allGlAP`;
+            const apiUrlGlsOpening = `${apiIp}/Gls/allGlAP`;
             const openingRes = await axios.get(apiUrlGlsOpening, {
                 params: {
                     acc_no: selectedAccount,
@@ -319,7 +319,7 @@ const CashBookReports = () => {
 
 
 
-     const apiUrlcustomers = `http://${apiIp}/customers`;
+     const apiUrlcustomers = `${apiIp}/customers`;
 const [customers, setCustomers] = useState<Client[]>([]);
     const fetchCustomers = async () => {
         const token = localStorage.getItem('token');

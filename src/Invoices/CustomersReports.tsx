@@ -70,7 +70,7 @@ const CustomersReports = ({ type: initialType }: { type?: 'gold' | 'diamond' | '
     }
 
 
-    const apiUrlcustomers = `http://${apiIp}/customers`;
+    const apiUrlcustomers = `${apiIp}/customers`;
     const apiUrlRevenue = "http://localhost:9000/Revenue";
 
 

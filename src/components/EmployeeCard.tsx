@@ -1,4 +1,6 @@
 import React from 'react';
+import { useTheme } from '@mui/material/styles';
+import { useTranslation } from 'react-i18next';
 import {
   Avatar,
   Box,
@@ -56,6 +58,9 @@ export const EmployeeCard = <T extends MinimalEmployee>({
   dense = false,
   posLabelMap,
 }: EmployeeCardProps<T>) => {
+  const theme = useTheme();
+  const { t } = useTranslation();
+  const accent = (theme.palette as any)?.gaja?.[100] ?? '#b7a27d';
   const posLabel = React.useMemo(() => {
     if (!e.PS) return undefined;
     if (posLabelMap instanceof Map) {
@@ -73,28 +78,33 @@ export const EmployeeCard = <T extends MinimalEmployee>({
     <Paper
       elevation={0}
       sx={{
-        p: dense ? 1.25 : 2,
+        p: dense ? 1.5 : 2,
         borderRadius: 2,
         border: '1px solid',
         borderColor: 'divider',
         position: 'relative',
         bgcolor: 'background.paper',
-        transition: (t) => t.transitions.create(['box-shadow', 'transform'], { duration: t.transitions.duration.shorter }),
+        transition: (t) => t.transitions.create(['box-shadow', 'transform', 'border-color'], { duration: t.transitions.duration.shorter }),
         '&:hover': {
-          boxShadow: 4,
-          transform: 'translateY(-2px)'
+          boxShadow: 6,
+          transform: 'translateY(-2px)',
+          borderColor: accent,
         },
         cursor: 'pointer',
       }}
     >
       {/* Action buttons */}
-      <Stack direction="row" spacing={0.5} sx={{ position: 'absolute', top: 8, right: 8 }}>
-        <Tooltip title="Edit">
+      <Stack
+        direction="row"
+        spacing={0.5}
+        sx={{ position: 'absolute', top: 8, ...(theme.direction === 'rtl' ? { left: 8 } : { right: 8 }) }}
+      >
+        <Tooltip title={t('common.edit', 'Edit')}>
           <IconButton size="small" onClick={(ev) => { ev.stopPropagation(); onEdit(e); }}>
             <EditOutlined fontSize="small" />
           </IconButton>
         </Tooltip>
-        <Tooltip title="Delete">
+        <Tooltip title={t('common.delete', 'Delete')}>
           <IconButton size="small" color="error" onClick={(ev) => { ev.stopPropagation(); onDelete(e); }}>
             <DeleteOutline fontSize="small" />
           </IconButton>
@@ -103,34 +113,52 @@ export const EmployeeCard = <T extends MinimalEmployee>({
 
       {/* Header */}
       <Stack direction="row" spacing={1.5} alignItems="center">
-        <Avatar src={e.PICTURE_URL || undefined} sx={{ width: dense ? 40 : 52, height: dense ? 40 : 52 }}>
+        <Avatar
+          src={e.PICTURE_URL || undefined}
+          sx={{ width: dense ? 42 : 56, height: dense ? 42 : 56, border: '2px solid', borderColor: accent }}
+        >
           {initials(e.NAME)}
         </Avatar>
         <Box sx={{ minWidth: 0 }}>
-          <Typography variant={dense ? 'subtitle1' : 'h6'} fontWeight={800} noWrap>
-            {e.NAME}
+          <Typography variant={dense ? 'subtitle1' : 'h6'} fontWeight={800} noWrap sx={{ color: accent }}>
+            {e.NAME || t('common.notSpecified', '—')}
           </Typography>
           <Typography variant="body2" color="text.secondary" noWrap>
-            {e.TITLE || '—'}
+            {e.TITLE || t('common.notSpecified', '—')}
           </Typography>
           <Stack direction="row" spacing={0.75} sx={{ mt: 0.75 }}>
             {e.STATE != null && (
-              <Chip size="small" color={e.STATE ? 'success' : 'default'} label={e.STATE ? 'Active' : 'Inactive'} />
+              <Chip size="small" color={e.STATE ? 'success' : 'default'} label={e.STATE ? t('common.active', 'Active') : t('common.inactive', 'Inactive')} sx={{ fontWeight: 600 }} />
             )}
-            {e.PS && <Chip size="small" variant="outlined" label={posLabel || e.PS} />}
+            {posLabel && (
+              <Chip size="small" variant="filled" label={posLabel} sx={{ bgcolor: accent, color: 'white', fontWeight: 600 }} />
+            )}
           </Stack>
         </Box>
       </Stack>
 
-      {/* Details */}
       <Divider sx={{ my: dense ? 1 : 1.5 }} />
-      <Stack spacing={0.75}>
-        <Row icon={<EmailOutlined fontSize="small" />} value={e.EMAIL} />
-        <Row icon={<PhoneOutlined fontSize="small" />} value={e.PHONE} />
-        <Row icon={<WorkOutline fontSize="small" />} value={`${fmtDate(e.CONTRACT_START)} → ${fmtDate(e.CONTRACT_END)}`} />
-        <Row icon={<LocalAtmOutlined fontSize="small" />} value={fmtMoney(e.BASIC_SALARY)} />
-        {/* Optional POS second line */}
-        {/* <Row icon={<PlaceOutlined fontSize="small" />} value={posLabel || e.PS} /> */}
+
+      {/* Body */}
+      <Stack spacing={dense ? 1 : 1.25}>
+        <Stack direction="row" spacing={1.5} alignItems="center">
+          <EmailOutlined fontSize="small" />
+          <Typography variant="body2" color="text.secondary">{e.EMAIL || t('common.notSpecified', '—')}</Typography>
+        </Stack>
+        <Stack direction="row" spacing={1.5} alignItems="center">
+          <PhoneOutlined fontSize="small" />
+          <Typography variant="body2" color="text.secondary">{e.PHONE || t('common.notSpecified', '—')}</Typography>
+        </Stack>
+        <Stack direction="row" spacing={1.5} alignItems="center">
+          <WorkOutline fontSize="small" />
+          <Typography variant="body2" color="text.secondary">{e.TITLE || t('common.notSpecified', '—')}</Typography>
+        </Stack>
+        <Stack direction="row" spacing={1.5} alignItems="center">
+          <LocalAtmOutlined fontSize="small" />
+          <Typography variant="body2" color="text.secondary">
+            {fmtMoney(e.BASIC_SALARY)}
+          </Typography>
+        </Stack>
       </Stack>
     </Paper>
   );

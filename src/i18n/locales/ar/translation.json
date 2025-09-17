@@ -173,6 +173,37 @@
   },
   "common": {
     "purchases": "المشتريات",
+    "today": "اليوم",
+    "previous": "السابق",
+    "next": "التالي",
+    "month": "الشهر",
+    "week": "الأسبوع",
+    "day": "اليوم",
+    "agenda": "الجدول الزمني",
+    "date": "التاريخ",
+    "time": "الوقت",
+    "close": "إغلاق",
+    "event": "الحدث",
+    "noEventsInRange": "لا توجد أحداث في هذه الفترة",
+    "view": "عرض",
+    "showing": "عرض",
+    "to": "إلى",
+    "of": "من",
+    "entries": "مدخلات",
+    "rowsPerPage": "الصفوف في الصفحة",
+    "back": "الرجوع",
+    "cancel": "إلغاء",
+    "submit": "إرسال",
+    "edit": "تعديل",
+    "delete": "حذف",
+    "notSpecified": "—",
+    "active": "نشط",
+    "inactive": "غير نشط",
+    "all": "الكل",
+    "refresh": "تحديث",
+    "export": "تصدير",
+    "saving": "جاري الحفظ…",
+    "save": "حفظ",
     "vendors": "الموردون",
     "createdBy": "أنشأ بواسطة",
     "comment": "ملاحظة",
@@ -200,6 +231,7 @@
       "save": "حفظ",
       "saveChanges": "حفظ التغييرات",
       "print": "طباعة",
+      "button": "إجراءات",
       "receive": "استلام"
     }
   },
@@ -332,42 +364,6 @@
       }
     }
   },
-  "hr": {
-    "settings": {
-      "positions": {
-        "title": "الوظائف",
-        "desc": "إعداد الوظائف لجميع الموظفين."
-      },
-      "employeeProfile": {
-        "title": "ملف الموظف",
-        "desc": "إعداد ملف الموظف."
-      },
-      "bankAccounts": {
-        "title": "الحسابات البنكية",
-        "desc": "إعداد الحسابات البنكية لجميع الموظفين."
-      },
-      "certificates": {
-        "title": "الشهادات",
-        "desc": "إعداد الشهادات لجميع الموظفين."
-      },
-      "specialities": {
-        "title": "التخصصات",
-        "desc": "إعداد التخصصات لجميع الموظفين."
-      },
-      "contractsTypes": {
-        "title": "أنواع العقود",
-        "desc": "إعداد أنواع العقود لجميع الموظفين."
-      },
-      "positionsLevels": {
-        "title": "مستويات الوظائف",
-        "desc": "إعداد مستويات الوظائف."
-      },
-      "costCenters": {
-        "title": "مراكز التكلفة",
-        "desc": "إعداد مراكز التكلفة لجميع الموظفين."
-      }
-    }
-  },
   "sales": {
     "cards": {
       "products": {
@@ -483,6 +479,286 @@
       "confirmDeletion": "تأكيد الحذف",
       "confirmDeletionMsg": "هل أنت متأكد من حذف المنتج رقم {{num}}؟",
       "irreversible": "لا يمكن التراجع عن هذه العملية!"
+    }
+  },
+  "hr": {
+    "jobs": {
+        "title": "الوظائف",
+        "add": "إضافة وظيفة",
+        "edit": "تعديل الوظيفة",
+        "users": "الموظفون",
+        "noEmployees": "لا يوجد موظفون مخصصون",
+        "job_name": "اسم الوظيفة",
+        "Job_title": "المسمى الوظيفي",
+        "Job_code": "كود الوظيفة",
+        "job_categories": "فئات الوظيفة",
+        "NBR_YEAR_FOR_JOB": "سنوات الخبرة",
+        "table": {
+          "id": "المعرف",
+          "job_name": "اسم الوظيفة",
+          "title": "المسمى",
+          "code": "الكود",
+          "category": "الفئة",
+          "years": "السنوات",
+          "employees": "الموظفون"
+        },
+        "required": {
+          "job_name": "اسم الوظيفة مطلوب",
+          "Job_title": "المسمى الوظيفي مطلوب",
+          "Job_code": "كود الوظيفة مطلوب",
+          "job_categories": "فئة الوظيفة مطلوبة",
+          "NBR_YEAR_FOR_JOB": "سنوات الخبرة مطلوبة"
+        }
+      },
+    "header": {
+      "title": "مساحة عمل الموارد البشرية"
+    },
+    "search": {
+      "placeholder": "ابحث عن الموظفين…"
+    },
+    "filters": {
+      "status": "الحالة",
+      "pos": "نقطة البيع",
+      "selectPOS": "اختر نقطة بيع"
+    },
+    "actions": {
+      "new": "جديد",
+      "addFirst": "إضافة أول موظف"
+    },
+    "tabs": {
+      "directory": "الدليل",
+      "profile": "الملف الشخصي",
+      "org": "الهيكل التنظيمي",
+      "calendar": "التقويم"
+    },
+    "empty": {
+      "title": "لا يوجد موظفون",
+      "subtitle": "جرّب تعديل مرشحات البحث أو أضف موظفًا جديدًا."
+    },
+    "toast": {
+      "fetchPOSFailed": "فشل جلب نقاط البيع",
+      "fetchFailed": "فشل جلب الموظفين",
+      "updated": "تم تحديث الموظف بنجاح",
+      "created": "تم إنشاء الموظف بنجاح",
+      "saveError": "خطأ في حفظ الموظف: {{msg}}",
+      "deleted": "تم حذف الموظف بنجاح!",
+      "deleteFailed": "فشل الحذف",
+      "noData": "لا توجد بيانات للتصدير",
+      "exportDone": "تم إكمال التصدير!"
+    },
+    "dialog": {
+      "edit": "تعديل الموظف",
+      "add": "إضافة موظف جديد"
+    },
+    "confirm": {
+      "delete": "حذف الموظف \"{{name}}\"؟"
+    },
+    "steps": {
+      "Basic Information": "المعلومات الأساسية",
+      "Employment Details": "تفاصيل التوظيف",
+      "Personal Information": "المعلومات الشخصية",
+      "Identification": "المعرّفات",
+      "Financial Information": "المعلومات المالية",
+      "Additional Details": "تفاصيل إضافية",
+      "Compensation": "التعويضات",
+      "Other Information": "معلومات أخرى",
+      "step": "الخطوة {{n}}"
+    },
+    "profile": {
+      "selectPrompt": "اختر موظفًا",
+      "selectDescription": "اختر موظفًا من الدليل لعرض ملفه الكامل وتفاصيله.",
+      "contact": "معلومات الاتصال",
+      "employment": "تفاصيل التوظيف",
+      "contract": "مدة العقد",
+      "personal": "المعلومات الشخصية",
+      "notes": "ملاحظات وتعليقات",
+      "noNotes": "لا توجد ملاحظات متاحة",
+      "allDetails": "السجل الكامل للموظف"
+    },
+    "calendar": {
+      "title": "تقويم الأشخاص",
+      "subtitle": "تواريخ مهمة: العقود وأعياد الميلاد.",
+      "contractStart": "بداية العقد",
+      "contractEnd": "نهاية العقد",
+      "birthday": "عيد الميلاد"
+    },
+    "org": {
+      "title": "الهيكل التنظيمي",
+      "subtitle": "مبني على حقل JO_RELATION (المسؤول المباشر)."
+    },
+    "leave": {
+      "title": "إدارة الإجازات"
+    },
+    "errors": {
+      "email": "بريد إلكتروني غير صالح",
+      "salaryNumber": "يجب أن يكون الراتب رقمًا",
+      "mustBeNumber": "يجب أن يكون رقمًا"
+    },
+    "settings": {
+      "positions": {
+        "title": "الوظائف",
+        "desc": "إعداد الوظائف لجميع الموظفين."
+      },
+      "employeeProfile": {
+        "title": "ملف الموظف",
+        "desc": "إعداد ملف الموظف."
+      },
+      "bankAccounts": {
+        "title": "الحسابات البنكية",
+        "desc": "إعداد الحسابات البنكية لجميع الموظفين."
+      },
+      "certificates": {
+        "title": "الشهادات",
+        "desc": "إعداد الشهادات لجميع الموظفين."
+      },
+      "specialities": {
+        "title": "التخصصات",
+        "desc": "إعداد التخصصات لجميع الموظفين."
+      },
+      "contractsTypes": {
+        "title": "أنواع العقود",
+        "desc": "إعداد أنواع العقود لجميع الموظفين."
+      },
+      "leave": {
+        "title": "الإجازات",
+        "desc": "إعداد الإجازات لجميع الموظفين."
+      },
+      "positionsLevels": {
+        "title": "مستويات الوظائف",
+        "desc": "إعداد مستويات الوظائف."
+      },
+      "costCenters": {
+        "title": "مراكز التكلفة",
+        "desc": "إعداد مراكز التكلفة لجميع الموظفين."
+      }
+    }
+  },
+  "employees": {
+    "fields": {
+      "ID_EMP": "المعرف",
+      "NAME": "الاسم",
+      "NAME_ENGLISH": "الاسم بالإنجليزية",
+      "EMAIL": "البريد الإلكتروني",
+      "PHONE": "الهاتف",
+      "GENDER": "الجنس",
+      "PS": "مركز التكلفة",
+      "TITLE": "المسمى الوظيفي",
+      "TYPE_OF_RECRUITMENT": "نوع التوظيف",
+      "CONTRACT_START": "تاريخ بداية العقد",
+      "CONTRACT_END": "تاريخ نهاية العقد",
+      "DATE_OF_BIRTH": "تاريخ الميلاد",
+      "PLACE_OF_BIRTH": "مكان الميلاد",
+      "NATIONALITY": "الجنسية",
+      "MARITAL_STATUS": "الحالة الاجتماعية",
+      "NUM_OF_CHILDREN": "عدد الأبناء",
+      "BLOOD_TYPE": "فصيلة الدم",
+      "NUM_CIN": "الرقم الوطني (CIN)",
+      "ISSUING_AUTH": "جهة الإصدار (CIN)",
+      "PASSPORT_NUM": "رقم جواز السفر",
+      "PASSPORT_ISSUING_AUTH": "جهة إصدار الجواز",
+      "DRIVER_LIC_NUM": "رقم رخصة القيادة",
+      "NUM_NATIONAL": "الرقم الوطني",
+      "ACCOUNT_NUMBER": "رقم الحساب البنكي",
+      "BANK": "البنك",
+      "FINANCE_NUM": "رقم المالية",
+      "TYPE_OF_INSURANCE": "نوع التأمين",
+      "NUM_OF_INSURANCE": "رقم التأمين",
+      "BASIC_SALARY": "الراتب الأساسي",
+      "FOOD_ALLOWANCE": "بدل الطعام",
+      "FUEL": "بدل الوقود",
+      "COMMUNICATION": "بدل الاتصالات",
+      "ADDRESS": "العنوان",
+      "COMMENT": "ملاحظات",
+      "MEDICAL_COMMENT": "ملاحظات طبية",
+      "IS_FOREINGHT": "أجنبي؟",
+      "FINGERPRINT_NEEDED": "يتطلب بصمة؟",
+      "JOB_DESCRIPTION": "وصف الوظيفة",
+      "PREFERRED_LANG": "اللغة المفضلة",
+      "OUTFIT_NUM": "رقم الزي",
+      "FOOTWEAR_NUM": "رقم الحذاء"
+    },
+    "enums": {
+      "Male": "ذكر",
+      "Female": "أنثى",
+      "Single": "أعزب/عزباء",
+      "Married": "متزوج/متزوجة",
+      "Divorced": "مطلق/مطلقة",
+      "Widowed": "أرمل/أرملة"
+    }
+  },
+  "leave": {
+    "tabs": {
+      "calendar": "التقويم",
+      "status": "الحالة",
+      "request": "طلب",
+      "balance": "الرصيد"
+    },
+    "status": {
+      "title": "حالة الإجازة",
+      "searchPlaceholder": "البحث حسب النوع أو التعليق",
+      "filter": "فلتر حسب الحالة",
+      "all": "الكل",
+      "pending": "قيد الانتظار",
+      "approved": "موافق عليه",
+      "rejected": "مرفوض",
+      "cancelled": "ملغى",
+      "type": "نوع الإجازة",
+      "period": "الفترة",
+      "days": "الأيام",
+      "status": "الحالة",
+      "submitted": "تاريخ التقديم",
+      "actions": "الإجراءات",
+      "noRequests": "لا توجد طلبات إجازة",
+      "fetchError": "خطأ في جلب طلبات الإجازة"
+    },
+    "calendar": {
+      "title": "تقويم الإجازات",
+      "today": "الذهاب إلى اليوم",
+      "dayView": "عرض اليوم",
+      "cancelLeave": "إلغاء الإجازة",
+      "weekView": "عرض الأسبوع",
+      "monthView": "عرض الشهر",
+      "requestLeave": "طلب إجازة",
+      "filters": "الفلاتر",
+      "showLeaves": "إظهار الإجازات",
+      "showHolidays": "إظهار العطلات",
+      "fetchError": "خطأ في جلب بيانات التقويم",
+      "noEvents": "لا توجد أحداث في هذه الفترة"
+    },
+    "request": {
+      "leaveType": "نوع الإجازة",
+      "startDate": "تاريخ البداية",
+      "endDate": "تاريخ النهاية",
+      "contactNumber": "رقم الاتصال",
+      "reason": "سبب الإجازة",
+      "daysRequested": "الأيام المطلوبة",
+      "submit": "إرسال طلب الإجازة",
+      "submitError": "خطأ في إرسال طلب الإجازة",
+      "fetchError": "خطأ في جلب أنواع الإجازة",
+      "success": "تم إرسال طلب الإجازة بنجاح",
+      "validation": {
+        "required": "جميع الحقول مطلوبة",
+        "invalidDateRange": "تاريخ النهاية يجب أن يكون بعد تاريخ البداية"
+      }
+    },
+    "balance": {
+      "totalLeaves": "إجمالي الإجازات",
+      "usedLeaves": "الإجازات المستخدمة",
+      "remainingLeaves": "الإجازات المتبقية",
+      "leaveHistory": "تاريخ الإجازات",
+      "type": "النوع",
+      "period": "الفترة",
+      "days": "الأيام",
+      "status": "الحالة",
+      "fetchError": "خطأ في جلب رصيد الإجازة"
+    },
+    "types": {
+      "annual": "إجازة سنوية",
+      "sick": "إجازة مرضية",
+      "personal": "إجازة شخصية",
+      "maternity": "إجازة أمومة",
+      "paternity": "إجازة أبوة",
+      "unpaid": "إجازة غير مدفوعة"
     }
   }
 }

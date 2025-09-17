@@ -643,7 +643,7 @@ const DNew_I = () => {
 
 
 
-    const apiUrlinv = `http://${apiIp}/invoices`;
+    const apiUrlinv = `${apiIp}/invoices`;
 
     const fetchDataINV = async () => {
 
@@ -1032,7 +1032,7 @@ const DNew_I = () => {
 
 
                 await axios.put(
-                    `http://${apiIp}/invoices/UpdateTotals/0`,
+                    `${apiIp}/invoices/UpdateTotals/0`,
                     {
                         total_remise_final: totalsDialog.total_remise_final,
                         total_remise_final_lyd: totalsDialog.total_remise_final_lyd,
@@ -1123,7 +1123,7 @@ const DNew_I = () => {
             const token = localStorage.getItem('token');
             // Await the API call before updating local state
             await axios.put(
-                `http://${apiIp}/invoices/UpdateTotal/${editDialogItem.id_fact}`,
+                `${apiIp}/invoices/UpdateTotal/${editDialogItem.id_fact}`,
                 {
                     total_remise: editDialogRemise,
                     prix_vente_remise: editDialogRemise,

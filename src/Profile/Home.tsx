@@ -74,6 +74,7 @@ import CustomersReports from '../Invoices/CustomersReports';
 import Revenue from '../Finance/Revenue';
 import Expenses from '../Finance/Expenses';
 import CashBookReports from '../Finance/CashBookReports';
+import LeaveManagementScreen from '../components/LeaveManagement/LeaveStatusScreen';
 
 // Emotion RTL support (only applied when dir === 'rtl')
 import createCache from '@emotion/cache';
@@ -177,6 +178,7 @@ const realRoutes = [
   '/cashBook/cashdeposit',
   '/cashBook/cashexpenses',
   '/cashBook/cashbookReports',
+  '/leaveManagement',
 ];
 
 let routeToEncrypted: Record<string, string> = {};
@@ -286,6 +288,7 @@ function getPageComponent(pathname: string) {
     case '/cashBook/cashdeposit': return <Revenue />;
     case '/cashBook/cashexpenses': return <Expenses />;
     case '/cashBook/cashbookReports': return <CashBookReports />;
+    case '/leaveManagement': return <LeaveManagementScreen />;
     default: return <P404 />;
   }
 }
@@ -392,6 +395,7 @@ function buildNavigation(t: (k: string) => string): Navigation {
               children: [
                 { segment: 'vacations', title: t('nav.hr.compensations.vacations'), icon: <FlightTakeoffIcon {...iconSx} /> },
                 { segment: 'timeheets', title: t('nav.hr.compensations.timesheets'), icon: <AccessTimeIcon {...iconSx} /> },
+                { segment: 'leave', title: t('nav.hr.compensations.leave'), icon: <FlightTakeoffIcon {...iconSx} />, path: '/leaveManagement' },
                 { segment: 'promotions', title: t('nav.hr.compensations.promotions'), icon: <TrendingUpIcon {...iconSx} /> },
                 { segment: 'wletter', title: t('nav.hr.compensations.warningLetter'), icon: <ReportProblemIcon {...iconSx} /> },
                 { segment: 'productivity', title: t('nav.hr.compensations.productivity'), icon: <TrendingFlatIcon {...iconSx} /> },
@@ -513,8 +517,8 @@ export default function Home(props: any) {
           border: '3px solid',
           borderColor: accent,        // gold border
           backgroundColor: mode === 'light' 
-            ? alpha('#1a1a1a', hovered ? 0.95 : 0.85)  // dark background in light mode
-            : alpha(theme.palette.background.paper, hovered ? 0.95 : 0.7), // lighter in dark mode
+            ? alpha('#000000', hovered ? 0.95 : 0.85)  // dark background in light mode
+            : alpha('#ffffff', hovered ? 0.95 : 0.7), // lighter in dark mode
           backdropFilter: 'blur(16px)',
           boxShadow: hovered
             ? `0 20px 60px ${alpha(accent, 0.5)}`      // gold shadow on hover

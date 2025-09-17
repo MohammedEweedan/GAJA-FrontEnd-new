@@ -37,7 +37,7 @@ const Products = () => {
   const [errors, setErrors] = useState<any>({});
   const navigate = useNavigate();
   const apiIp = process.env.REACT_APP_API_IP;
-  const apiUrl = `http://${apiIp}/products`;
+  const apiUrl = `${apiIp}/products`;
 
   // Get theme mode from localStorage or default to 'dark'
   const savedThemeMode = localStorage.getItem('themeMode') as 'light' | 'dark' || 'dark';

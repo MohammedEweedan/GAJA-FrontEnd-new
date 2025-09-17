@@ -64,7 +64,7 @@ const PointOfSales = () => {
   const [isEditMode, setIsEditMode] = useState(false);
   const [errors, setErrors] = useState<any>({});
   const apiIp = process.env.REACT_APP_API_IP;
-  const apiUrl = `http://${apiIp}/ps`;
+  const apiUrl = `${apiIp}/ps`;
 
   const savedThemeMode = localStorage.getItem('themeMode') as 'light' | 'dark' || 'dark';
   const [themeMode, setThemeMode] = useState<'light' | 'dark'>(savedThemeMode);

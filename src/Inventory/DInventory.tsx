@@ -72,7 +72,7 @@ const DInventory = (props: Props) => {
   const [images, setImages] = useState<Record<number, string>>({});
   const navigate = useNavigate();
   const apiIp = process.env.REACT_APP_API_IP;
-  const apiUrl = `http://${apiIp}/Inventory`;
+  const apiUrl = `${apiIp}/Inventory`;
 
   const fetchData = useCallback(async () => {
     const token = localStorage.getItem('token');

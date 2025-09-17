@@ -24,8 +24,8 @@ const CustomersReports = () => {
     const [loading, setLoading] = useState(false);
 
     const apiIp = process.env.REACT_APP_API_IP;
-    const apiUrlcustomers = `http://${apiIp}/customers`;
-    const apiUrlInvoices = `http://${apiIp}/invoices`;
+    const apiUrlcustomers = `${apiIp}/customers`;
+    const apiUrlInvoices = `${apiIp}/invoices`;
 
     // Fetch customers
     const fetchCustomers = async () => {

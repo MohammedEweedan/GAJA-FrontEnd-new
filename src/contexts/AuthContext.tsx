@@ -42,7 +42,7 @@ const AuthContext = createContext<AuthContextType | null>(null);
 
 const USER_KEY = 'user';
 const TOKEN_KEY = 'token';
-const BASE_URL = 'http://localhost:9000';
+const BASE_URL = process.env.REACT_APP_API_IP;
 
 export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) => {
   const [user, setUser] = useState<User | null>(null);

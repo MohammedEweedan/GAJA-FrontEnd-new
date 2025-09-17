@@ -222,7 +222,7 @@ const DOPurchase = () => {
 
   const navigate = useNavigate();
   const apiIp = process.env.REACT_APP_API_IP;
-  const apiUrl = `http://${apiIp}/DOpurchases`;
+  const apiUrl = `${apiIp}/DOpurchases`;
 
   const fetchData = async () => {
     const token = localStorage.getItem('token');
@@ -242,7 +242,7 @@ const DOPurchase = () => {
   };
 
   const fetchSuppliers = async () => {
-    const apiUrlsuppliers = `http://${apiIp}/suppliers`;
+    const apiUrlsuppliers = `${apiIp}/suppliers`;
     const token = localStorage.getItem('token');
     try {
       setLoadingSuppliers(true);
@@ -273,7 +273,7 @@ const DOPurchase = () => {
   };
 
 
-  const apiUrlProducts = `http://${apiIp}/products`;
+  const apiUrlProducts = `${apiIp}/products`;
   
       const fetchDataProducts = async () => {
           const token = localStorage.getItem('token');
@@ -446,7 +446,7 @@ const DOPurchase = () => {
       setEmailProgress(40);
       const token = localStorage.getItem('token');
       setEmailProgress(60);
-      await axios.post(`http://${apiIp}/DOpurchases/send-approval`, payload, {
+      await axios.post(`${apiIp}/DOpurchases/send-approval`, payload, {
         headers: { Authorization: `Bearer ${token}` }
       });
       setEmailProgress(90);
@@ -581,7 +581,7 @@ const DOPurchase = () => {
 
       if (existingDist) {
         // Update the existing distribution
-        await axios.put(`http://${apiIp}/Dpurchases/Update/${existingDist.distributionID}`, {
+        await axios.put(`${apiIp}/Dpurchases/Update/${existingDist.distributionID}`, {
           PurchaseID: distributionDialog.purchase?.id_achat,
           ps: newDistribution.ps,
           distributionDate: newDistribution.distributionDate,
@@ -634,7 +634,7 @@ const DOPurchase = () => {
     setLoadingDistributions(true);
     try {
       const token = localStorage.getItem('token');
-      const res = await axios.get(`http://${apiIp}/Dpurchases/all`, {
+      const res = await axios.get(`${apiIp}/Dpurchases/all`, {
         headers: { Authorization: `Bearer ${token}` }
       });
       const filtered = res.data.filter(

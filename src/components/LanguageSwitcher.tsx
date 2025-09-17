@@ -22,24 +22,21 @@ const PillIconButton = styled(IconButton)(({ theme }) => ({
 const LanguageSwitcher: React.FC = () => {
   const { language, changeLanguage, isRTL } = useLanguage();
 
-  const nextLang = language === 'ar' ? 'en' : 'ar';
-  const tooltip = language === 'ar' ? 'Switch to English' : 'التبديل إلى العربية';
+  // Normalize language to base code ('ar' | 'en'), and provide a default
+  const normalizedLang = (typeof language === 'string' ? language.split('-')[0] : 'en') as 'ar' | 'en';
+
+  const nextLang = normalizedLang === 'ar' ? 'en' : 'ar';
+  const tooltip = normalizedLang === 'ar' ? 'Switch to English' : 'التبديل إلى العربية';
 
   const handleToggle = () => changeLanguage(nextLang);
 
-  // Language configuration with flags
+  // Language configuration
   const languageConfig = {
-    ar: {
-      flag: '🇱🇾',
-      label: 'AR'
-    },
-    en: {
-      flag: '🇬🇧', 
-      label: 'EN'
-    }
-  };
+    ar: { label: 'AR' },
+    en: { label: 'EN' },
+  } as const;
 
-  const currentConfig = languageConfig[language as keyof typeof languageConfig];
+  const currentConfig = languageConfig[normalizedLang] ?? { label: 'EN' };
 
   return (
     <Tooltip title={tooltip} placement={isRTL ? 'left' : 'right'}>
@@ -52,7 +49,7 @@ const LanguageSwitcher: React.FC = () => {
           gap: 0.5,
           fontSize: 'inherit'
         }}>
-          <span style={{ fontSize: '20' }}>{currentConfig.flag}</span>
+          <span style={{ fontSize: 20 }}>{currentConfig.label}</span>
         </Box>
       </PillIconButton>
     </Tooltip>

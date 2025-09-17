@@ -186,8 +186,9 @@ export default function AnalyticsOverview() {
 
     const fetchBalances = async () => {
       try {
-        // Adjust the endpoint/shape to your backend.
-        const res = await axios.get(`${apiIp}/Finance/balances`, { headers });
+        // Backend requires account prefix and left-length (note: backend uses 'lenghtleft' key)
+        const params = { acc_no: '110101', lenghtleft: 6 } as const;
+        const res = await axios.get(`${apiIp}/GLs/BlancesCash`, { headers, params });
         const cash = toNumber(res?.data?.cash ?? res?.data?.Cash);
         const bank = toNumber(res?.data?.bank ?? res?.data?.Bank);
         const other = toNumber(res?.data?.other ?? res?.data?.Wallet ?? 0);
@@ -223,16 +224,20 @@ export default function AnalyticsOverview() {
           axios.get(`${apiIp}/Revenue/all`, { params: revParams, headers }), // revenue
           axios.get(`${apiIp}/Expense/all`, { params: expParams, headers }), // expenses
           axios.get(`${apiIp}/purchases/all`, { params: {}, headers }), // purchases
-          axios.get(`${apiIp}/Inventory/list`, { headers }), // inventory
+          axios.get(`${apiIp}/Inventory/list`, { headers }), // inventory (may fail until backend table exists)
         ];
 
-        const [salesRes, revenueRes, expensesRes, purchasesRes, inventoryRes] =
-          await Promise.all(requests);
+        const results = await Promise.allSettled(requests);
+        const salesRes      = results[0].status === 'fulfilled' ? results[0].value : null;
+        const revenueRes    = results[1].status === 'fulfilled' ? results[1].value : null;
+        const expensesRes   = results[2].status === 'fulfilled' ? results[2].value : null;
+        const purchasesRes  = results[3].status === 'fulfilled' ? results[3].value : null;
+        const inventoryRes  = results[4].status === 'fulfilled' ? results[4].value : null;
 
         // --- Aggregate by date ---
         const salesAgg: Record<string, number> = {};
         const storeAgg: Record<string | number, number> = {};
-        if (Array.isArray(salesRes.data)) {
+        if (salesRes && Array.isArray(salesRes.data)) {
           for (const inv of salesRes.data) {
             const d = inv?.date_fact ? getISODate(new Date(inv.date_fact)) : null;
             const total = toNumber(inv?.total_remise_final_lyd ?? inv?.amount_lyd ?? inv?.total ?? 0);
@@ -244,7 +249,7 @@ export default function AnalyticsOverview() {
         }
 
         const revAgg: Record<string, number> = {};
-        if (Array.isArray(revenueRes.data)) {
+        if (revenueRes && Array.isArray(revenueRes.data)) {
           for (const r of revenueRes.data) {
             const d = r?.date ? getISODate(new Date(r.date)) : null;
             const total = toNumber(r?.montant ?? r?.montant_currency ?? r?.amount);
@@ -253,7 +258,7 @@ export default function AnalyticsOverview() {
         }
 
         const expAgg: Record<string, number> = {};
-        if (Array.isArray(expensesRes.data)) {
+        if (expensesRes && Array.isArray(expensesRes.data)) {
           for (const e of expensesRes.data) {
             const d = e?.date_trandsaction
               ? getISODate(new Date(e.date_trandsaction))
@@ -266,7 +271,7 @@ export default function AnalyticsOverview() {
         }
 
         const purAgg: Record<string, number> = {};
-        if (Array.isArray(purchasesRes.data)) {
+        if (purchasesRes && Array.isArray(purchasesRes.data)) {
           for (const p of purchasesRes.data) {
             const d = p?.d_time
               ? getISODate(new Date(p.d_time))
@@ -278,7 +283,7 @@ export default function AnalyticsOverview() {
           }
         }
 
-        const invArr = Array.isArray(inventoryRes.data) ? inventoryRes.data : [];
+        const invArr = inventoryRes?.data ?? [];
         const invCount = invArr.length;
 
         if (!isMounted) return;
@@ -289,11 +294,8 @@ export default function AnalyticsOverview() {
         setInventory(invArr);
         setInventoryCount(invCount);
         setStoreSalesMap(storeAgg);
-      } catch (err: any) {
-        console.error('Analytics load error', err);
-        if (isMounted) {
-          setError(err?.response?.data?.message || err?.message || 'Error');
-        }
+      } catch (e: any) {
+        setError(e?.message || 'Failed to load dashboard data');
       } finally {
         if (isMounted) setLoading(false);
       }
@@ -308,6 +310,19 @@ export default function AnalyticsOverview() {
       isMounted = false;
     };
   }, [apiIp, token, selectedPs, canSeeSales, canSeeFin]);
+
+  // Keep POS selection valid: if options don't include the current value, fall back to -1
+  useEffect(() => {
+    try {
+      // @ts-ignore allow runtime checks
+      const has = Array.isArray(posOptions) && posOptions.some((p: any) => p?.Id_point === selectedPs);
+      if (!has && selectedPs !== -1) {
+        setSelectedPs(-1 as any);
+      }
+    } catch {
+      if (selectedPs !== -1) setSelectedPs(-1 as any);
+    }
+  }, [posOptions, selectedPs]);
 
   // ----------------- Real-time POS polling -----------------
   useEffect(() => {

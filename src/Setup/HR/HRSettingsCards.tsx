@@ -18,10 +18,10 @@ import PsychologyAltIcon from '@mui/icons-material/PsychologyAlt';
 import AssignmentIcon from '@mui/icons-material/Assignment';
 import LeaderboardIcon from '@mui/icons-material/Leaderboard';
 
-import Positions from './Pages/Positions';
-import EmployeeProfile from '../../../src/HR/Setting/EmployeeProfile';
+import Jobs from './Pages/Jobs';
 import { useTheme } from '@mui/material/styles';
 import { useTranslation } from 'react-i18next';
+import EmployeeProfile from "../../../src/HR/Setting/EmployeeProfile";
 
 const HRSettingsCards: React.FC = () => {
   const [selectedCard, setSelectedCard] = React.useState<number | null>(null);
@@ -34,62 +34,62 @@ const HRSettingsCards: React.FC = () => {
     () => [
       {
         id: 1,
-        title: t('hr.settings.positions.title'),
-        description: t('hr.settings.positions.desc'),
+        title: t("hr.settings.positions.title"),
+        description: t("hr.settings.positions.desc"),
         icon: <WorkOutlineIcon fontSize="large" />,
-        component: <Positions />,
+        component: <Jobs />,
       },
       {
         id: 2,
-        title: t('hr.settings.employeeProfile.title'),
-        description: t('hr.settings.employeeProfile.desc'),
+        title: t("hr.settings.employeeProfile.title"),
+        description: t("hr.settings.employeeProfile.desc"),
         icon: <AccountBalanceIcon fontSize="large" />,
         component: <EmployeeProfile />,
       },
       {
         id: 3,
-        title: t('hr.settings.bankAccounts.title'),
-        description: t('hr.settings.bankAccounts.desc'),
+        title: t("hr.settings.bankAccounts.title"),
+        description: t("hr.settings.bankAccounts.desc"),
         icon: <AccountBalanceWalletIcon fontSize="large" />,
         component: <div>Bank Accounts Page</div>,
       },
       {
         id: 4,
-        title: t('hr.settings.certificates.title'),
-        description: t('hr.settings.certificates.desc'),
+        title: t("hr.settings.certificates.title"),
+        description: t("hr.settings.certificates.desc"),
         icon: <WorkspacePremiumIcon fontSize="large" />,
         component: <div>Certificates Page</div>,
       },
       {
         id: 5,
-        title: t('hr.settings.specialities.title'),
-        description: t('hr.settings.specialities.desc'),
+        title: t("hr.settings.specialities.title"),
+        description: t("hr.settings.specialities.desc"),
         icon: <PsychologyAltIcon fontSize="large" />,
         component: <div>Specialities Page</div>,
       },
       {
         id: 6,
-        title: t('hr.settings.contractsTypes.title'),
-        description: t('hr.settings.contractsTypes.desc'),
+        title: t("hr.settings.contractsTypes.title"),
+        description: t("hr.settings.contractsTypes.desc"),
         icon: <AssignmentIcon fontSize="large" />,
         component: <div>Contracts Types Page</div>,
       },
       {
         id: 7,
-        title: t('hr.settings.positionsLevels.title'),
-        description: t('hr.settings.positionsLevels.desc'),
+        title: t("hr.settings.positionsLevels.title"),
+        description: t("hr.settings.positionsLevels.desc"),
         icon: <LeaderboardIcon fontSize="large" />,
         component: <div>Positions Levels Page</div>,
       },
-      {
-        id: 8,
-        title: t('hr.settings.costCenters.title'),
-        description: t('hr.settings.costCenters.desc'),
-        icon: <LeaderboardIcon fontSize="large" />,
-        component: <div>Cost Centers Page</div>,
-      },
+      // {
+      //   id: 8,
+      //   title: t("hr.settings.costCenters.title"),
+      //   description: t("hr.settings.costCenters.desc"),
+      //   icon: <LeaderboardIcon fontSize="large" />,
+      //   component: <div>Cost Centers Page</div>,
+      // },
     ],
-    [t],
+    [t]
   );
 
   if (selectedCard !== null) {

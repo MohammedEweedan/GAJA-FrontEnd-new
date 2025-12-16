@@ -159,6 +159,8 @@ export async function updateAttendance(input: UpdateAttendanceInput) {
   
   // ===== Option B: Monthly timesheet via backend aggregation =====
   export type TimesheetDay = {
+    leaveDescription: any;
+    leave_description: any;
     day: number;
     code: string | null;
     reason: string | null;

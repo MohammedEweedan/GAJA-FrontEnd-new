@@ -378,11 +378,14 @@ export default function TimeSheetsPage() {
       deltaHours: number;
       isWeekend: boolean;
       isHoliday: boolean;
+      isAbsentDay: boolean;
+      missingHoursOnly: number;
     }>;
     total: {
       expectedHours: number;
       workedHours: number;
       deltaHours: number;
+      missingHoursOnly: number;
     };
   } | null>(null);
 
@@ -2991,9 +2994,10 @@ useEffect(() => {
     if (min == null) return "";
     const sign = min >= 0 ? "+" : "-";
     const a = Math.abs(min);
-    const hours = Math.floor(a / 60) + (a % 60 > 30 ? 1 : 0);
-    if (!hours) return "";
-    return `${sign}${hours}h`;
+    const h = Math.floor(a / 60);
+    const m = Math.floor(a % 60);
+    if (h === 0 && m < 1) return "";
+    return `${sign}${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`;
   }
 
   function fmtDelta(min?: number | null): string {
@@ -3004,6 +3008,13 @@ useEffect(() => {
     const m = a % 60;
     return `${sign}${String(h)}:${String(m).padStart(2, "0")}`;
   }
+
+  const isDayFinalized = (date: dayjs.Dayjs): boolean => {
+    const now = dayjs();
+    if (date.isBefore(now, "day")) return true;
+    if (date.isSame(now, "day")) return now.hour() >= 23;
+    return false;
+  };
 
   function ordinal(n: number): string {
     const s = ["th", "st", "nd", "rd"];
@@ -3662,7 +3673,6 @@ useEffect(() => {
               const ymd = `${year}-${String(month + 1).padStart(2, "0")}-${String(day.day).padStart(2, "0")}`;
               const isFutureOrToday = !dayjs(ymd).isBefore(today, "day");
 
-              // Calculate expected hours from schedule or day data (past days only)
               let expectedHours = 0;
               if (!isFutureOrToday && day.expectedMin != null) {
                 expectedHours = day.expectedMin / 60;
@@ -3672,14 +3682,20 @@ useEffect(() => {
                 expectedHours = end.diff(start, "minute") / 60;
               }
 
-              // Calculate worked hours (past days only)
               let workedHours = 0;
               if (!isFutureOrToday && day.workMin != null) {
                 workedHours = day.workMin / 60;
               }
 
-              // Calculate delta
               const deltaHours = workedHours - expectedHours;
+              const codeNorm = String(day.code || "").toUpperCase();
+              const isFriday = dayjs(ymd).day() === 5;
+              const isHoliday = Boolean(day.isHoliday) || holidaysSet.has(ymd);
+              const isWorkingDay = !isFriday && !isHoliday;
+              const isAbsentDay = isWorkingDay && (codeNorm === "A" || codeNorm === "UL");
+              const isLatencyDay =
+                isWorkingDay && codeNorm === "PP" && typeof day.deltaMin === "number" && day.deltaMin < 0;
+              const missingHoursOnly = isLatencyDay ? Math.abs(day.deltaMin || 0) / 60 : 0;
 
               return {
                 date: ymd,
@@ -3689,6 +3705,8 @@ useEffect(() => {
                 deltaHours,
                 isWeekend: dayjs(ymd).day() === 5 || dayjs(ymd).day() === 6,
                 isHoliday: day.isHoliday || holidaysSet.has(ymd),
+                isAbsentDay,
+                missingHoursOnly,
               };
             });
 
@@ -3697,8 +3715,9 @@ useEffect(() => {
                 expectedHours: acc.expectedHours + (day.expectedHours || 0),
                 workedHours: acc.workedHours + (day.workedHours || 0),
                 deltaHours: acc.deltaHours + (day.deltaHours || 0),
+                missingHoursOnly: acc.missingHoursOnly + (day.missingHoursOnly || 0),
               }),
-              { expectedHours: 0, workedHours: 0, deltaHours: 0 }
+              { expectedHours: 0, workedHours: 0, deltaHours: 0, missingHoursOnly: 0 }
             );
 
             const timeLogData = {
@@ -3748,6 +3767,9 @@ useEffect(() => {
           }
 
           const deltaHours = workedHours - expectedHours;
+          const isAbsentDay =
+            (!dayData?.present && (dayData?.workMin ?? 0) <= 0) || String(dayData?.code || "").toUpperCase() === "A";
+          const missingHoursOnly = !isAbsentDay && deltaHours < 0 ? Math.abs(deltaHours) : 0;
 
           days.push({
             date: ymd,
@@ -3757,6 +3779,8 @@ useEffect(() => {
             deltaHours,
             isWeekend: current.day() === 5 || current.day() === 6,
             isHoliday: dayData?.isHoliday || holidaysSet.has(ymd),
+            isAbsentDay,
+            missingHoursOnly,
           });
 
           current = current.add(1, "day");
@@ -3767,8 +3791,9 @@ useEffect(() => {
             expectedHours: acc.expectedHours + (day.expectedHours || 0),
             workedHours: acc.workedHours + (day.workedHours || 0),
             deltaHours: acc.deltaHours + (day.deltaHours || 0),
+            missingHoursOnly: acc.missingHoursOnly + (day.missingHoursOnly || 0),
           }),
-          { expectedHours: 0, workedHours: 0, deltaHours: 0 }
+          { expectedHours: 0, workedHours: 0, deltaHours: 0, missingHoursOnly: 0 }
         );
 
         const finalTimeLogData = {
@@ -4161,9 +4186,11 @@ useEffect(() => {
                       }
 
                       let deltaMin: number | null = null;
-                      // Only compute delta for completed (past) days
-                      if (!isFutureOrToday && workMin != null && expectedMin != null) {
-                        deltaMin = workMin - expectedMin;
+                      // Use backend-computed deltaMin (missing hours only) when available.
+                      // Backend already ignores today / future and only records early-leave
+                      // minutes when entry was on time and exit was before schedule end.
+                      if (!isFutureOrToday && typeof tsd?.deltaMin === "number") {
+                        deltaMin = tsd.deltaMin;
                       }
 
                       const attCode = (() => {
@@ -4174,6 +4201,22 @@ useEffect(() => {
                           "PL",
                           "PH",
                           "PHF",
+                          // Exception codes
+                          "NI",
+                          "NO",
+                          "MO",
+                          "IP",
+                          // Leave codes
+                          "AL",
+                          "SL",
+                          "EL",
+                          "UL",
+                          "ML",
+                          "XL",
+                          "B1",
+                          "B2",
+                          "HL",
+                          "BM",
                         ]);
                         return allowed.has(rawMerged) ? rawMerged : "";
                       })();
@@ -4527,7 +4570,7 @@ useEffect(() => {
                             );
 
                             // aggregates
-                            let deltaMinTotal = 0;
+                            let deltaMinTotal = 0; // sum of negative deltaMin (missing minutes)
                             let workDaysTotal = 0;
                             let sickDaysTotal = 0;
                             const leaveCounts: Record<string, number> = {};
@@ -4545,7 +4588,7 @@ useEffect(() => {
                               const present = hasE || hasS || !!tsd?.present;
                               if (present) workDaysTotal++;
 
-                              // minutes
+                              // minutes (for optional fallback / debugging)
                               let workMin: number | null = null;
                               const eHM = tsd?.entry
                                 ? fmtClock24(tsd.entry)
@@ -4567,12 +4610,12 @@ useEffect(() => {
                                 workMin = tsd.workMin;
                               }
 
-                              // expected
+                              // expected (from PS schedule or tsd.expectedMin)
                               const sched = empSchedule.get(r.id_emp) || null;
                               let expectedMin: number | null = null;
                               const isFuture = d.isAfter(today, "day");
                               const isFriday = d.day() === 5;
-                              // Only count completed, non-Friday days towards aggregate delta
+                              // Only consider completed, non-Friday days in aggregates
                               if (!isFuture && !isFriday) {
                                 if (sched?.start && sched?.end) {
                                   const stt = dayjs(`${ymd}T${sched.start}:00`);
@@ -4584,9 +4627,21 @@ useEffect(() => {
                                 }
                               }
 
-                              if (workMin != null && expectedMin != null) {
-                                deltaMinTotal += workMin - expectedMin;
-                                debugDeltaCount++;
+                              // Use timesheet deltaMin when available (backend semantics).
+                              // Do not recompute workMin-expectedMin here to avoid
+                              // diverging from the source-of-truth missing-hours logic.
+                              let deltaMin: number | null = null;
+                              if (typeof tsd?.deltaMin === "number") {
+                                deltaMin = tsd.deltaMin;
+                              }
+
+                              if (deltaMin != null) {
+                                // For the monthly pill we only care about missing time (negative deltas),
+                                // to match the "Missing (hrs)" and payroll/PDF latency semantics.
+                                if (deltaMin < 0) {
+                                  deltaMinTotal += deltaMin;
+                                  debugDeltaCount++;
+                                }
                               }
 
                               // counts
@@ -5861,20 +5916,13 @@ useEffect(() => {
                   </Box>
                   <Box>
                     <Typography variant="subtitle2" color="text.secondary">
-                      Total Difference
+                      Missing Hours (partial days)
                     </Typography>
                     <Typography
                       variant="h6"
-                      color={
-                        timeLogData.total.deltaHours > 0
-                          ? "success.main"
-                          : timeLogData.total.deltaHours < 0
-                            ? "error.main"
-                            : "text.primary"
-                      }
+                      color={timeLogData.total.missingHoursOnly > 0 ? "error.main" : "text.secondary"}
                     >
-                      {timeLogData.total.deltaHours >= 0 ? "+" : ""}
-                      {timeLogData.total.deltaHours.toFixed(2)} hrs
+                      {timeLogData.total.missingHoursOnly.toFixed(2)} hrs
                     </Typography>
                   </Box>
                 </Box>
@@ -5896,8 +5944,8 @@ useEffect(() => {
                             const d = dayjs(day.date);
                             const isPast = d.isBefore(dayjs(), "day");
                             const isFriday = d.day() === 5;
-                            return isPast && !isFriday && Math.abs(day.deltaHours) > 0.01;
-                          }) // Only show past non-Friday days with missing/surplus hours
+                            return isPast && !isFriday && day.missingHoursOnly > 0.01;
+                          }) // Only show past non-Friday days with partial missing hours
                           .map((day) => (
                             <TableRow
                               key={day.date}
@@ -5924,19 +5972,8 @@ useEffect(() => {
                             <TableCell align="right">
                               {day.workedHours.toFixed(2)} hrs
                             </TableCell>
-                            <TableCell
-                              align="right"
-                              sx={{
-                                color:
-                                  day.deltaHours > 0
-                                    ? "success.main"
-                                    : day.deltaHours < 0
-                                      ? "error.main"
-                                      : "text.primary",
-                              }}
-                            >
-                              {day.deltaHours >= 0 ? "+" : ""}
-                              {day.deltaHours.toFixed(2)} hrs
+                            <TableCell align="right" sx={{ color: "error.main" }}>
+                              -{day.missingHoursOnly.toFixed(2)} hrs
                             </TableCell>
                           </TableRow>
                         ))}

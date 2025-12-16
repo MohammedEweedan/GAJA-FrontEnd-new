@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useEffect, useState } from "react";
 import {
   Box,
   Card,
@@ -40,6 +40,9 @@ import VisibilityOffIcon from "@mui/icons-material/VisibilityOff";
 import SettingsIcon from "@mui/icons-material/Settings";
 import PictureAsPdfOutlinedIcon from "@mui/icons-material/PictureAsPdfOutlined";
 import SendOutlinedIcon from "@mui/icons-material/SendOutlined";
+import { getLeaveBalance, getLeaveRequests, getLeaveTypes, getHolidays } from "../../services/leaveService";
+import { getVacationsInRange } from "../../api/vacations";
+import type { VacationRecord } from "../../api/vacations";
 
 // Format PS as codes: keep OG/HQ, turn numerals into P#
 function formatPs(ps: any): string | undefined {
@@ -80,6 +83,8 @@ export default function PayrollPage() {
   const [calEmp, setCalEmp] = React.useState<{ id_emp: number; name: string } | null>(null);
   const [calDays, setCalDays] = React.useState<TimesheetDay[] | null>(null);
   const [calLoading, setCalLoading] = React.useState(false);
+  const [calVacations, setCalVacations] = React.useState<VacationRecord[]>([]);
+  const [holidaySet, setHolidaySet] = React.useState<Set<string>>(() => new Set());
 
   // Adjustments dialog state
   const [adjOpen, setAdjOpen] = React.useState(false);
@@ -88,30 +93,18 @@ export default function PayrollPage() {
   const [adjRows, setAdjRows] = React.useState<Array<{ type: string; amount: number; currency: string; note?: string; ts?: string }>>([]);
   const [adjForm, setAdjForm] = React.useState<{ type: string; amount: string; currency: string; note: string }>({ type: "bonus", amount: "", currency: "LYD", note: "" });
 
-  // Adjustment types and behavior
+  // Adjustment types and behavior (limited set per requirements)
   const adjTypeOptions: Array<{ value: string; label: string }> = [
-    { value: 'bonus', label: 'Bonus (LYD/USD)' },
-    { value: 'deduction', label: 'Deduction (LYD/USD)' },
-    { value: 'food_allow', label: 'Food Allowance (LYD)' },
-    { value: 'comm_allow', label: 'Communication Allowance (LYD)' },
-    { value: 'transport_allow', label: 'Transport Allowance (LYD)' },
-    { value: 'gold_comm', label: 'Gold Sales Bonus' },
-    { value: 'diamond_comm', label: 'Diamond Sales Bonus' },
-    { value: 'watch_comm', label: 'Watch Commission' },
+    { value: 'bonus', label: 'Bonus' },
+    { value: 'deduction', label: 'Deduction' },
     { value: 'eid_bonus', label: 'Eid Bonus' },
-    { value: 'advance', label: 'Advance (LYD)' },
-    { value: 'loanPayment', label: 'Loan Payment (LYD)' },
+    { value: 'ramadan_bonus', label: 'Ramadan Bonus' },
   ];
   const adjLydOnlyTypes = new Set([
-    'food_allow',
-    'comm_allow',
-    'transport_allow',
-    'gold_comm',
-    'diamond_comm',
-    'watch_comm',
+    'bonus',
+    'deduction',
     'eid_bonus',
-    'advance',
-    'loanPayment',
+    'ramadan_bonus',
   ]);
 
   const [bdOpen, setBdOpen] = React.useState(false);
@@ -156,9 +149,12 @@ export default function PayrollPage() {
   const [loanAmount, setLoanAmount] = React.useState<string>("");
   const [existingAdvances, setExistingAdvances] = React.useState<number>(0);
   const [presentDaysMap, setPresentDaysMap] = React.useState<Record<number, number>>({});
-  const [tsAgg, setTsAgg] = React.useState<Record<number, { presentP: number; phUnits: number; fridayA: number; missRatio: number; phFullDays: number; phPartDays: number; absenceDays: number }>>({});
+
   const [advMap, setAdvMap] = React.useState<Record<number, number>>({});
+  const [adjSumsByEmp, setAdjSumsByEmp] = React.useState<Record<number, { earnLyd: number; earnUsd: number; dedLyd: number; dedUsd: number }>>({});
   const [nameMap, setNameMap] = React.useState<Record<number, string>>({});
+  const [leaveTypeMap, setLeaveTypeMap] = useState<Record<string, { code: string; name: string }>>({});
+  const [leaveRequestsCache, setLeaveRequestsCache] = useState<Record<number, any[]>>({});
   const [contractStartMap, setContractStartMap] = React.useState<Record<number, string | null>>({});
   const [hrEmails, setHrEmails] = React.useState<string>(() => {
     try { return localStorage.getItem('payroll_settings_hr_emails') || ''; } catch { return ''; }
@@ -184,7 +180,6 @@ export default function PayrollPage() {
   const [isAdmin, setIsAdmin] = React.useState<boolean>(false);
   const [commList, setCommList] = React.useState<any[]>([]);
   const [commLoading, setCommLoading] = React.useState<boolean>(false);
-  const [commDirty, setCommDirty] = React.useState<Record<number, any>>({});
 
   // Commission weight mode: 'individual' (seller grams) vs 'total' (aggregate PS scope grams)
   const [commissionWeightMode, setCommissionWeightMode] = React.useState<'individual' | 'total'>(() => {
@@ -278,13 +273,26 @@ export default function PayrollPage() {
   // Prefer backend-calculated fields (v2Rows) so UI/PDF share the same logic,
   // but fall back to local tsAgg-based computation if backend fields are missing.
   type PPhPhfVals = {
-  pLyd: number;
-  pUsd: number;
-  phLyd: number;
-  phUsd: number;
-  phfLyd: number;
-  phfUsd: number;
-};
+    pLyd: number;
+    pUsd: number;
+    phLyd: number;
+    phUsd: number;
+    phfLyd: number;
+    phfUsd: number;
+  };
+
+  const [tsAgg, setTsAgg] = React.useState<Record<number, {
+    presentP: number;
+    presentStrict: number;
+    phUnits: number;
+    fridayA: number;
+    missRatio: number;
+    phFullDays: number;
+    phPartDays: number;
+    absenceDays: number;
+    // Total missing minutes from timesheet (sum of negative deltaMin, mirrored from TimeSheetsPage)
+    missingMinutes: number;
+  }>>({});
 
 const computePPhPhf = (e: Payslip): PPhPhfVals => {
   const vr =
@@ -315,10 +323,8 @@ const computePPhPhf = (e: Payslip): PPhPhfVals => {
   );
   if (!foodPerDay) {
     const totalFoodLyd = Number((vr as any).wd_food_lyd || 0);
-    const present =
-      Number(pDays || presentDaysMap[e.id_emp] || e.presentWorkdays || 0) || 0;
-    foodPerDay =
-      totalFoodLyd && present ? totalFoodLyd / present : 0;
+    // FOOD is per working day (not per present day)
+    foodPerDay = totalFoodLyd && W ? totalFoodLyd / W : 0;
   }
 
   // --- 4) P / PH / PHF amounts ---
@@ -345,44 +351,163 @@ const computePPhPhf = (e: Payslip): PPhPhfVals => {
 };
 
 
-  // Consistent NET calculator (matches PDF logic). Returns non-negative LYD.
-  function computeNetLYDFor(id_emp: number): number {
+  const zeroBreakdown = {
+    earningsLyd: 0,
+    earningsUsd: 0,
+    deductionsLyd: 0,
+    deductionsUsd: 0,
+    goldLyd: 0,
+    goldUsd: 0,
+    diamondLyd: 0,
+    diamondUsd: 0,
+    grossLyd: 0,
+    grossUsd: 0,
+  };
+
+  function resolvePayEntities(id_emp: number): { emp: Payslip | null; v2: any } {
+    const emp = (result?.employees || []).find((e) => Number(e.id_emp) === Number(id_emp)) || null;
+    const v2 = (v2Rows || []).find((x: any) => Number(x.id_emp) === Number(id_emp)) || ({} as any);
+    return { emp, v2 };
+  }
+
+  function computeFoodAllowance(emp: Payslip | null, v2: any) {
+    if (!emp) return { allowance: 0, perDay: 0, paidDays: 0 };
+    const foodTotal = Number((v2 as any).wd_food_lyd ?? 0);
+    const workingDaysFood = Number((v2 as any).food_days ?? (v2 as any).workingDays ?? emp.workingDays ?? 0);
+    const defaultPer = Number((emp as any).FOOD || (emp as any).FOOD_ALLOWANCE || 0);
+    let perDay = defaultPer;
+    if (!perDay) perDay = workingDaysFood > 0 ? foodTotal / workingDaysFood : 0;
+    const paidDaysRaw = Number((v2 as any).p_days ?? emp.presentWorkdays ?? 0) || 0;
+    const paidDays = workingDaysFood > 0 ? Math.min(paidDaysRaw, workingDaysFood) : paidDaysRaw;
+    const allowance = Number((perDay * paidDays).toFixed(2));
+    return { allowance, perDay, paidDays };
+  }
+
+  function getPhAmounts(id_emp: number, opts?: { emp?: Payslip | null; v2?: any; workingDays?: number; baseLyd?: number; baseUsd?: number }) {
     try {
-      const emp = (result?.employees || []).find((e) => Number(e.id_emp) === Number(id_emp));
-      const v2 = (v2Rows || []).find((x: any) => Number(x.id_emp) === Number(id_emp)) || ({} as any);
-      if (!emp) return 0;
-      const agg = tsAgg[id_emp] || { presentP: 0, phUnits: 0, fridayA: 0, missRatio: 1, phFullDays: 0, phPartDays: 0 };
+      const resolved = resolvePayEntities(id_emp);
+      const emp = opts?.emp ?? resolved.emp;
+      const v2 = opts?.v2 ?? resolved.v2;
+      const agg = tsAgg[id_emp];
+      const workingDaysRaw = opts?.workingDays ?? emp?.workingDays ?? ((v2 as any).workingDays ?? 0);
+      const W = Math.max(1, Number(workingDaysRaw) || 1);
+      const baseLydRaw = opts?.baseLyd ?? ((v2 as any).base_salary_lyd ?? emp?.baseSalary ?? 0);
+      const baseUsdRaw = opts?.baseUsd ?? ((v2 as any).base_salary_usd ?? (emp as any)?.baseSalaryUsd ?? 0);
+      const base = Math.max(0, Number(baseLydRaw) || 0);
+      const baseUsd = Math.max(0, Number(baseUsdRaw) || 0);
+      const dailyLyd = base / W;
+      const dailyUsd = baseUsd / W;
+      const phUnits = Math.max(0, agg?.phUnits || 0);
+      const phAggLyd = phUnits > 0 ? Number((dailyLyd * phUnits).toFixed(2)) : 0;
+      const phAggUsd = phUnits > 0 ? Number((dailyUsd * phUnits).toFixed(2)) : 0;
+      const phLyd = phAggLyd > 0 ? phAggLyd : Math.max(0, Number((v2 as any).ph_lyd || 0));
+      const phUsd = phAggUsd > 0 ? phAggUsd : Math.max(0, Number((v2 as any).ph_usd || 0));
+      return { lyd: phLyd, usd: phUsd };
+    } catch {
+      return { lyd: 0, usd: 0 };
+    }
+  }
+
+  function computePayBreakdown(id_emp: number) {
+    try {
+      const { emp, v2 } = resolvePayEntities(id_emp);
+      if (!emp) return { ...zeroBreakdown };
+      const adjSums = adjSumsByEmp[id_emp] || { earnLyd: 0, earnUsd: 0, dedLyd: 0, dedUsd: 0 };
       const W = Math.max(1, Number(emp.workingDays || (v2 as any).workingDays || 0) || 1);
       const base = Math.max(0, Number(v2.base_salary_lyd || emp.baseSalary || 0));
-      const dailyLyd = W > 0 ? base / W : 0;
-      const ph = Math.max(0, Number(v2.ph_lyd || (agg.phUnits > 0 ? dailyLyd * agg.phUnits : 0)));
-      let absence = Math.max(0, Number(v2.absence_lyd || 0));
-      if (agg.fridayA > 0 && dailyLyd > 0) absence = Math.max(0, Number((absence - dailyLyd * agg.fridayA).toFixed(2)));
-      const missingV2 = Math.max(0, Number(v2.missing_lyd || 0));
-      const missing = Number((missingV2 * (agg.missRatio || 0)).toFixed(2));
-      const gold = Math.max(0, Number(v2.gold_bonus_lyd || 0));
-      const dia = Math.max(0, Number(v2.diamond_bonus_lyd || 0));
-      const otherAdds = Math.max(0, Number(v2.other_additions_lyd || 0));
+      const baseUsd = Math.max(0, Number((v2 as any).base_salary_usd || (emp as any).baseSalaryUsd || 0));
+      const { lyd: ph, usd: phUsd } = getPhAmounts(id_emp, { emp, v2, workingDays: W, baseLyd: base, baseUsd });
+      const absence = Math.max(0, Number(v2.absence_lyd || 0));
+      const absenceUsd = Math.max(0, Number((v2 as any).absence_usd || 0));
+      const commissionUi = commissionMapUI[id_emp];
+      const gold = preferCommissionValue(
+        commissionUi?.goldBonusLyd,
+        (v2 as any).gold_bonus_lyd,
+        (emp as any)?.gold_bonus_lyd
+      );
+      const dia = preferCommissionValue(
+        commissionUi?.diamondBonusLyd,
+        (v2 as any).diamond_bonus_lyd,
+        (emp as any)?.diamond_bonus_lyd
+      );
+      const goldUsd = preferCommissionValue(
+        commissionUi?.goldBonusUsd,
+        (v2 as any).gold_bonus_usd,
+        (emp as any)?.gold_bonus_usd
+      );
+      const diaUsd = preferCommissionValue(
+        commissionUi?.diamondBonusUsd,
+        (v2 as any).diamond_bonus_usd,
+        (emp as any)?.diamond_bonus_usd
+      );
       const loanPay = Math.max(0, Number(v2.loan_credit_lyd || (emp.components?.adjustments as any)?.loanPayment || 0));
+      const loanPayUsd = Math.max(0, Number((v2 as any).loan_credit_usd || 0));
       const adv = Math.max(0, Number(advMap[id_emp] || 0));
       const otherDedRaw = Math.max(0, Number(v2.other_deductions_lyd || 0));
       const otherDedExAdv = Math.max(0, otherDedRaw - adv);
-      // Food allowance adjusted to present P days
-      let per = Number((emp as any).FOOD || (emp as any).FOOD_ALLOWANCE || 0);
-      if (!per) {
-        const totalFood = Number(v2.wd_food_lyd || 0);
-        per = totalFood && W ? totalFood / W : 0;
-      }
-      const present = Number(tsAgg[id_emp]?.presentP ?? emp.presentWorkdays ?? 0) || 0;
-      const foodAdj = Math.max(0, Number((per * present).toFixed(2)));
+      const foodInfo = computeFoodAllowance(emp, v2);
+      const foodAdj = foodInfo.allowance;
+
+      // Latency deduction: use backend-calculated amounts (legacy approach)
+      // so Net matches the original payroll engine.
+      const latencyLyd = Math.max(0, Number((v2 as any).missing_lyd || (v2 as any).latency_lyd || 0));
+      const latencyUsd = Math.max(0, Number((v2 as any).missing_usd || (v2 as any).latency_usd || 0));
       // Transportation (FUEL) and Communication allowances — flat monthly amounts
       const fuelMonthly = Number(((emp as any).FUEL ?? (v2 as any).FUEL) || 0);
       const commMonthly = Number(((emp as any).COMMUNICATION ?? (v2 as any).COMMUNICATION) || 0);
       const transportAdj = Math.max(0, Number(fuelMonthly.toFixed(2)));
       const commAdj = Math.max(0, Number(commMonthly.toFixed(2)));
-      const net = base + ph + foodAdj + transportAdj + commAdj + gold + dia + otherAdds - absence - missing - adv - loanPay - otherDedExAdv;
-      return Math.max(0, Number(net.toFixed(2)));
-    } catch { return 0; }
+      const fallbackAdjLyd = Math.max(0,
+        Number((v2 as any).other_additions_lyd || 0) +
+        Number((v2 as any).other_bonus1_lyd || 0) +
+        Number((v2 as any).other_bonus2_lyd || 0) +
+        Number((v2 as any).loan_debit_lyd || 0)
+      );
+      const adjEarningsLyd = adjSums.earnLyd > 0.0001 ? adjSums.earnLyd : fallbackAdjLyd;
+      const adjDeductionsLyd = adjSums.dedLyd > 0.0001 ? adjSums.dedLyd : otherDedExAdv;
+      const totalEarnings = base + ph + foodAdj + transportAdj + commAdj + gold + dia + adjEarningsLyd;
+      const totalDeductions = absence + adv + loanPay + adjDeductionsLyd + latencyLyd;
+      const totalUsdEarnings = baseUsd + phUsd + goldUsd + diaUsd + Math.max(0, adjSums.earnUsd);
+      const totalUsdDeductions = absenceUsd + loanPayUsd + Math.max(0, adjSums.dedUsd) + latencyUsd;
+      return {
+        earningsLyd: Number(totalEarnings.toFixed(2)),
+        deductionsLyd: Number(totalDeductions.toFixed(2)),
+        earningsUsd: Number(totalUsdEarnings.toFixed(2)),
+        deductionsUsd: Number(totalUsdDeductions.toFixed(2)),
+        goldLyd: Number(gold.toFixed(2)),
+        goldUsd: Number(goldUsd.toFixed(2)),
+        diamondLyd: Number(dia.toFixed(2)),
+        diamondUsd: Number(diaUsd.toFixed(2)),
+        grossLyd: Number(totalEarnings.toFixed(2)),
+        grossUsd: Number(totalUsdEarnings.toFixed(2)),
+      };
+    } catch {
+      return { ...zeroBreakdown };
+    }
+  }
+
+  const preferCommissionValue = (
+    ...values: Array<number | string | null | undefined>
+  ): number => {
+    let best = 0;
+    for (const val of values) {
+      const num = Number(val);
+      if (Number.isFinite(num)) {
+        best = Math.max(best, num);
+      }
+    }
+    return Number(best.toFixed(2));
+  };
+
+  // Consistent NET calculator (matches PDF logic). Returns non-negative LYD.
+  function computeNetLYDFor(id_emp: number): number {
+    const breakdown = computePayBreakdown(id_emp);
+    return Math.max(0, Number((breakdown.earningsLyd - breakdown.deductionsLyd).toFixed(2)));
+  }
+
+  function computeNetUSDFor(id_emp: number): number {
+    const breakdown = computePayBreakdown(id_emp);
+    return Math.max(0, Number((breakdown.earningsUsd - breakdown.deductionsUsd).toFixed(2)));
   }
 
   const handleSort = (key: string) => {
@@ -391,12 +516,67 @@ const computePPhPhf = (e: Payslip): PPhPhfVals => {
   };
 
   // Classify attendance badge for a day
-  function codeBadge(day?: any, schStartMin?: number | null, schEndMin?: number | null): string {
-    if (!day) return 'A';
+  function codeBadge(day?: any, schStartMin?: number | null, schEndMin?: number | null, empId?: number): string {
+    // If there is no timesheet day at all, do not force an Absent code.
+    // TimesheetsPage treats absence based on explicit codes / lack of presence on working days.
+    if (!day) return '';
+    
+    // Check if this day falls within any approved leave period for this employee
+    if (empId && leaveRequestsCache[empId]) {
+      const dayDate = new Date(day.date || `${year}-${String(month).padStart(2, '0')}-${String(day.day || 1).padStart(2, '0')}`);
+      dayDate.setHours(0, 0, 0, 0);
+      
+      for (const leave of leaveRequestsCache[empId]) {
+        const status = String(leave.status || leave.state || '').toLowerCase();
+        if (!status.includes('approved') && !status.includes('موافق')) continue;
+        
+        const st = leave.startDate || leave.DATE_START || leave.date_depart;
+        const en = leave.endDate || leave.DATE_END || leave.date_end;
+        if (!st || !en) continue;
+        
+        const startDate = new Date(st);
+        startDate.setHours(0, 0, 0, 0);
+        const endDate = new Date(en);
+        endDate.setHours(23, 59, 59, 999);
+        
+        // Check if current day is within leave period
+        if (dayDate >= startDate && dayDate <= endDate) {
+          // Map leave type to code
+          const typeCode = leave.typeCode || leave.id_can || leave.code;
+          const idKey = typeCode != null ? String(typeCode) : undefined;
+          const lt = idKey ? leaveTypeMap[idKey] : undefined;
+          const code = (lt?.code || String(typeCode || '')).toUpperCase();
+          
+          // Return specific leave codes
+          if (code === 'AL' || code.includes('ANNUAL')) return 'AL';
+          if (code === 'SL' || code.includes('SICK')) return 'SL';
+          if (code === 'EL' || code.includes('EMERGENCY')) return 'EL';
+          if (code === 'ML' || code.includes('MATERNITY')) return 'ML';
+          if (code === 'UL' || code.includes('UNPAID')) return 'UL';
+          if (code === 'HL' || code.includes('HALF')) return 'HL';
+          if (code === 'B1' || code.includes('BEREAVEMENT 1')) return 'B1';
+          if (code === 'B2' || code.includes('BEREAVEMENT 2')) return 'B2';
+          if (code === 'BM' || code.includes('BEREAVEMENT')) return 'BM';
+          if (code === 'XL' || code.includes('EXAM') || code.includes('EXCUSE')) return 'XL';
+          
+          // If we have any leave code, return it
+          if (code) return code;
+          
+          // Fallback to generic leave indicator
+          return 'L';
+        }
+      }
+    }
+    
+    // Original attendance logic
     const present = !!day.present;
     const rawCode = String(day.code || day.badge || '').toUpperCase();
     if (rawCode) return rawCode;
-    const isHoliday = !!day.isHoliday || /holiday/i.test(String(day.type||day.reason||'')) || rawCode === 'PH' || rawCode === 'PHF';
+    
+    const dayNum = Number(day?.day || 1);
+    const ymd = String(day?.date || `${year}-${String(month).padStart(2, '0')}-${String(dayNum).padStart(2, '0')}`).slice(0, 10);
+    const isHoliday = holidaySet.has(ymd) || !!day.isHoliday || /holiday/i.test(String(day.type||day.reason||'')) || rawCode === 'PH' || rawCode === 'PHF';
+    
     const parseMin = (s: any): number | null => {
       if (!s) return null;
       const txt = String(s);
@@ -406,6 +586,7 @@ const computePPhPhf = (e: Payslip): PPhPhfVals => {
       if (!Number.isFinite(hh) || !Number.isFinite(mm)) return null;
       return hh * 60 + mm;
     };
+    
     const expStart = parseMin(day.T_START || day.t_start) ?? (schStartMin ?? 9*60);
     const expEnd = parseMin(day.T_END || day.t_end) ?? (schEndMin ?? ((schStartMin ?? 9*60) + 8*60));
     const expDur = Math.max(0, expEnd - expStart);
@@ -414,7 +595,8 @@ const computePPhPhf = (e: Payslip): PPhPhfVals => {
     const worked = (entryMin != null && exitMin != null && exitMin > entryMin) ? (exitMin - entryMin) : 0;
     const late = (entryMin != null) ? Math.max(0, entryMin - expStart) : 0;
     const miss = Number(day.deltaMin || 0) < 0 ? Math.abs(Number(day.deltaMin||0)) : 0;
-    const tol = 5; // minutes tolerance
+    const tol = 5;
+    
     if (!present) return 'A';
     if (isHoliday) {
       return (worked >= Math.max(0, expDur - tol)) ? 'PHF' : 'PH';
@@ -423,6 +605,94 @@ const computePPhPhf = (e: Payslip): PPhPhfVals => {
     if (miss > tol) return 'PT';
     return 'P';
   }
+
+  const openCalendar = async (id_emp: number, name: string) => {
+    setCalOpen(true);
+    setCalEmp({ id_emp, name });
+    setCalLoading(true);
+    try {
+      // Load timesheet
+      const res = await getTimesheetMonth(id_emp, year, month);
+      setCalDays(res?.data || null);
+      
+      // Load leave requests for this employee
+      if (!leaveRequestsCache[id_emp]) {
+        try {
+          const leaveRequests = await getLeaveRequests(String(id_emp));
+          setLeaveRequestsCache(prev => ({
+            ...prev,
+            [id_emp]: Array.isArray(leaveRequests) ? leaveRequests : []
+          }));
+        } catch (e) {
+          console.error('Failed to load leave requests:', e);
+        }
+      }
+
+      try {
+        const from = dayjs(`${year}-${String(month).padStart(2, '0')}-01`).format('YYYY-MM-DD');
+        const to = dayjs(`${year}-${String(month).padStart(2, '0')}-01`).endOf('month').format('YYYY-MM-DD');
+        const all = await getVacationsInRange(from, to);
+        setCalVacations((all || []).filter((v: VacationRecord) => Number(v.id_emp) === Number(id_emp)));
+      } catch {
+        setCalVacations([]);
+      }
+    } catch (e: any) {
+      setCalDays(null);
+    } finally {
+      setCalLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    const loadHolidays = async () => {
+      try {
+        const set = new Set<string>();
+        try {
+          const holidaysResp = await getHolidays();
+          const holidaysArr = Array.isArray(holidaysResp)
+            ? holidaysResp
+            : (holidaysResp as any)?.data || [];
+          (holidaysArr || []).forEach((h: any) => {
+            const iso = String(h.DATE_H ?? h.date ?? h.holiday_date ?? '').slice(0, 10);
+            if (iso) set.add(iso);
+          });
+        } catch {}
+        try {
+          const raw = localStorage.getItem('custom_holidays');
+          if (raw) {
+            const arr = JSON.parse(raw);
+            if (Array.isArray(arr)) {
+              arr.forEach((h: any) => {
+                const iso = String(h.DATE_H ?? h.date ?? h.holiday_date ?? '').slice(0, 10);
+                if (iso) set.add(iso);
+              });
+            }
+          }
+        } catch {}
+        setHolidaySet(set);
+      } catch {}
+    };
+    loadHolidays();
+  }, []);
+
+  useEffect(() => {
+    const loadTypes = async () => {
+      try {
+        const types = await getLeaveTypes();
+        const map: Record<string, { code: string; name: string }> = {};
+        (Array.isArray(types) ? types : []).forEach((t: any) => {
+          if (t && t.int_can != null) {
+            map[String(t.int_can)] = {
+              code: String(t.code || ""),
+              name: String(t.desig_can || ""),
+            };
+          }
+        });
+        setLeaveTypeMap(map);
+      } catch {}
+    };
+    loadTypes();
+  }, []);
 
   // Auto-load data when tabs change
   React.useEffect(() => {
@@ -824,12 +1094,19 @@ const computePPhPhf = (e: Payslip): PPhPhfVals => {
           const fd = pd;
           return per*fd;
         }
+        
         case 'fuel': {
-          const W=Math.max(1,e.workingDays||1); const per=Number((e as any).FUEL||0); return per*W;
+          // FUEL is per month
+          const per = Number((e as any).FUEL || 0);
+          return per;
         }
+
         case 'comm': {
-          const W=Math.max(1,e.workingDays||1); const per=Number((e as any).COMMUNICATION||0); return per*W;
+          // COMMUNICATION is per month
+          const per = Number((e as any).COMMUNICATION || 0);
+          return per;
         }
+
         case 'adjustments': { const a=e.components?.adjustments||{bonus:0,deduction:0,advance:0,loanPayment:0}; return (a.bonus||0)-((a.deduction||0)+(a.advance||0)+(a.loanPayment||0)); }
         case 'salesQty': return Number((sales[String(e.id_emp)]?.qty) || 0);
         case 'salesTotal': return Number((sales[String(e.id_emp)]?.total_lyd) || 0);
@@ -899,6 +1176,287 @@ const computePPhPhf = (e: Payslip): PPhPhfVals => {
     return sortRows(filtered);
   }, [result, positionFilter, filterText, sortRows, nameMap, jobs, employeesByTitle]);
 
+  type CommissionResult = {
+  sellerUserId: number | null;
+  roleKey: string;
+  commissionPs: number[];
+  goldRate: number;
+  diamondPct: number;
+
+  goldGramsSelf: number;
+  goldGramsScope: number;
+  goldGramsUsed: number;
+  goldBonusLyd: number;
+  goldBonusUsd: number;
+
+  diamondSelfLyd: number;
+  diamondSelfUsd: number;
+  diamondItems: number;
+  diamondBonusLyd: number;
+  diamondBonusUsd: number;
+
+  salesGoldLyd: number;
+  salesGoldUsd: number;
+  salesDiamondLyd: number;
+  salesDiamondUsd: number;
+};
+
+const safeNum = (v: any) => {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : 0;
+};
+
+const getCommissionSettingsV1 = () => {
+  try {
+    const raw = localStorage.getItem("commissionSettingsV1");
+    if (!raw) return {} as any;
+    const cfg = JSON.parse(raw);
+    return cfg && typeof cfg === "object" ? cfg : ({} as any);
+  } catch {
+    return {} as any;
+  }
+};
+
+const getRoleRates = (roleKey: string) => {
+  const commissionSettings = getCommissionSettingsV1();
+
+  const goldRates: Record<string, number> = {
+    sales_rep: 1,
+    senior_sales_rep: 1.25,
+    sales_lead: 1.5,
+    sales_manager: 1.5,
+    ...(commissionSettings.gold || {}),
+  };
+
+  const diamondRates: Record<string, number> = {
+    sales_rep: 1.5,
+    senior_sales_rep: 3,
+    sales_lead: 3,
+    sales_manager: 3,
+    ...(commissionSettings.diamond || {}),
+  };
+
+  return {
+    goldRate: Number(goldRates[roleKey] ?? 0) || 0,
+    diamondPct: Number(diamondRates[roleKey] ?? 0) || 0,
+  };
+};
+
+const parseEmployeeCommissionProfile = (empObj: any, emp: any) => {
+  let sellerUserId: number | null = null;
+  let commissionRole = "";
+  let commissionPs: number[] = [];
+
+  try {
+    const jd = empObj?.JOB_DESCRIPTION ? JSON.parse(empObj.JOB_DESCRIPTION) : {};
+    const sid = jd?.__sales__?.userId ?? jd?.__seller__?.userId ?? null;
+    if (sid != null && !Number.isNaN(Number(sid))) sellerUserId = Number(sid);
+
+    if (jd?.__commissions__) {
+      commissionRole = String(jd.__commissions__.role || "").toLowerCase();
+      const psList = jd.__commissions__.ps;
+      if (Array.isArray(psList)) {
+        commissionPs = psList
+          .map((x: any) => Number(x))
+          .filter((n: number) => Number.isFinite(n));
+      }
+    }
+  } catch {}
+
+  // IMPORTANT: default/fallback role if missing
+  const roleKey = String(commissionRole || "").toLowerCase();
+
+  // IMPORTANT: fallback PS if scope list is empty (same idea as PDF)
+  if ((!commissionPs || !commissionPs.length) && emp?.PS != null) {
+    const ps = Number(emp.PS);
+    if (Number.isFinite(ps)) commissionPs = [ps];
+  }
+
+  const rates = getRoleRates(roleKey);
+
+  return {
+    sellerUserId,
+    roleKey,
+    commissionPs,
+    goldRate: rates.goldRate,
+    diamondPct: rates.diamondPct,
+  };
+};
+
+const computeCommissionFromInvoicesLikePdf = (emp: any, profile: any, rowsAll: any[]) => {
+  const sellerUserId = profile.sellerUserId;
+  const roleKey = profile.roleKey;
+  const goldRate = profile.goldRate;
+  const diamondPct = profile.diamondPct;
+
+  let salesGoldLyd = 0,
+    salesGoldUsd = 0,
+    salesDiamondLyd = 0,
+    salesDiamondUsd = 0;
+
+  let goldGramsSelf = 0;
+  let goldGramsScope = 0;
+
+  let diamondSelfLyd = 0,
+    diamondSelfUsd = 0;
+
+  let diamondItems = 0;
+
+  if (sellerUserId != null) {
+    const filtered = (rowsAll || []).filter((row: any) => {
+      const uid = Number(row?.Utilisateur?.id_user ?? row?.user_id ?? NaN);
+      return Number.isFinite(uid) && uid === Number(sellerUserId);
+    });
+
+    for (const row of filtered) {
+      const typeRaw = String(row?.ACHATs?.[0]?.Fournisseur?.TYPE_SUPPLIER || "").toLowerCase();
+      const lyd = safeNum(row?.amount_lyd);
+      const usd = safeNum(row?.amount_currency);
+
+      if (typeRaw.includes("gold")) {
+        salesGoldLyd += lyd;
+        salesGoldUsd += usd;
+
+        const achats = Array.isArray(row?.ACHATs) ? row.ACHATs : [];
+        for (const a of achats) {
+          const st = String(a?.Fournisseur?.TYPE_SUPPLIER || "").toLowerCase();
+          if (st.includes("gold")) goldGramsSelf += safeNum(a?.qty);
+        }
+      } else if (typeRaw.includes("diamond")) {
+        salesDiamondLyd += lyd;
+        salesDiamondUsd += usd;
+
+        diamondSelfLyd += lyd;
+        diamondSelfUsd += usd;
+
+        const achats = Array.isArray(row?.ACHATs) ? row.ACHATs : [];
+        for (const a of achats) {
+          const st = String(a?.Fournisseur?.TYPE_SUPPLIER || "").toLowerCase();
+          if (st.includes("diamond")) {
+            const q = safeNum(a?.qty ?? 1);
+            diamondItems += Number.isFinite(q) && q > 0 ? q : 1;
+          }
+        }
+      }
+    }
+
+    // lead/manager PS scope grams (same logic as PDF)
+    const targetPs: number[] = Array.isArray(profile.commissionPs) ? profile.commissionPs : [];
+    if ((roleKey === "sales_lead" || roleKey === "sales_manager") && targetPs.length > 0) {
+      for (const row of rowsAll || []) {
+        const psVal = Number(row?.ps ?? row?.PS ?? NaN);
+        if (!Number.isFinite(psVal) || !targetPs.includes(psVal)) continue;
+
+        const achats = Array.isArray(row?.ACHATs) ? row.ACHATs : [];
+        for (const a of achats) {
+          const st = String(a?.Fournisseur?.TYPE_SUPPLIER || "").toLowerCase();
+          if (st.includes("gold")) goldGramsScope += safeNum(a?.qty);
+        }
+      }
+    }
+  }
+
+  const goldGramsUsed =
+    roleKey === "sales_lead" || roleKey === "sales_manager" ? goldGramsScope : goldGramsSelf;
+
+  const goldBonusLyd = !goldRate ? 0 : Number((goldGramsUsed * goldRate).toFixed(2));
+  const goldBonusUsd = 0;
+
+  const diamondBonusLyd = !diamondPct ? 0 : Number(((diamondSelfLyd * diamondPct) / 100).toFixed(2));
+  const diamondBonusUsd = !diamondPct ? 0 : Number(((diamondSelfUsd * diamondPct) / 100).toFixed(2));
+
+  const result: CommissionResult = {
+    sellerUserId,
+    roleKey,
+    commissionPs: profile.commissionPs,
+    goldRate,
+    diamondPct,
+
+    goldGramsSelf,
+    goldGramsScope,
+    goldGramsUsed,
+    goldBonusLyd,
+    goldBonusUsd,
+
+    diamondSelfLyd,
+    diamondSelfUsd,
+    diamondItems,
+    diamondBonusLyd,
+    diamondBonusUsd,
+
+    salesGoldLyd,
+    salesGoldUsd,
+    salesDiamondLyd,
+    salesDiamondUsd,
+  };
+
+  return result;
+};
+
+const [commissionMapUI, setCommissionMapUI] = React.useState<Record<number, CommissionResult>>({});
+const [commissionLoadingUI, setCommissionLoadingUI] = React.useState(false);
+
+React.useEffect(() => {
+  let cancelled = false;
+
+  const run = async () => {
+    try {
+      const list = (displayedRows || []).map((x: any) => Number(x.id_emp)).filter(Boolean);
+      if (!list.length) {
+        setCommissionMapUI({});
+        return;
+      }
+
+      setCommissionLoadingUI(true);
+
+      const periodStart = `${year}-${String(month).padStart(2, "0")}-01`;
+      const monthStartISO = dayjs(periodStart).format("YYYY-MM-DD");
+      const monthEndISO = dayjs(periodStart).endOf("month").format("YYYY-MM-DD");
+      const qs = new URLSearchParams({ from: monthStartISO, to: monthEndISO }).toString();
+
+      const invRes = await fetch(`http://localhost:9000/invoices/allDetailsP?${qs}`, {
+        headers: authHeader() as unknown as HeadersInit,
+      });
+
+      const invJson = invRes.ok ? await invRes.json() : [];
+      const rowsAll: any[] = Array.isArray(invJson) ? invJson : [];
+
+      const results: Record<number, CommissionResult> = {};
+
+      await Promise.all(
+        (displayedRows || []).map(async (emp: any) => {
+          const empId = Number(emp.id_emp);
+          if (!empId) return;
+
+          let empObj: any = null;
+          try {
+            const r = await fetch(`http://localhost:9000/employees/${empId}`, {
+              headers: authHeader() as unknown as HeadersInit,
+            });
+            if (r.ok) {
+              const payload = await r.json();
+              empObj = payload?.data ?? payload;
+            }
+          } catch {}
+
+          const profile = parseEmployeeCommissionProfile(empObj || {}, emp);
+          results[empId] = computeCommissionFromInvoicesLikePdf(emp, profile, rowsAll);
+        })
+      );
+
+      if (!cancelled) setCommissionMapUI(results);
+    } finally {
+      if (!cancelled) setCommissionLoadingUI(false);
+    }
+  };
+
+  run();
+
+  return () => {
+    cancelled = true;
+  };
+}, [year, month, displayedRows]);
+
   // Totals for current view
   const totals = React.useMemo(() => {
     const t = {
@@ -927,24 +1485,34 @@ const computePPhPhf = (e: Payslip): PPhPhfVals => {
       grossUsd: 0,
       totalLyd: 0,
       totalUsd: 0,
+      absenceLyd: 0,
+      absenceUsd: 0,
+      latencyLyd: 0,
+      latencyUsd: 0,
+      latencyMinutes: 0,
     };
     displayedRows.forEach(e => {
       t.workingDays += Number(e.workingDays || 0);
       const vr = (v2Rows||[]).find((x:any)=> Number(x.id_emp)===Number(e.id_emp)) || {} as any;
-      t.deductionDays += Number(vr.absence_lyd || 0);
+      t.deductionDays += Number(vr.absence_days || 0);
       t.holidayWorked += Number(e.holidayWorked || 0);
       t.baseSalary += Number(e.baseSalary || 0);
       t.baseSalaryUsd += Number((e as any).baseSalaryUsd || 0);
       t.base += 0;
       t.allow += 0;
-      const W = Math.max(1, e.workingDays||1);
-      const foodPer = Number((e as any).FOOD || (e as any).FOOD_ALLOWANCE || 0);
       const fuelPer = Number(((e as any).FUEL ?? vr.FUEL) || 0);
       const commPer = Number(((e as any).COMMUNICATION ?? vr.COMMUNICATION) || 0);
+
+      // FOOD is per working day * present days (keep this)
       const pd = Number(presentDaysMap[e.id_emp] || 0);
+      const foodPer = Number((e as any).FOOD || (e as any).FOOD_ALLOWANCE || 0);
       t.food += foodPer * pd;
-      t.fuel += fuelPer * W;
-      t.comm += commPer * W;
+
+      // FUEL & COMM are per month (NO * W)
+      t.fuel += fuelPer;
+      t.comm += commPer;
+
+      t.food += foodPer * pd;
       const adj = e.components?.adjustments || { bonus:0, deduction:0, advance:0, loanPayment:0 };
       t.adj += (Number(adj.bonus||0) - (Number(adj.deduction||0)+Number(adj.advance||0)+Number(adj.loanPayment||0)));
       const s = sales[String(e.id_emp)] || { qty: 0, total_lyd: 0 };
@@ -955,8 +1523,8 @@ const computePPhPhf = (e: Payslip): PPhPhfVals => {
       t.diamond += Number(vr.diamond_bonus_lyd||0);
       t.grossLyd += Number(vr.total_salary_lyd ?? vr.totalLyd ?? 0);
       t.grossUsd += Number(vr.total_salary_usd ?? vr.totalUsd ?? 0);
-      t.totalLyd += Number(vr.net_salary_lyd ?? vr.D16 ?? 0);
-      t.totalUsd += Number(vr.net_salary_usd ?? vr.C16 ?? 0);
+      t.totalLyd += computeNetLYDFor(e.id_emp);
+      t.totalUsd += computeNetUSDFor(e.id_emp);
       const pp = computePPhPhf(e);
       t.pLyd += pp.pLyd;
       t.pUsd += pp.pUsd;
@@ -964,9 +1532,19 @@ const computePPhPhf = (e: Payslip): PPhPhfVals => {
       t.phUsd += pp.phUsd;
       t.phfLyd += pp.phfLyd;
       t.phfUsd += pp.phfUsd;
+      t.absenceLyd += Number(vr.absence_lyd || 0);
+      t.absenceUsd += Number(vr.absence_usd || 0);
+      t.latencyLyd += Number(vr.missing_lyd || vr.latency_lyd || 0);
+      t.latencyUsd += Number(vr.missing_usd || vr.latency_usd || 0);
+
+      // Latency minutes for totals row: use backend attendance minutes so
+      // that the displayed hours match the monetary latency_lyd value.
+      const backendLatMin =
+        Number((vr as any).latencyMinutes ?? (vr as any).missing_minutes ?? 0) || 0;
+      t.latencyMinutes += backendLatMin;
     });
     return t;
-  }, [displayedRows, sales, v2Rows, advMap, tsAgg]);
+  }, [displayedRows, v2Rows]);
 
   const onRun = async () => {
     setError(null);
@@ -1089,70 +1667,157 @@ const computePPhPhf = (e: Payslip): PPhPhfVals => {
       setResult(adapted);
       // Preload monthly advances per employee to align UI totals with PDF
       try {
-        const entries: Record<number, number> = {};
+        const advEntries: Record<number, number> = {};
+        const adjTotals: Record<number, { earnLyd: number; earnUsd: number; dedLyd: number; dedUsd: number }> = {};
         await Promise.all(employees.map(async (e) => {
+          let earnLyd = 0;
+          let earnUsd = 0;
+          let dedLyd = 0;
+          let dedUsd = 0;
+          let advSum = 0;
           try {
             const url = `http://localhost:9000/hr/payroll/adjustments?year=${v2.year}&month=${v2.month}&employeeId=${e.id_emp}`;
             const res = await fetch(url, { headers: authHeader() as unknown as HeadersInit });
             if (res.ok) {
               const js = await res.json();
-              const arr = (js?.data?.[String(e.id_emp)] || []) as Array<{ type: string; amount: number }>;
-              const sum = arr.filter(r => String(r.type).toLowerCase() === 'advance').reduce((s, r) => s + Number(r.amount || 0), 0);
-              entries[e.id_emp] = sum;
+              const arr = (js?.data?.[String(e.id_emp)] || []) as Array<{ type: string; amount: number; currency?: string }>;
+              for (const row of arr || []) {
+                const amt = Number(row?.amount || 0);
+                if (!amt) continue;
+                const cur = String(row?.currency || 'LYD').toUpperCase();
+                const isUsd = cur === 'USD';
+                const type = String(row?.type || '').toLowerCase();
+                if (type === 'advance') {
+                  if (!isUsd) advSum += amt;
+                  continue;
+                }
+                if (type === 'deduction') {
+                  if (isUsd) dedUsd += amt; else dedLyd += amt;
+                } else {
+                  if (isUsd) earnUsd += amt; else earnLyd += amt;
+                }
+              }
             }
           } catch {}
+          advEntries[e.id_emp] = Number(advSum.toFixed(2));
+          adjTotals[e.id_emp] = {
+            earnLyd: Number(earnLyd.toFixed(2)),
+            earnUsd: Number(earnUsd.toFixed(2)),
+            dedLyd: Number(dedLyd.toFixed(2)),
+            dedUsd: Number(dedUsd.toFixed(2)),
+          };
         }));
-        setAdvMap(entries);
+        setAdvMap(advEntries);
+        setAdjSumsByEmp(adjTotals);
       } catch {}
 
       // Build per-employee timesheet aggregates used by UI to mirror PDF calculations
       try {
-        const agg: Record<number, { presentP: number; phUnits: number; fridayA: number; missRatio: number; phFullDays: number; phPartDays: number; absenceDays: number }> = {};
-        await Promise.all(employees.map(async (e, idx) => {
-          try {
-            const days = await ensureTimesheetDays(e.id_emp);
-            const vr = (v2.rows || []).find((x: any) => Number(x.id_emp) === Number(e.id_emp)) || {};
-            const pick = (s: any): number | null => {
-              if (!s) return null; const m = String(s).match(/(\d{1,2}):(\d{2})/); if (!m) return null; const hh=Number(m[1]); const mm=Number(m[2]); if (!Number.isFinite(hh)||!Number.isFinite(mm)) return null; return hh*60+mm;
-            };
-            const s1 = pick((vr as any).T_START || (vr as any).t_start || (vr as any).SCHEDULE_START || (vr as any).shift_start);
-            const s2 = pick((vr as any).T_END || (vr as any).t_end || (vr as any).SCHEDULE_END || (vr as any).shift_end);
-            let presentP = 0, phUnits = 0, fridayA = 0, missAll = 0, missNoPT = 0, phFullDays = 0, phPartDays = 0, absenceDays = 0;
-            for (let i = 0; i < days.length; i++) {
-              const d = days[i];
-              const c = codeBadge(d, s1, s2);
-              // Treat P, PH, PHF as worked/present days for UI counts
-              if (c === 'P' || c === 'PH' || c === 'PHF') presentP += 1;
-              // Keep PH/PHF units and day breakdown for holiday pay
-              if (c === 'PHF') { phUnits += 2; phFullDays += 1; }
-              else if (c === 'PH') { phUnits += 1; phPartDays += 1; }
-              if (c === 'A') absenceDays += 1;
-              const dayDate = dayjs(`${v2.year}-${String(v2.month).padStart(2,'0')}-01`).date(i+1);
-              if (dayDate.day() === 5 && c === 'A') fridayA += 1;
-              const dm = Number(d?.deltaMin || 0);
-              if (dm < 0) {
-                const abs = Math.abs(dm);
-                missAll += abs;
-                if (c !== 'PT') missNoPT += abs;
+        const agg: Record<number, { presentP: number; presentStrict: number; phUnits: number; fridayA: number; missRatio: number; phFullDays: number; phPartDays: number; absenceDays: number; missingMinutes: number }> = {};
+        await Promise.all(
+          employees.map(async (e) => {
+            try {
+              const days = await ensureTimesheetDays(e.id_emp);
+
+              const vr =
+                (v2.rows || []).find((x: any) => Number(x.id_emp) === Number(e.id_emp)) ||
+                {};
+
+              const pick = (s: any): number | null => {
+                if (!s) return null;
+                const m = String(s).match(/(\d{1,2}):(\d{2})/);
+                if (!m) return null;
+                const hh = Number(m[1]);
+                const mm = Number(m[2]);
+                if (!Number.isFinite(hh) || !Number.isFinite(mm)) return null;
+                return hh * 60 + mm;
+              };
+
+              const schStartMin = pick(
+                (vr as any).T_START ||
+                  (vr as any).t_start ||
+                  (vr as any).SCHEDULE_START ||
+                  (vr as any).shift_start
+              );
+
+              const schEndMin = pick(
+                (vr as any).T_END ||
+                  (vr as any).t_end ||
+                  (vr as any).SCHEDULE_END ||
+                  (vr as any).shift_end
+              );
+
+              let presentP = 0,
+                presentStrict = 0,
+                phUnits = 0,
+                fridayA = 0,
+                missAll = 0,
+                missNoPT = 0,
+                phFullDays = 0,
+                phPartDays = 0,
+                absenceDays = 0;
+
+              for (let i = 0; i < days.length; i++) {
+                const d: any = days[i];
+
+                const c = codeBadge(d, schStartMin ?? undefined, schEndMin ?? undefined, e.id_emp);
+
+                // Presence counts
+                if (c === "P" || c === "PH" || c === "PHF") presentP += 1;
+                if (c === "P") presentStrict += 1;
+
+                // Holiday units
+                if (c === "PHF") {
+                  phUnits += 2;
+                  phFullDays += 1;
+                } else if (c === "PH") {
+                  phUnits += 1;
+                  phPartDays += 1;
+                }
+
+                if (c === "A") {
+                  absenceDays += 1;
+                }
+
+                // Friday absent count (kept)
+                const dayDate = dayjs(
+                  `${v2.year}-${String(v2.month).padStart(2, "0")}-01`
+                ).date(i + 1);
+                if (dayDate.day() === 5 && c === "A") fridayA += 1;
+
+                // Existing delta stats
+                const dm = Number(d?.deltaMin || 0);
+                if (dm < 0) {
+                  const abs = Math.abs(dm);
+                  missAll += abs;
+                  if (c !== "PT") missNoPT += abs;
+                }
               }
+
+              const missRatio = missAll > 0 ? missNoPT / missAll : 0;
+
+              agg[e.id_emp] = {
+                presentP,
+                presentStrict,
+                phUnits,
+                fridayA,
+                missRatio,
+                phFullDays,
+                phPartDays,
+                absenceDays,
+                // Missing minutes from timesheet (sum of negative deltaMin)
+                missingMinutes: missAll,
+              };
+            } catch {
+              // ignore per-employee errors
             }
-            const missRatio = missAll > 0 ? (missNoPT / missAll) : 0;
-            agg[e.id_emp] = { presentP, phUnits, fridayA, missRatio, phFullDays, phPartDays, absenceDays };
-          } catch {}
-        }));
-        // Override UI absence_days / presentWorkdays with manual punches
-        employees.forEach((emp) => {
-          const a = agg[emp.id_emp];
-          if (!a) return;
-          const working = Number(emp.workingDays || 0);
-          const abs = Number(a.absenceDays || 0);
-          emp.deductionDays = abs;
-          emp.presentWorkdays = Math.max(0, working - abs);
-        });
+          })
+        );
+
         setTsAgg(agg);
         // Keep presentDaysMap for any legacy uses (derived from presentP)
         const pd: Record<number, number> = {};
-        Object.keys(agg).forEach(k => { pd[Number(k)] = agg[Number(k)].presentP; });
+        Object.keys(agg).forEach(k => { pd[Number(k)] = agg[Number(k)].presentStrict ?? agg[Number(k)].presentP; });
         setPresentDaysMap(pd);
       } catch {}
     } catch (e: any) {
@@ -1167,20 +1832,6 @@ const computePPhPhf = (e: Payslip): PPhPhfVals => {
       }
     } finally {
       setLoading(false);
-    }
-  };
-
-  const openCalendar = async (id_emp: number, name: string) => {
-    setCalOpen(true);
-    setCalEmp({ id_emp, name });
-    setCalLoading(true);
-    try {
-      const res = await getTimesheetMonth(id_emp, year, month);
-      setCalDays(res?.data || null);
-    } catch (e: any) {
-      setCalDays(null);
-    } finally {
-      setCalLoading(false);
     }
   };
   
@@ -1204,33 +1855,170 @@ const computePPhPhf = (e: Payslip): PPhPhfVals => {
   };
 
   const buildPayslipPdf = async (emp: Payslip): Promise<{ dataUrl: string; blobUrl: string; filename: string }> => {
-  const days = await ensureTimesheetDays(emp.id_emp);
-  const dispName = String(nameMap[emp.id_emp] ?? emp.name ?? emp.id_emp);
-  const doc = new jsPDF({ orientation: "portrait", unit: "pt", format: "a4", compress: true });
-  const pageW = doc.internal.pageSize.getWidth();
-  const margin = 36;
+    const days = await ensureTimesheetDays(emp.id_emp);
+    const dispName = String(nameMap[emp.id_emp] ?? emp.name ?? emp.id_emp);
+    const doc = new jsPDF({ orientation: "portrait", unit: "pt", format: "a4", compress: true });
+    const pageW = doc.internal.pageSize.getWidth();
+    const margin = 36;
 
-  // Arabic utilities (canvas-based rendering to preserve shaping/RTL)
-  const hasArabic = (s: string) => /[\u0600-\u06FF]/.test(String(s || ""));
-  let arabicFontLoaded = false;
-  const ensureArabicCanvasFont = async () => {
-    if (arabicFontLoaded) return;
-    const candidates = [
-      "/fonts/NotoNaskhArabic-Regular.ttf",
-      "/fonts/NotoNaskhArabic-VariableFont_wght.ttf",
-      "/fonts/Amiri-Regular.ttf",
-    ];
-    for (const url of candidates) {
-      try {
-        const ff = new (window as any).FontFace("GajaArabicPDF", `url(${url})`);
-        await ff.load();
-        (document as any).fonts.add(ff);
-        arabicFontLoaded = true;
-        break;
-      } catch {}
+    let empProfile: any | null = null;
+    const holidaySetLocal = holidaySet;
+
+    let vacations: VacationRecord[] = [];
+    try {
+      const from = dayjs(`${year}-${String(month).padStart(2, '0')}-01`).format('YYYY-MM-DD');
+      const to = dayjs(`${year}-${String(month).padStart(2, '0')}-01`).endOf('month').format('YYYY-MM-DD');
+      const all = await getVacationsInRange(from, to);
+      vacations = (all || []).filter((v: VacationRecord) => Number(v.id_emp) === Number(emp.id_emp));
+    } catch {
+      vacations = [];
     }
-  };
-  const drawArabicTextImage = async (text: string, fontPt: number): Promise<{ dataUrl: string; wPt: number; hPt: number } | null> => {
+
+    let leaveRequests: any[] = [];
+    try {
+      const requests = await getLeaveRequests(String(emp.id_emp));
+      leaveRequests = Array.isArray(requests) ? requests : [];
+    } catch (e) {
+      console.error('Failed to load leave requests for PDF:', e);
+    }
+
+    const getLeaveCodeForDate = (dayDate: Date): string | null => {
+      dayDate.setHours(0, 0, 0, 0);
+      
+      for (const leave of leaveRequests) {
+        const status = String(leave.status || leave.state || '').toLowerCase();
+        if (!status.includes('approved') && !status.includes('موافق')) continue;
+        
+        const st = leave.startDate || leave.DATE_START || leave.date_depart;
+        const en = leave.endDate || leave.DATE_END || leave.date_end;
+        if (!st || !en) continue;
+        
+        const startDate = new Date(st);
+        startDate.setHours(0, 0, 0, 0);
+        const endDate = new Date(en);
+        endDate.setHours(23, 59, 59, 999);
+        
+        // Check if current day is within leave period
+        if (dayDate >= startDate && dayDate <= endDate) {
+          // Map leave type to code
+          const typeCode = leave.typeCode || leave.id_can || leave.code;
+          const idKey = typeCode != null ? String(typeCode) : undefined;
+          const lt = idKey ? leaveTypeMap[idKey] : undefined;
+          const code = (lt?.code || String(typeCode || '')).toUpperCase();
+          
+          // Return specific leave codes
+          if (code === 'AL' || code.includes('ANNUAL')) return 'AL';
+          if (code === 'SL' || code.includes('SICK')) return 'SL';
+          if (code === 'EL' || code.includes('EMERGENCY')) return 'EL';
+          if (code === 'ML' || code.includes('MATERNITY')) return 'ML';
+          if (code === 'UL' || code.includes('UNPAID')) return 'UL';
+          if (code === 'HL' || code.includes('HAJJ')) return 'HL';
+          if (code === 'BM' || code.includes('BEREAVEMENT')) return 'BM';
+          if (code === 'XL' || code.includes('EXCUSE')) return 'XL';
+          
+          // If we have any leave code, return it
+          if (code) return code;
+          
+          // Fallback to generic leave indicator
+          return 'L';
+        }
+      }
+      return null;
+    };
+
+    const codeBadgePDF = (day: any, idx: number, schStartMin?: number | null, schEndMin?: number | null): string => {
+      // Mirror codeBadge behavior: lack of a day record should not auto-mark as Absent.
+      if (!day) return '';
+      
+      // PRIORITY 1: Use backend-provided code (includes exception codes NI, NO, MO, IP)
+      const rawCode = String(day.code || day.badge || '').toUpperCase();
+      if (rawCode) {
+        // Validate it's a known code
+        const knownCodes = ['P','A','PT','PL','PH','PHF','AL','SL','EL','ML','UL','HL','BM','XL','B1','B2','NI','NO','MO','IP'];
+        if (knownCodes.includes(rawCode)) return rawCode;
+      }
+      
+      // PRIORITY 2: Check if this day is on approved leave
+      const dayDate = dayjs(periodStart).date(idx + 1).toDate();
+      const leaveCode = getLeaveCodeForDate(dayDate);
+      if (leaveCode) return leaveCode;
+
+      // PRIORITY 3: Check vacation records
+      try {
+        const ymd = dayjs(dayDate).format('YYYY-MM-DD');
+        const vac = (vacations || []).find((v) => {
+          const st = dayjs((v as any).date_depart).format('YYYY-MM-DD');
+          const en = dayjs((v as any).date_end).format('YYYY-MM-DD');
+          const stateLower = String((v as any).state || '').toLowerCase();
+          const okState = stateLower === 'approved' || stateLower.includes('موافق');
+          return okState && ymd >= st && ymd <= en;
+        });
+        if (vac) {
+          const idKey = (vac as any).id_can != null ? String((vac as any).id_can) : undefined;
+          const lt = idKey ? leaveTypeMap[idKey] : undefined;
+          const codeRaw = String(lt?.code || (vac as any).type || 'V').toUpperCase();
+          if (codeRaw) return codeRaw;
+        }
+      } catch {}
+      
+      // PRIORITY 4: Derive from timesheet data (fallback)
+      const present = !!day.present;
+      
+      const ymd = dayjs(periodStart).date(idx + 1).format('YYYY-MM-DD');
+      const isHoliday = (holidaySetLocal?.has(ymd) || false) || !!day.isHoliday || /holiday/i.test(String(day.type||day.reason||'')) || rawCode === 'PH' || rawCode === 'PHF';
+      
+      const parseMin = (s: any): number | null => {
+        if (!s) return null;
+        const txt = String(s);
+        const m = txt.match(/(\d{1,2}):(\d{2})/);
+        if (!m) return null;
+        const hh = Number(m[1]); const mm = Number(m[2]);
+        if (!Number.isFinite(hh) || !Number.isFinite(mm)) return null;
+        return hh * 60 + mm;
+      };
+      
+      const expStart = parseMin(day.T_START || day.t_start) ?? (schStartMin ?? 9*60);
+      const expEnd = parseMin(day.T_END || day.t_end) ?? (schEndMin ?? ((schStartMin ?? 9*60) + 8*60));
+      const expDur = Math.max(0, expEnd - expStart);
+      const entryMin = parseMin(day.entry);
+      const exitMin = parseMin(day.exit);
+      const worked = (entryMin != null && exitMin != null && exitMin > entryMin) ? (exitMin - entryMin) : 0;
+      const late = (entryMin != null) ? Math.max(0, entryMin - expStart) : 0;
+      const miss = Number(day.deltaMin || 0) < 0 ? Math.abs(Number(day.deltaMin||0)) : 0;
+      const tol = 5;
+      
+      if (!present) return 'A';
+      if (isHoliday) {
+        return (worked >= Math.max(0, expDur - tol)) ? 'PHF' : 'PH';
+      }
+      if (late > tol) return 'PL';
+      if (miss > tol) return 'PT';
+      return 'P';
+    };
+
+
+    // Arabic utilities (canvas-based rendering to preserve shaping/RTL)
+    const hasArabic = (s: string) => /[\u0600-\u06FF]/.test(String(s || ""));
+    let arabicFontLoaded = false;
+    const ensureArabicCanvasFont = async () => {
+      if (arabicFontLoaded) return;
+      const candidates = [
+        "/fonts/NotoNaskhArabic-Regular.ttf",
+        "/fonts/NotoNaskhArabic-VariableFont_wght.ttf",
+        "/fonts/Amiri-Regular.ttf",
+      ];
+      for (const url of candidates) {
+        try {
+          const ff = new (window as any).FontFace("GajaArabicPDF", `url(${url})`);
+          await ff.load();
+          (document as any).fonts.add(ff);
+          arabicFontLoaded = true;
+          break;
+        } catch {}
+      }
+    };
+    
+    const drawArabicTextImage = async (text: string, fontPt: number): Promise<{ dataUrl: string; wPt: number; hPt: number } | null> => {
     try {
       await ensureArabicCanvasFont();
       const fontPx = Math.max(10, Math.round(fontPt * 6.3333));
@@ -1256,16 +2044,16 @@ const computePPhPhf = (e: Payslip): PPhPhfVals => {
       const wPt = w * scale;
       return { dataUrl, wPt, hPt };
     } catch { return null; }
-  };
+    };
 
-  const periodStart = `${year}-${String(month).padStart(2, "0")}-01`;
-  const dim = new Date(year, month, 0).getDate();
+    const periodStart = `${year}-${String(month).padStart(2, "0")}-01`;
+    const dim = new Date(year, month, 0).getDate();
 
   const v2 = (v2Rows || []).find((x:any) => Number(x.id_emp) === Number(emp.id_emp)) || {} as any;
 
   // Net values: use backend/V2 net salaries so PDF matches UI grid "Total" exactly
-  let netLyd = Math.max(0, Number(((v2 as any).net_salary_lyd ?? (v2 as any).D16 ?? 0)));
-  let netUsd = Math.max(0, Number(((v2 as any).net_salary_usd ?? (v2 as any).C16 ?? 0)));
+  let netLyd = 0;
+  let netUsd = 0;
 
   // Slightly darker grey page background
   const pageH = doc.internal.pageSize.getHeight();
@@ -1364,6 +2152,7 @@ const computePPhPhf = (e: Payslip): PPhPhfVals => {
       if (resTitle.ok) {
         const payload = await resTitle.json();
         const obj = payload?.data ?? payload;
+        empProfile = obj;
         const t = String(obj?.TITLE || obj?.title || '').trim();
         if (t) roleStr = t;
       }
@@ -1389,16 +2178,12 @@ const computePPhPhf = (e: Payslip): PPhPhfVals => {
     try { doc.setDrawColor(0,0,0); doc.setLineWidth(1); doc.line(0, headerH, pageW, headerH); } catch {}
 
     // Two tables under the header line, aligned to earnings/deductions column widths
-    const areaPre = (pageW - margin * 2);
-    const colWPre = (areaPre / 2) - 8;
+    const areaPre = pageW - margin * 2;
     const tX = margin; // left table x matches earnings block
-    const rightX = margin + colWPre + 16; // matches deductions block x
     const tY = headerH + 10;
-    const rowH = 18;
-    const labW = Math.floor(colWPre * 0.34);
-    const valW = Math.max(0, Math.floor(colWPre) - labW);
+    const rowH = 22;
 
-    // Single rounded box for Name / ID (left) and Position / PS (right)
+    // Single rounded box with three columns (Name/ID, Position/PS, Leave Bal)
     const boxW = areaPre;
     const boxH = rowH * 2;
     const boxX = tX;
@@ -1412,20 +2197,158 @@ const computePPhPhf = (e: Payslip): PPhPhfVals => {
       doc.rect(boxX, boxY, boxW, boxH, 'F');
       doc.rect(boxX, boxY, boxW, boxH);
     }
-    // Inner grid lines (2x2 layout)
+    // Inner grid lines (3 columns, 2 rows) with width ratios for better spacing
+    const colFractions = [0.36, 0.32, 0.32];
+    const colWidths = colFractions.map((frac) => boxW * frac);
+    const colEdges: number[] = [];
+    {
+      let acc = boxX;
+      for (let i = 0; i < colWidths.length; i++) {
+        colEdges.push(acc);
+        acc += colWidths[i];
+      }
+      colEdges.push(boxX + boxW);
+    }
     try {
-      const innerV = boxX + boxW / 2;
-      const innerH = boxY + boxH / 2;
       doc.setDrawColor('#bbbbbb');
-      doc.line(innerV, boxY, innerV, boxY + boxH);
-      doc.line(boxX, innerH, boxX + boxW, innerH);
+      for (let i = 1; i < colEdges.length - 1; i++) {
+        const x = colEdges[i];
+        doc.line(x, boxY, x, boxY + boxH);
+      }
+      doc.line(boxX, boxY + rowH, boxX + boxW, boxY + rowH);
     } catch {}
     doc.setFont('helvetica','normal');
-    doc.setFontSize(10);
-    const colW = boxW / 2;
-    const col1X = boxX + 10;
-    const col2X = boxX + colW + 10;
-    const lineGap = rowH;
+    doc.setFontSize(9);
+
+    let leaveBalanceRemaining = 0;
+    try {
+      const leaveData = await getLeaveBalance(String(emp.id_emp));
+      const apiRemaining = Number(
+        (leaveData as any)?.remaining ??
+          (leaveData as any)?.data?.remaining ??
+          (leaveData as any)?.balance?.remaining ??
+          0
+      );
+      const histRaw: any[] = Array.isArray((leaveData as any)?.leaveHistory)
+        ? (leaveData as any).leaveHistory
+        : (Array.isArray((leaveData as any)?.leaves) ? (leaveData as any).leaves : []);
+
+      const now = new Date();
+      const dobStr = String((empProfile as any)?.DATE_OF_BIRTH || (empProfile as any)?.date_of_birth || '').slice(0, 10);
+      const contractStartStr = String(
+        (empProfile as any)?.CONTRACT_START ||
+          (empProfile as any)?.contract_start ||
+          contractStartMap[emp.id_emp] ||
+          (v2 as any).CONTRACT_START ||
+          (v2 as any).contract_start ||
+          ''
+      ).slice(0, 10);
+      const dob = dobStr ? new Date(dobStr) : null;
+      const contractStart0 = contractStartStr ? new Date(contractStartStr) : null;
+      const contractStartDate =
+        contractStart0 && Number.isFinite(contractStart0.getTime()) ? contractStart0 : null;
+
+      const inferStartFromHistory = (): Date | null => {
+        try {
+          const rows = (histRaw || [])
+            .map((x: any) => String(x.startDate || x.DATE_START || x.date_depart || '').slice(0, 10))
+            .filter((s: string) => !!s);
+          const earliest = rows.reduce<Date | null>((acc, s) => {
+            const d = new Date(s);
+            if (!Number.isFinite(d.getTime())) return acc;
+            return !acc || d < acc ? d : acc;
+          }, null);
+          if (!earliest) return null;
+          return new Date(earliest.getFullYear(), earliest.getMonth(), 1);
+        } catch {
+          return null;
+        }
+      };
+
+      const contractStart = contractStartDate || inferStartFromHistory();
+      const age = dob && Number.isFinite(dob.getTime())
+        ? Math.floor((Date.now() - dob.getTime()) / (365.25 * 24 * 60 * 60 * 1000))
+        : 0;
+      const expYears = contractStart && Number.isFinite(contractStart.getTime())
+        ? Math.floor((Date.now() - contractStart.getTime()) / (365.25 * 24 * 60 * 60 * 1000))
+        : 0;
+      const entitlement = (age >= 50 || expYears >= 20) ? 45 : 30;
+      const ratePerMonth = entitlement >= 45 ? 3.75 : 2.5;
+
+      const fmtYmd = (d: Date) => {
+        const y = d.getFullYear();
+        const m = String(d.getMonth() + 1).padStart(2, '0');
+        const da = String(d.getDate()).padStart(2, '0');
+        return `${y}-${m}-${da}`;
+      };
+      const clamp = (d: Date) => {
+        const x = new Date(d);
+        x.setHours(0, 0, 0, 0);
+        return x;
+      };
+      const isFriday = (d: Date) => d.getDay() === 5;
+      const isHoliday = (d: Date) => (holidaySetLocal?.has(fmtYmd(d)) || false);
+      const countEffectiveDays = (a: Date, b: Date) => {
+        const s = clamp(a);
+        const e = clamp(b);
+        let c = 0;
+        const d = new Date(s);
+        while (d <= e) {
+          if (!isFriday(d) && !isHoliday(d)) c++;
+          d.setDate(d.getDate() + 1);
+        }
+        return c;
+      };
+      const isApprovedLike = (s: string) => {
+        const v = String(s || '').toLowerCase();
+        return v.includes('approved') || v.includes('accepted') || v.includes('موافق');
+      };
+
+      if (contractStart && Number.isFinite(contractStart.getTime())) {
+        const annivThisYear = new Date(now.getFullYear(), contractStart.getMonth(), contractStart.getDate());
+        const workingYearStart = annivThisYear <= now
+          ? annivThisYear
+          : new Date(now.getFullYear() - 1, contractStart.getMonth(), contractStart.getDate());
+        const workingYearEnd = new Date(workingYearStart.getFullYear() + 1, workingYearStart.getMonth(), workingYearStart.getDate());
+        const prevYearStart = new Date(workingYearStart.getFullYear() - 1, workingYearStart.getMonth(), workingYearStart.getDate());
+
+        const monthsDiff =
+          (now.getFullYear() - workingYearStart.getFullYear()) * 12 +
+          (now.getMonth() - workingYearStart.getMonth());
+        const includeThisMonth = now.getDate() >= workingYearStart.getDate();
+        const monthsElapsed = Math.min(12, Math.max(0, monthsDiff + (includeThisMonth ? 1 : 0)));
+        const accruedByMonth = monthsElapsed * ratePerMonth;
+
+        const sumApprovedInWindow = (ws: Date, we: Date) => {
+          return (histRaw || []).reduce((sum: number, h: any) => {
+            const stStr = String(h.startDate || h.DATE_START || h.date_depart || '').slice(0, 10);
+            const enStr = String(h.endDate || h.DATE_END || h.date_end || '').slice(0, 10);
+            if (!stStr || !enStr) return sum;
+            const st = new Date(stStr);
+            const en = new Date(enStr);
+            if (!Number.isFinite(st.getTime()) || !Number.isFinite(en.getTime())) return sum;
+            if (!isApprovedLike(String(h.status || h.state || ''))) return sum;
+            if (en < ws || st > we) return sum;
+            const a = st < ws ? ws : st;
+            const b = en > we ? we : en;
+            return sum + countEffectiveDays(a, b);
+          }, 0);
+        };
+
+        const approvedThisYear = sumApprovedInWindow(workingYearStart, workingYearEnd);
+        const approvedPrevYear = sumApprovedInWindow(prevYearStart, workingYearStart);
+        const carryForward = Math.max(0, entitlement - approvedPrevYear);
+        const remainingThisYear = accruedByMonth - approvedThisYear;
+        leaveBalanceRemaining = Math.max(0, Number((remainingThisYear + carryForward).toFixed(2)));
+      }
+      if ((!leaveBalanceRemaining || leaveBalanceRemaining <= 0) && Number.isFinite(apiRemaining) && apiRemaining > 0) {
+        leaveBalanceRemaining = Number(apiRemaining.toFixed(2));
+      }
+    } catch {}
+
+    const fmtDays = (val: number) => `${(Number.isFinite(val) ? val : 0).toFixed(2)} days`;
+    const leaveBalanceAsOf = dayjs(periodStart).format('MMMM YYYY');
+
     const col1: Array<[string,string]> = [
       ['Name', String(dispName || '')],
       ['ID', String(emp.id_emp || '')],
@@ -1434,27 +2357,79 @@ const computePPhPhf = (e: Payslip): PPhPhfVals => {
       ['Position', roleStr || '-'],
       ['PS', String(psTxt || '-')],
     ];
-    const drawHeaderLine = async (lab: string, val: string, baseX: number, idx: number) => {
-      const yLine = boxY + 12 + idx * lineGap;
-      doc.text(lab, baseX, yLine);
-      const v = val || '';
-      const valueX = baseX + 60;
+
+    let seniorityYears = 0;
+    let seniorityMonths = 0;
+    let contractStartLabel = '';
+    try {
+      const contractStartStr = contractStartMap[emp.id_emp] || (v2 as any).CONTRACT_START || null;
+      if (contractStartStr) {
+        const contractStart = dayjs(contractStartStr);
+        if (contractStart.isValid()) {
+          const now = dayjs();
+          seniorityYears = now.diff(contractStart, 'years');
+          seniorityMonths = now.diff(contractStart.add(seniorityYears, 'years'), 'months');
+          // Seniority display: show only the start date in DD-MM-YYYY
+          contractStartLabel = contractStart.format('DD-MM-YYYY');
+        }
+      }
+    } catch (e) {
+      console.warn('Could not calculate seniority:', e);
+    }
+
+    const seniorityStr = `${seniorityYears}y ${seniorityMonths}m`;
+    const col3: Array<[string,string]> = [
+      ['Remaining VB:', fmtDays(leaveBalanceRemaining)],
+      // Show only the start date as requested (DD-MM-YYYY)
+      ['Seniority:', contractStartLabel || ''],
+    ];
+    const colsData = [col1, col2, col3];
+
+    const drawValueText = async (text: string, x: number, y: number, maxWidth: number) => {
+      const v = text || '';
+      if (!v) return;
       if (hasArabic(v)) {
         const img = await drawArabicTextImage(v, 10);
-        if (img) doc.addImage(img.dataUrl, 'PNG', valueX, yLine - 10, img.wPt, img.hPt);
-        else doc.text(v, valueX, yLine);
-      } else {
-        doc.text(v, valueX, yLine);
+        if (img) {
+          doc.addImage(img.dataUrl, 'PNG', x, y - 10, Math.min(img.wPt, maxWidth), img.hPt);
+          return;
+        }
       }
+      const lines = doc.splitTextToSize(v, maxWidth);
+      doc.text(lines, x, y);
     };
-    for (let i = 0; i < col1.length; i++) {
-      await drawHeaderLine(col1[i][0], col1[i][1], col1X, i);
+
+    for (let colIdx = 0; colIdx < colsData.length; colIdx++) {
+      const entries = colsData[colIdx];
+      const cellX = colEdges[colIdx];
+      const cellW = colWidths[colIdx] ?? (boxW / colsData.length);
+      for (let rowIdx = 0; rowIdx < entries.length; rowIdx++) {
+        const lab = entries[rowIdx][0];
+        const val = entries[rowIdx][1] || '';
+        const cellY = boxY + rowIdx * rowH;
+        const labelY = cellY + 11;
+        doc.setFont('helvetica', 'normal');
+        if (lab) doc.text(lab, cellX + 6, labelY);
+        doc.setFont('helvetica', 'bold');
+        if (val) {
+          const valueOffset = colIdx === 2 ? 6 : 60;
+          // In the third column (Remaining vacation balance / Seniority), place the value
+          // at the far right of the cell and a bit lower to avoid overlapping the label.
+          const valueY = colIdx === 2 ? labelY + 9 : labelY;
+          if (colIdx === 2) {
+            const text = String(val || '');
+            const tw = doc.getTextWidth(text);
+            const xRight = cellX + cellW - 6 - tw;
+            doc.text(text, xRight, valueY);
+          } else {
+            await drawValueText(val, cellX + valueOffset, valueY, cellW - valueOffset - 6);
+          }
+        }
+        doc.setFont('helvetica', 'normal');
+      }
     }
-    for (let i = 0; i < col2.length; i++) {
-      await drawHeaderLine(col2[i][0], col2[i][1], col2X, i);
-    }
-    const boxBottom = boxY + boxH;
-    infoBottomYCalc = boxBottom;
+
+    infoBottomYCalc = boxY + boxH;
     // Right-side Company/Branch/Month block (swapped with logo), right-aligned
     try {
       const bTxt = branchName || '';
@@ -1483,22 +2458,24 @@ const computePPhPhf = (e: Payslip): PPhPhfVals => {
   // Right side header texts removed; Pay month rendered under branch
 
   // (net recomputation moved below, after all variables are defined)
-  const csStr = (v2 as any).T_START || (v2 as any).contract_start || (v2 as any).contractStart;
+  const csStr = (v2 as any).CONTRACT_START || (v2 as any).contract_start || (v2 as any).contractStart || (v2 as any).T_START;
   const contractStart = csStr ? dayjs(csStr) : null;
-  const missMinNoPT = days.reduce((acc, d) => acc + (((d?.deltaMin ?? 0) < 0 && codeBadge(d, schStartMinPDF, schEndMinPDF) !== 'PT') ? Math.abs(d!.deltaMin!) : 0), 0);
-  const missH = Math.floor(missMinNoPT / 60);
-  const missM = Math.floor(missMinNoPT % 60);
-  const missStr = (missH||missM) ? `${String(missH)}h${missM?` ${String(missM)}m`:''}` : '';
+  let latencyMinutesPdf = Math.max(0, Number((v2 as any).missing_minutes ?? (v2 as any).latencyMinutes ?? 0) || 0);
+
+  const latencyHoursPdf = latencyMinutesPdf / 60;
+  const missH = Math.floor(latencyHoursPdf);
+  const missM = Math.floor((latencyHoursPdf % 1) * 60);
+  const missStr = latencyMinutesPdf > 0 ? `${missH}h ${missM}m` : '';
+
+  // Latency LYD/USD for PDF: use backend-calculated values (legacy engine)
+  const latLydPdf = Math.max(0, Number((v2 as any).missing_lyd || (v2 as any).latency_lyd || 0));
+  const latUsdPdf = Math.max(0, Number((v2 as any).missing_usd || (v2 as any).latency_usd || 0));
   const bv = (n:any)=>Number(n||0);
   const fmt = (n:number)=> n ? n.toLocaleString(undefined,{maximumFractionDigits:2}) : '';
   // Food allowance present-days should NOT include PH/PHF; count only actual present 'P'
-  const presentDaysCount = Array.isArray(days) ? days.filter(d => codeBadge(d as any, schStartMinPDF, schEndMinPDF) === 'P').length : 0;
-  const wdFoodLydPDF = Number((v2 as any).wd_food_lyd || 0);
-  const foodDaysV2PDF = Number((v2 as any).food_days || (v2 as any).workingDays || emp.workingDays || 0);
-  const foodPerDayLydPDF = foodDaysV2PDF > 0 ? wdFoodLydPDF / foodDaysV2PDF : 0;
-  const foodLydAdjPDF = Number((foodPerDayLydPDF * presentDaysCount).toFixed(2));
+  const foodInfoPDF = computeFoodAllowance(emp, v2);
+  const foodLydAdjPDF = foodInfoPDF.allowance;
   // PH fallback: if v2 lacks ph amounts, compute daily pay: PHF=2x, PH=1x
-  const workingDaysPref = Number(emp.workingDays || (v2 as any).workingDays || foodDaysV2PDF || 0);
   // Travel/Communication allowances from Employee Profile (flat monthly amounts)
   let fuelMonthlyPDF = Number(((emp as any).FUEL ?? (v2 as any).FUEL) || 0);
   let commMonthlyPDF = Number(((emp as any).COMMUNICATION ?? (v2 as any).COMMUNICATION) || 0);
@@ -1515,13 +2492,7 @@ const computePPhPhf = (e: Payslip): PPhPhfVals => {
   }
   const travelLydPDF = Number((fuelMonthlyPDF || 0).toFixed(2));
   const commLydPDF = Number((commMonthlyPDF || 0).toFixed(2));
-  // Absence days for PDF: count only true 'A' codes, excluding Friday absences
-  const absenceDaysPDF = Array.isArray(days) ? days.reduce((cnt, d, idx) => {
-    const c = codeBadge(d as any, schStartMinPDF, schEndMinPDF);
-    const dow = dayjs(periodStart).date(idx + 1).day();
-    if (c === 'A' && dow !== 5) return cnt + 1;
-    return cnt;
-  }, 0) : 0;
+  const absenceDaysPDF = Number((v2 as any).absence_days ?? 0) || 0;
 
   // Fetch this month's Salary Advances total for this employee (to deduct from Net Pay)
   let advSumLYD = 0;
@@ -1685,23 +2656,28 @@ const computePPhPhf = (e: Payslip): PPhPhfVals => {
   const diamondBonusLYDComputed = Number(((diamondSelfLYD * diamondPct) / 100).toFixed(2));
   const diamondBonusUSDComputed = Number(((diamondSelfUSD * diamondPct) / 100).toFixed(2));
   const adjComp = (emp.components?.adjustments || { bonus: 0, deduction: 0, advance: 0, loanPayment: 0 });
+
+  // Will be filled from Reimbursements API (adjRowsPdf) later in this function
+  let adjEarnRowsPdf: Array<{ label: string; lyd: number; usd: number }> = [];
+  let adjDedRowsPdf: Array<{ label: string; lyd: number; usd: number }> = [];
   
   // Breakdown table driven directly from V2 fields (for the small summary box)
-  const breakdown: Array<{label:string; lyd:number; usd:number; note?:string}> = [
+  const breakdown: Array<{label:string; lyd:number; usd:number}> = [
     { label: 'Basic Salary', lyd: bv(v2.base_salary_lyd), usd: bv(v2.base_salary_usd) },
-    { label: 'Food Allowance', lyd: foodLydAdjPDF, usd: 0, note: String(presentDaysCount || '') },
-    { label: 'Absent Days', lyd: bv(v2.absence_lyd), usd: bv(v2.absence_usd), note: String(absenceDaysPDF || '') },
-    { label: 'Paid Holiday', lyd: bv(v2.ph_lyd), usd: bv(v2.ph_usd), note: String(v2.ph_days || '') },
-    { label: 'Missing Hours', lyd: bv(v2.missing_lyd), usd: bv(v2.missing_usd), note: missStr },
+    { label: 'Food Allowance', lyd: foodLydAdjPDF, usd: 0 },
+    { label: 'Absence', lyd: bv(v2.absence_lyd), usd: bv(v2.absence_usd) },
+    { label: 'Paid Holiday', lyd: bv(v2.ph_lyd), usd: bv(v2.ph_usd) },
+    { label: 'Latency', lyd: latLydPdf, usd: latUsdPdf },
     { label: 'Total Salary', lyd: bv(v2.total_salary_lyd ?? v2.D7), usd: bv(v2.total_salary_usd ?? v2.C7) },
     { label: 'Gold Bonus', lyd: bv(v2.gold_bonus_lyd), usd: bv(v2.gold_bonus_usd) },
     { label: 'Diamond Bonus', lyd: bv(v2.diamond_bonus_lyd), usd: bv(v2.diamond_bonus_usd) },
-    { label: 'Other Bonus', lyd: bv(v2.other_bonus1_lyd), usd: bv(v2.other_bonus1_usd), note: v2.other_bonus1_acc ? String(v2.other_bonus1_acc) : '' },
-    { label: 'Other Bonus', lyd: bv(v2.other_bonus2_lyd), usd: bv(v2.other_bonus2_usd), note: v2.other_bonus2_acc ? String(v2.other_bonus2_acc) : '' },
+    // Map V2 bonus fields to specific adjustment names
+    { label: 'Eid Bonus', lyd: bv(v2.other_bonus1_lyd), usd: bv(v2.other_bonus1_usd) },
+    { label: 'Ramadan Bonus', lyd: bv(v2.other_bonus2_lyd), usd: bv(v2.other_bonus2_usd) },
+    { label: 'Bonus Adjustments', lyd: bv(v2.other_additions_lyd), usd: bv(v2.other_additions_usd) },
+    { label: 'Deductions (Adjustments)', lyd: bv(v2.other_deductions_lyd), usd: bv(v2.other_deductions_usd) },
     { label: 'Loan Debit', lyd: bv(v2.loan_debit_lyd), usd: bv(v2.loan_debit_usd) },
     { label: 'Loan Credit', lyd: bv(v2.loan_credit_lyd), usd: bv(v2.loan_credit_usd) },
-    { label: 'Other Adds', lyd: bv(v2.other_additions_lyd), usd: bv(v2.other_additions_usd) },
-    { label: 'Other Deduct', lyd: bv(v2.other_deductions_lyd), usd: bv(v2.other_deductions_usd) },
   ];
   
   let brShowLyd = Number(v2.base_salary_lyd || 0) > 0;
@@ -1711,6 +2687,49 @@ const computePPhPhf = (e: Payslip): PPhPhfVals => {
   const rows = breakdown.filter(r => (
     (brShowLyd && Number(r.lyd || 0) > 0) || (brShowUsd && Number(r.usd || 0) > 0)
   ));
+
+  // --- Load period adjustments for this employee and map into earnings/deductions rows ---
+  let adjRowsPdf: Array<{ type: string; amount: number; currency: string; note?: string; ts?: string }> = [];
+  try {
+    const url = `http://localhost:9000/hr/payroll/adjustments?year=${year}&month=${month}&employeeId=${emp.id_emp}`;
+    const res = await fetch(url, { headers: authHeader() as unknown as HeadersInit });
+    if (res.ok) {
+      const js = await res.json();
+      adjRowsPdf = (js?.data?.[String(emp.id_emp)] || []) as Array<{ type: string; amount: number; currency: string; note?: string; ts?: string }>;
+    }
+  } catch {}
+
+  // Filter out zero-amount adjustments
+  adjRowsPdf = (adjRowsPdf || []).filter((r) => Number(r.amount || 0) !== 0);
+
+  // Map adjustments into earnings/deductions rows for the Earnings/Deductions tables
+  adjEarnRowsPdf = [];
+  adjDedRowsPdf = [];
+  const mapAdjLabel = (type: string): string => {
+    const t = type.toLowerCase();
+    if (t === 'eid_bonus') return 'Eid Bonus';
+    if (t === 'ramadan_bonus') return 'Ramadan Bonus';
+    if (t === 'bonus') return 'Bonus';
+    if (t === 'deduction') return 'Deduction';
+    return type || 'Adjustment';
+  };
+  (adjRowsPdf || []).forEach((r) => {
+    if (!r) return;
+    const amt = Number(r.amount || 0);
+    if (!amt) return;
+    const cur = String(r.currency || 'LYD').toUpperCase();
+    const isUsd = cur === 'USD';
+    const lyd = isUsd ? 0 : amt;
+    const usd = isUsd ? amt : 0;
+    const label = mapAdjLabel(String(r.type || ''));
+    const t = String(r.type || '').toLowerCase();
+    if (t === 'deduction') {
+      adjDedRowsPdf.push({ label, lyd, usd });
+    } else {
+      // Treat all non-deduction types as earnings adjustments
+      adjEarnRowsPdf.push({ label, lyd, usd });
+    }
+  });
 
   const area = (pageW - margin*2);
   const colL = Math.floor(area * (brShowLyd && brShowUsd ? 0.40 : 0.50));
@@ -1786,8 +2805,17 @@ const computePPhPhf = (e: Payslip): PPhPhfVals => {
     const lydStr = Math.max(0, Number(lyd||0)) > 0.0001 ? `${Math.max(0, Number(lyd||0)).toLocaleString(undefined,{maximumFractionDigits:2})}` : '';
     const usdStr = Math.max(0, Number(usd||0)) > 0.0001 ? `${Math.max(0, Number(usd||0)).toLocaleString(undefined,{maximumFractionDigits:2})}` : '';
     doc.setFont('helvetica','bold');
-    if (showLydCol && lydStr) doc.text(lydStr, margin + colW - 160, yy + 15);
-    if (showUsdCol && usdStr) doc.text(usdStr, margin + colW - 80, yy + 15);
+    // Center LYD / USD amounts in their subcolumns (80px width)
+    if (showLydCol && lydStr) {
+      const twL = doc.getTextWidth(lydStr);
+      const lydCenter = margin + colW - 170 + 40;
+      doc.text(lydStr, lydCenter - twL / 2, yy + 15);
+    }
+    if (showUsdCol && usdStr) {
+      const twU = doc.getTextWidth(usdStr);
+      const usdCenter = margin + colW - 90 + 40;
+      doc.text(usdStr, usdCenter - twU / 2, yy + 15);
+    }
     doc.setFont('helvetica','normal');
   };
   
@@ -1796,12 +2824,20 @@ const computePPhPhf = (e: Payslip): PPhPhfVals => {
   let earningsUsdTotal = 0;
   {
     // Show base salary only (from v2), and food allowance + split bonuses
+    const workingDaysPref = Number(emp.workingDays || (v2 as any).workingDays || 0) || 0;
     const baseLyd = Math.max(0, Number((v2 as any).base_salary_lyd || emp.baseSalary || 0));
     const baseUsd = Math.max(0, Number((v2 as any).base_salary_usd || 0));
     if (baseLyd > 0.0001 || baseUsd > 0.0001) {
       row("Base", baseLyd, baseUsd, ey);
       earningsLydTotal += baseLyd;
       earningsUsdTotal += baseUsd;
+      ey += 24;
+    }
+    const { lyd: phLydRow, usd: phUsdRow } = getPhAmounts(emp.id_emp, { emp, v2, workingDays: workingDaysPref || emp.workingDays || 0, baseLyd: baseLyd, baseUsd: baseUsd });
+    if (phLydRow > 0.0001 || phUsdRow > 0.0001) {
+      row('Paid Holiday', phLydRow, phUsdRow, ey);
+      earningsLydTotal += phLydRow;
+      earningsUsdTotal += phUsdRow;
       ey += 24;
     }
     const foodLyd = Math.max(0, Number(foodLydAdjPDF || 0));
@@ -1843,14 +2879,15 @@ const computePPhPhf = (e: Payslip): PPhPhfVals => {
       earningsUsdTotal += diaUsd;
       ey += 24;
     }
-    const othLyd = Math.max(0, Number((v2 as any).other_additions_lyd || 0));
-    const othUsd = Math.max(0, Number((v2 as any).other_additions_usd || 0));
-    if (othLyd > 0.0001 || othUsd > 0.0001) {
-      row("Other Bonus", othLyd, othUsd, ey);
-      earningsLydTotal += othLyd;
-      earningsUsdTotal += othUsd;
-      ey += 24;
-    }
+    // Earnings adjustments from Reimbursements (Bonus / Eid Bonus / Ramadan Bonus)
+    (adjEarnRowsPdf || []).forEach((ar) => {
+      if (Math.max(0, Number(ar.lyd || 0)) > 0.0001 || Math.max(0, Number(ar.usd || 0)) > 0.0001) {
+        row(ar.label, ar.lyd, ar.usd, ey);
+        earningsLydTotal += Math.max(0, Number(ar.lyd || 0));
+        earningsUsdTotal += Math.max(0, Number(ar.usd || 0));
+        ey += 24;
+      }
+    });
     // Net Salary row removed per request (only shown in footer boxes)
   }
 
@@ -1902,55 +2939,94 @@ const computePPhPhf = (e: Payslip): PPhPhfVals => {
     else if (c === 'HL') hlCnt += 1;
   }
   
-  const dRowsDual: Array<{label:string; lyd:number; usd:number}> = [];
+  let dRowsDual: Array<{label:string; lyd:number; usd:number}> = [];
   const absLyd = Math.max(0, Number((v2 as any).absence_lyd || 0));
   const absUsd = Math.max(0, Number((v2 as any).absence_usd || 0));
-  if (absLyd > 0.0001 || absUsd > 0.0001) dRowsDual.push({ label: 'Absence', lyd: absLyd, usd: absUsd });
-  // Remove Missing Hours row per request
+  if (absLyd > 0.0001 || absUsd > 0.0001) {
+    dRowsDual.push({ label: 'Absence', lyd: absLyd, usd: absUsd });
+  }
+  // Latency: use backend monetary amounts (same as breakdown row)
+  const latencyLyd = latLydPdf;
+  const latencyUsd = latUsdPdf;
+  if (latencyLyd > 0.0001 || latencyUsd > 0.0001) {
+    dRowsDual.push({ label: 'Latency', lyd: latencyLyd, usd: latencyUsd });
+  }
   const advLyd = Math.max(0, Number(advSumLYD || 0));
   if (advLyd > 0.0001) dRowsDual.push({ label: 'Salary Advance', lyd: advLyd, usd: 0 });
   const loanLyd = Math.max(0, Number((adjComp as any).loanPayment || 0));
   const loanUsd = Math.max(0, Number((v2 as any).loan_credit_usd || 0));
   if (loanLyd > 0.0001 || loanUsd > 0.0001) dRowsDual.push({ label: 'Loan Repayment', lyd: loanLyd, usd: loanUsd });
   // Exclude advances from Other Deductions to avoid double counting
-  const rawOtherDed = Math.max(0, Number((v2 as any).other_deductions_lyd || 0));
-  const otherDedLyd = Math.max(0, rawOtherDed - advLyd);
-  const otherDedUsd = Math.max(0, Number((v2 as any).other_deductions_usd || 0));
-  if (otherDedLyd > 0.0001 || otherDedUsd > 0.0001) dRowsDual.push({ label: 'Other Deductions', lyd: otherDedLyd, usd: otherDedUsd });
+  // Deductions from Reimbursements (type = deduction)
+  (adjDedRowsPdf || []).forEach((dr) => {
+    if (Math.max(0, Number(dr.lyd || 0)) > 0.0001 || Math.max(0, Number(dr.usd || 0)) > 0.0001) {
+      dRowsDual.push({ label: dr.label, lyd: dr.lyd, usd: dr.usd });
+    }
+  });
+
+  // Merge all reimbursement-type deductions into a single 'Deduction' row,
+  // but keep Daily Absence / Latency / Salary Advance / Loan Repayment as
+  // separate rows.
+  {
+    const merged: Array<{label:string; lyd:number; usd:number}> = [];
+    let adjLyd = 0;
+    let adjUsd = 0;
+    for (const row of dRowsDual) {
+      if (row.label === 'Deduction') {
+        adjLyd += Math.max(0, Number(row.lyd || 0));
+        adjUsd += Math.max(0, Number(row.usd || 0));
+      } else {
+        merged.push(row);
+      }
+    }
+    if (adjLyd > 0.0001 || adjUsd > 0.0001) {
+      merged.push({ label: 'Deduction', lyd: adjLyd, usd: adjUsd });
+    }
+    dRowsDual = merged;
+  }
   
   const maxDedRows = 8;
   const dedTotalLyd = dRowsDual.reduce((s, r) => s + Math.max(0, Number(r.lyd||0)), 0);
   const dedTotalUsd = dRowsDual.reduce((s, r) => s + Math.max(0, Number(r.usd||0)), 0);
+
   const dedRendered = Math.min(maxDedRows, Math.max(dRowsDual.length, 0));
+  let dedBottomY = dy + 28;
   for (let i = 0; i < dedRendered; i++) {
     const yy2 = dy + 28 + i * 24;
+    const row = dRowsDual[i];
     doc.setDrawColor('#999999');
     (doc as any).setFillColor(240, 240, 240);
     doc.rect(dx, yy2, colW, 24, 'F');
     doc.rect(dx, yy2, colW, 24);
-    // vertical separators for LYD / USD columns
     try {
       if (showLydCol) doc.line(dx + colW - 170, yy2, dx + colW - 170, yy2 + 24);
       if (showUsdCol) doc.line(dx + colW - 90, yy2, dx + colW - 90, yy2 + 24);
     } catch {}
-    const rr = dRowsDual[i];
-    if (rr) {
-      doc.setFontSize(8);
-      doc.text(rr.label, dx + 6, yy2 + 15);
-      const lydStr = Math.max(0, Number(rr.lyd||0)) > 0.0001 ? `${Math.max(0, Number(rr.lyd||0)).toLocaleString(undefined,{maximumFractionDigits:2})} LYD` : '';
-      const usdStr = Math.max(0, Number(rr.usd||0)) > 0.0001 ? `${Math.max(0, Number(rr.usd||0)).toLocaleString(undefined,{maximumFractionDigits:2})} USD` : '';
-      doc.setFont('helvetica','bold');
-      if (showUsdCol) {
-        if (showLydCol && lydStr) doc.text(lydStr, dx + colW - 160, yy2 + 15);
-        if (usdStr) doc.text(usdStr, dx + colW - 80, yy2 + 15);
-      } else {
-        const one = lydStr || usdStr;
-        if (one) doc.text(one, dx + colW - 80, yy2 + 15);
-      }
-      doc.setFont('helvetica','normal');
+    doc.setFont('helvetica','normal');
+    const label = row?.label || '';
+    const lyd = Math.max(0, Number(row?.lyd || 0));
+    const usd = Math.max(0, Number(row?.usd || 0));
+
+    // Primary label on first line
+    doc.text(label, dx + 6, yy2 + 15);
+    const lydStrRow = lyd > 0.0001 ? `${lyd.toLocaleString(undefined,{maximumFractionDigits:2})}` : '';
+    const usdStrRow = usd > 0.0001 ? `${usd.toLocaleString(undefined,{maximumFractionDigits:2})}` : '';
+    doc.setFont('helvetica','bold');
+    // Center amounts in their LYD / USD subcolumns
+    if (showLydCol && lydStrRow) {
+      const twL = doc.getTextWidth(lydStrRow);
+      const lydCenter = dx + colW - 170 + 40; // middle of LYD subcolumn (80px wide)
+      doc.text(lydStrRow, lydCenter - twL / 2, yy2 + 15);
     }
+    if (showUsdCol && usdStrRow) {
+      const twU = doc.getTextWidth(usdStrRow);
+      const usdCenter = dx + colW - 90 + 40; // middle of USD subcolumn
+      doc.text(usdStrRow, usdCenter - twU / 2, yy2 + 15);
+    }
+
+    doc.setFont('helvetica','normal');
+    dedBottomY = yy2 + 24;
   }
-  let dedBottomY = dy + 28 + dedRendered * 24;
   // Deductions totals row (Y will be aligned with Earnings total if both exist)
   let dedTotalY: number | null = null;
   if (dedTotalLyd > 0.0001 || dedTotalUsd > 0.0001) {
@@ -1990,7 +3066,7 @@ const computePPhPhf = (e: Payslip): PPhPhfVals => {
     // Draw Total Earnings (left) if any
     if (hasEarnTotal) {
       const ty = unifiedTy;
-      doc.setDrawColor('#555555');
+      doc.setDrawColor('#555555'); 
       (doc as any).setFillColor(230, 230, 230);
       doc.rect(margin, ty, colW, 20, 'F');
       doc.rect(margin, ty, colW, 20);
@@ -2027,6 +3103,9 @@ const computePPhPhf = (e: Payslip): PPhPhfVals => {
       dedBottomY = ty + 20;
     }
   }
+
+  netLyd = Math.max(0, Number((earningsLydTotal - dedTotalLyd).toFixed(2)));
+  netUsd = Math.max(0, Number((earningsUsdTotal - dedTotalUsd).toFixed(2)));
 
   let dedBlockBottom = dedBottomY + 8;
   let netBandBottomY = dedBlockBottom;
@@ -2089,117 +3168,6 @@ const computePPhPhf = (e: Payslip): PPhPhfVals => {
     });
     twoColBottom = Math.max(twoColBottom, cy);
   }
-  
-  // Fetch and render Financial Log (adjustments) if any exist
-  let adjRowsPdf: Array<{ type: string; amount: number; currency: string; note?: string; ts?: string }> = [];
-  try {
-    const url = `http://localhost:9000/hr/payroll/adjustments?year=${year}&month=${month}&employeeId=${emp.id_emp}`;
-    const res = await fetch(url, { headers: authHeader() as unknown as HeadersInit });
-    if (res.ok) {
-      const js = await res.json();
-      adjRowsPdf = (js?.data?.[String(emp.id_emp)] || []) as Array<{ type: string; amount: number; currency: string; note?: string; ts?: string }>;
-    }
-  } catch {}
-  
-  // Filter out zero-amount adjustments
-  adjRowsPdf = (adjRowsPdf || []).filter((r) => Number(r.amount || 0) !== 0);
-  // Include monthly loan repayment from v2 if present (disabled)
-  const loanRepMonth = 0;
-  if (loanRepMonth > 0.0001) {
-    const ts = dayjs(periodStart).endOf('month').format('YYYY-MM-DD');
-    adjRowsPdf.push({ type: 'loan repayment', amount: loanRepMonth, currency: 'LYD', ts } as any);
-  }
-  
-  if (false && adjRowsPdf.length > 0) {
-    if (commissionHasValue) {
-      // Right column (side-by-side with Commission Summary)
-      const fullW = pageW - margin * 2;
-      const gap = 12;
-      const leftW = Math.floor((fullW - gap) * 0.5);
-      const rightW = fullW - leftW - gap;
-      const rightX = margin + leftW + gap;
-      const adjCols = [Math.floor(rightW * 0.36), Math.floor(rightW * 0.30), rightW - Math.floor(rightW * 0.36) - Math.floor(rightW * 0.30)];
-      doc.setFont('helvetica', 'bold');
-      doc.setFontSize(10);
-      const adjTitle = 'Financial Log';
-      const adjTitleW = doc.getTextWidth(adjTitle);
-      doc.text(adjTitle, rightX + (rightW - adjTitleW)/2, twoColTop + 6);
-      doc.setFont('helvetica', 'normal');
-      let ry = twoColTop + 14;
-      doc.setDrawColor('#999999');
-      (doc as any).setFillColor(240, 240, 240);
-      doc.rect(rightX, ry, adjCols[0], 24, 'F');
-      doc.rect(rightX + adjCols[0], ry, adjCols[1], 24, 'F');
-      doc.rect(rightX + adjCols[0] + adjCols[1], ry, adjCols[2], 24, 'F');
-      doc.rect(rightX, ry, adjCols[0], 24);
-      doc.rect(rightX + adjCols[0], ry, adjCols[1], 24);
-      doc.rect(rightX + adjCols[0] + adjCols[1], ry, adjCols[2], 24);
-      doc.text('Date', rightX + 8, ry + 16);
-      doc.text('Amount', rightX + adjCols[0] + 8, ry + 16);
-      doc.text('Type', rightX + adjCols[0] + adjCols[1] + 8, ry + 16);
-      ry += 24;
-      const fmtDMY = (s?: string) => s ? dayjs(s).format('DD/MM/YYYY') : '';
-      adjRowsPdf.forEach((r) => {
-        const dateStr = fmtDMY(r.ts);
-        const amtStr = `${r.currency} ${Number(r.amount||0).toFixed(2)}`;
-        const nameStr = (r.note && String(r.note).trim().length > 0) ? String(r.note) : (r.type || '');
-        (doc as any).setFillColor(240, 240, 240);
-        doc.rect(rightX, ry, adjCols[0], 22, 'F');
-        doc.rect(rightX + adjCols[0], ry, adjCols[1], 22, 'F');
-        doc.rect(rightX + adjCols[0] + adjCols[1], ry, adjCols[2], 22, 'F');
-        doc.rect(rightX, ry, adjCols[0], 22);
-        doc.rect(rightX + adjCols[0], ry, adjCols[1], 22);
-        doc.rect(rightX + adjCols[0] + adjCols[1], ry, adjCols[2], 22);
-        doc.text(dateStr, rightX + 8, ry + 14);
-        doc.text(amtStr, rightX + adjCols[0] + 8, ry + 14);
-        doc.text(fitText(nameStr, adjCols[2]-12), rightX + adjCols[0] + adjCols[1] + 8, ry + 14);
-        ry += 22;
-      });
-      twoColBottom = Math.max(twoColBottom, ry);
-    } else {
-      // Full-width Financial Log when no commission values
-      const fullW = pageW - margin * 2;
-      const logTop = Math.max(ey, dedBlockBottom) + 12;
-      const adjCols = [140, 160, fullW - 140 - 160];
-      doc.setFont('helvetica', 'bold');
-      doc.setFontSize(10);
-      const adjTitle = 'Financial Log';
-      const adjTitleW = doc.getTextWidth(adjTitle);
-      doc.text(adjTitle, margin + (fullW - adjTitleW)/2, logTop + 6);
-      doc.setFont('helvetica', 'normal');
-      let ly = logTop + 14;
-      doc.setDrawColor('#999999');
-      (doc as any).setFillColor(240, 240, 240);
-      doc.rect(margin, ly, adjCols[0], 24, 'F');
-      doc.rect(margin + adjCols[0], ly, adjCols[1], 24, 'F');
-      doc.rect(margin + adjCols[0] + adjCols[1], ly, adjCols[2], 24, 'F');
-      doc.rect(margin, ly, adjCols[0], 24);
-      doc.rect(margin + adjCols[0], ly, adjCols[1], 24);
-      doc.rect(margin + adjCols[0] + adjCols[1], ly, adjCols[2], 24);
-      doc.text('Date', margin + 8, ly + 16);
-      doc.text('Amount', margin + adjCols[0] + 8, ly + 16);
-      doc.text('Type', margin + adjCols[0] + adjCols[1] + 8, ly + 16);
-      ly += 24;
-      const fmtDMY = (s?: string) => s ? dayjs(s).format('DD/MM/YYYY') : '';
-      adjRowsPdf.forEach((r) => {
-        const dateStr = fmtDMY(r.ts);
-        const amtStr = `${r.currency} ${Number(r.amount||0).toFixed(2)}`;
-        const nameStr = (r.note && String(r.note).trim().length > 0) ? String(r.note) : (r.type || '');
-        (doc as any).setFillColor(240, 240, 240);
-        doc.rect(margin, ly, adjCols[0], 22, 'F');
-        doc.rect(margin + adjCols[0], ly, adjCols[1], 22, 'F');
-        doc.rect(margin + adjCols[0] + adjCols[1], ly, adjCols[2], 22, 'F');
-        doc.rect(margin, ly, adjCols[0], 22);
-        doc.rect(margin + adjCols[0], ly, adjCols[1], 22);
-        doc.rect(margin + adjCols[0] + adjCols[1], ly, adjCols[2], 22);
-        doc.text(dateStr, margin + 8, ly + 14);
-        doc.text(amtStr, margin + adjCols[0] + 8, ly + 14);
-        doc.text(fitText(nameStr, adjCols[2]-12), margin + adjCols[0] + adjCols[1] + 8, ly + 14);
-        ly += 22;
-      });
-      twoColBottom = Math.max(twoColBottom, ly);
-    }
-  }
 
   // Add outer borders around Earnings and Deductions blocks
   try {
@@ -2236,7 +3204,7 @@ const computePPhPhf = (e: Payslip): PPhPhfVals => {
       doc.rect(margin, yBand, halfW, rowH, 'F');
       doc.setDrawColor(0,0,0);
       doc.rect(margin, yBand, halfW, rowH);
-      doc.text('Net Pay LYD', margin + 8, yBand + 14);
+      doc.text('Net Pay (LYD)', margin + 8, yBand + 14);
       doc.setFontSize(14);
       const lydTxt = netLydFinal.toLocaleString('en-US',{minimumFractionDigits:2, maximumFractionDigits:2});
       const lydW = doc.getTextWidth(lydTxt);
@@ -2249,7 +3217,7 @@ const computePPhPhf = (e: Payslip): PPhPhfVals => {
       doc.rect(usdX, yBand, halfW, rowH, 'F');
       doc.setDrawColor(0,0,0);
       doc.rect(usdX, yBand, halfW, rowH);
-      doc.text('Net Pay USD', usdX + 8, yBand + 14);
+      doc.text('Net Pay (USD)', usdX + 8, yBand + 14);
       doc.setFontSize(14);
       const usdTxt = netUsdFinal.toLocaleString('en-US',{minimumFractionDigits:2, maximumFractionDigits:2});
       const usdW = doc.getTextWidth(usdTxt);
@@ -2260,7 +3228,7 @@ const computePPhPhf = (e: Payslip): PPhPhfVals => {
       doc.rect(margin, yBand, bandW, rowH, 'F');
       doc.setDrawColor(0,0,0);
       doc.rect(margin, yBand, bandW, rowH);
-      doc.text('Net Pay LYD', margin + 8, yBand + 14);
+      doc.text('Net Pay (LYD)', margin + 8, yBand + 14);
       doc.setFontSize(14);
       const lydTxt = netLydFinal.toLocaleString('en-US',{minimumFractionDigits:2, maximumFractionDigits:2});
       const lydW = doc.getTextWidth(lydTxt);
@@ -2321,51 +3289,77 @@ const computePPhPhf = (e: Payslip): PPhPhfVals => {
       doc.text(String(d), x + 4, topY + hWeek + hDayNum - 5);
     }
     
-    // Cells (grayscale backgrounds)
+    // Cells (with leave support)
     const cellY = topY + hWeek + hDayNum;
     for (let idx = 0; idx < count; idx++) {
       const d = start + idx;
       const x = margin + idx * cw;
       const wAdj = cw;
       const day = days[d-1] || null;
-      const badge = codeBadge(day || undefined, schStartMinPDF, schEndMinPDF);
+      
+      // **UPDATED: Use codeBadgePDF which checks leaves**
+      const badge = codeBadgePDF(day, d - 1, schStartMinPDF, schEndMinPDF);
+      
       const isFri = firstDate.date(d).day() === 5;
       const present = !!day?.present;
+      const headerBg = (code: string): [number,number,number] | null => {
+        switch (code) {
+          // Leave types - distinct colors
+          case 'AL': return [220,252,220]; // Annual - light green
+          case 'SL': return [232,212,248]; // Sick - light purple
+          case 'EL': return [255,228,181]; // Emergency - light orange
+          case 'ML': return [255,192,224]; // Maternity - light pink
+          case 'UL': return [255,224,224]; // Unpaid - light red
+          case 'HL': return [224,240,255]; // Half Day - light blue
+          case 'BM': return [211,211,211]; // Bereavement - gray
+          case 'XL': return [240,248,208]; // Exam - light yellow-green
+          case 'B1': return [200,230,230]; // Bereavement 1 - teal tint
+          case 'B2': return [230,210,230]; // Bereavement 2 - lilac tint
+          // Exception codes - warning colors
+          case 'NI': return [255,245,220]; // No In - light amber
+          case 'NO': return [255,240,210]; // No Out - light peach
+          case 'MO': return [255,235,200]; // Missing Out - light orange
+          case 'IP': return [255,250,230]; // Incomplete - light yellow
+          // Regular attendance codes
+          case 'PHF': return [235,235,235];
+          case 'PH':  return [230,230,230];
+          case 'PT':  return [240,240,240];
+          case 'PL':  return [225,225,225];
+          case 'A':   return [215,215,215];
+          case 'P':   return [245,245,245];
+          default:    return null;
+        }
+      };
       let bg: [number,number,number] | null = null;
 
-      if (isFri && !present) { bg = [215, 215, 215]; }
-      else {
-        switch (badge) {
-          case 'P':  bg = [235, 250, 235]; break; // Present - green tint
-          case 'A':  bg = [253, 236, 234]; break; // Absent - red tint
-          case 'PHF': bg = [230,255,230]; break;
-          case 'PH':  bg = [255,243,205]; break;
-          case 'PT':  bg = [224,247,250]; break;
-          case 'PL':  bg = [255,235,238]; break;
-          case 'AL':  bg = [220,240,220]; break;
-          case 'SL':  bg = [230,230,255]; break;
-          case 'EL':  bg = [255,245,230]; break;
-          case 'ML':  bg = [240,230,255]; break;
-          case 'XL':  bg = [230,255,255]; break;
-          case 'BM':  bg = [220,220,220]; break;
-          case 'UL':  bg = [255,228,225]; break;
-          case 'HL':  bg = [255,255,210]; break;
-          default: bg = null;
-        }
+      if (isFri && !present) { 
+        bg = [215, 215, 215]; 
+      } else {
+        bg = headerBg(badge);
       }
-      if (bg) { (doc as any).setFillColor(bg[0], bg[1], bg[2]); doc.rect(x, cellY, wAdj, hCell, 'F'); }
+      
+      if (bg) { 
+        (doc as any).setFillColor(bg[0], bg[1], bg[2]); 
+        doc.rect(x, cellY, wAdj, hCell, 'F'); 
+      }
       doc.setDrawColor(140,140,140);
       doc.rect(x, cellY, wAdj, hCell);
+      
       // Cross out Fridays with no presence
       if (isFri && !present) {
         doc.setDrawColor(120,120,120);
         doc.setLineWidth(0.6);
         doc.line(x + 2, cellY + 2, x + wAdj - 2, cellY + hCell - 2);
       }
+      
       doc.setTextColor(0);
       doc.setFontSize(8);
       
-      const showCodes = ['P','PH','PHF','PT','PL','A','AL','SL','EL','ML','XL','BM','UL','HL'].includes(badge) && !(isFri && !present);
+      // **UPDATED: Show leave codes and exception codes prominently**
+      const isLeaveCode = ['AL','SL','EL','ML','UL','HL','BM','XL','B1','B2'].includes(badge);
+      const isExceptionCode = ['NI','NO','MO','IP'].includes(badge);
+      const showCodes = ['P','PH','PHF','PT','PL','A','AL','SL','EL','ML','UL','HL','BM','XL','B1','B2','NI','NO','MO','IP'].includes(badge) && !(isFri && !present);
+      
       if (isFri && !present) {
         doc.setFont('helvetica','bold');
         doc.setFontSize(14);
@@ -2378,23 +3372,31 @@ const computePPhPhf = (e: Payslip): PPhPhfVals => {
         doc.text(cap, midX - (tw/2), payY);
       } else if (showCodes && badge) {
         doc.setFont('helvetica','bold');
-        doc.setFontSize(10);
+        doc.setFontSize(isLeaveCode || isExceptionCode ? 11 : 10); // Slightly larger for leave/exception codes
+        if (isLeaveCode) {
+          doc.setTextColor(0, 100, 0); // Dark green for leave codes
+        } else if (isExceptionCode) {
+          doc.setTextColor(200, 100, 0); // Orange for exception codes
+        }
         const bw = doc.getTextWidth(badge);
         doc.text(badge, x + (wAdj - bw)/2, cellY + 20);
+        doc.setTextColor(0); // Reset color
         doc.setFont('helvetica','normal');
       }
-      // Missing hours indicator at top-right of cell
-      {
+      
+      // Missing hours indicator at top-right of cell (only if not on leave)
+      if (!isLeaveCode) {
         const dm = Number((day as any)?.deltaMin ?? 0);
-        const show = (dm < 0 && Math.abs(dm) >= 1) || (dm > 0 && Math.abs(dm) >= 30);
-        const sgn = dm > 0 ? '+' : (dm < 0 ? '-' : '');
+        const show = dm < 0 && Math.abs(dm) >= 1; // Only show negative deltas
+        const sgn = '-'; // Always negative
         const abs = Math.abs(dm);
         const hh = Math.floor(abs / 60);
         const mm = Math.floor(abs % 60);
         const txt = show ? `${sgn}${String(hh)}:${String(mm).padStart(2,'0')}` : '';
-        doc.setFontSize(5);
+        
         if (show) {
-          if (dm < 0) doc.setTextColor(220, 53, 69); else if (dm > 0) doc.setTextColor(34, 139, 34); else doc.setTextColor(0,0,0);
+          doc.setFontSize(5);
+          doc.setTextColor(220, 53, 69); // Red for missing hours
           const tw = doc.getTextWidth(txt);
           doc.text(txt, x + wAdj - tw - 2, cellY + 8);
           doc.setTextColor(0,0,0);
@@ -2403,41 +3405,19 @@ const computePPhPhf = (e: Payslip): PPhPhfVals => {
     }
     return topY + hWeek + hDayNum + hCell;
   };
-  
+
   let bottomY = drawRow(1, dim, gridTop);
 
   // Reserve after-grid Y
   let afterGridY = bottomY + 12;
-  // Financial Log already rendered above
 
-  // Salary/Allowance change logs
-  try {
-    const url2 = `http://localhost:9000/hr/payroll/change-logs?year=${year}&month=${month}&employeeId=${emp.id_emp}`;
-    const res2 = await fetch(url2, { headers: authHeader() as unknown as HeadersInit });
-    if (res2.ok) {
-      const js2 = await res2.json();
-      const rows2 = (js2?.rows || []) as Array<{ ts?: string; actor?: string; changes?: Record<string,{before:any,after:any}> }>; 
-      if (rows2.length > 0) {
-        doc.setFontSize(10);
-        doc.text('Salary/Allowance Change Log', margin, afterGridY);
-        afterGridY += 12;
-        doc.setFontSize(8);
-        for (const r of rows2) {
-          const when = r.ts ? dayjs(r.ts).format('DD/MM/YYYY HH:mm') : '';
-          const who = r.actor || '';
-          const ch = r.changes || {};
-          const fields = Object.keys(ch).slice(0, 4).map(k => `${k}: ${ch[k].before}→${ch[k].after}`).join(', ');
-          const lineTxt = `${when}  ${who}  ${fields}`;
-          doc.text(fitText(lineTxt, pageW - margin*2), margin, afterGridY);
-          afterGridY += 10;
-          if (afterGridY > 760) break;
-        }
-      }
-    }
-  } catch {}
+  // **UPDATE: Attendance counts to include leave codes and exception codes**
+  const counts: Record<string, number> = { 
+    P:0, A:0, PT:0, PHF:0, PH:0, PL:0,
+    AL:0, SL:0, EL:0, ML:0, UL:0, HL:0, BM:0, XL:0, B1:0, B2:0,
+    NI:0, NO:0, MO:0, IP:0,
+  };
 
-  // Attendance counts summary
-  const counts: Record<string, number> = { P:0, A:0, PT:0, PHF:0, PH:0, PL:0 };
   for (let d = 1; d <= dim; d++) {
     const monthStartDate = dayjs(periodStart);
     const dayDate = monthStartDate.date(d);
@@ -2445,20 +3425,21 @@ const computePPhPhf = (e: Payslip): PPhPhfVals => {
     if (dayDate.day() === 5) continue;
     const effectiveStart = contractStart && contractStart.isAfter(monthStartDate) ? contractStart : monthStartDate;
     if (contractStart && dayDate.isBefore(effectiveStart, 'day')) continue;
-    const badge = codeBadge(days[d-1] || undefined, schStartMinPDF, schEndMinPDF);
+    
+    const badge = codeBadgePDF(days[d-1] || undefined, d - 1, schStartMinPDF, schEndMinPDF);
     if (badge && badge in counts) counts[badge]++;
   }
 
-  // Full-width tables: Attendance, then Adjustments, then Leaves
+  // Full-width Attendance table with leave codes
   doc.setFontSize(14);
   const tblTop = afterGridY + 8;
   const fullW = pageW - margin*2;
 
-  // Attendance (full-width, grayscale)
-  const allCodes = ['P','A','PT','PHF','PH','PL'] as const;
+  const allCodes = ['P','A','PT','PHF','PH','PL','AL','SL','EL','ML','UL','HL','BM','XL','B1','B2','NI','NO','MO','IP'] as const;
   const codes = allCodes.filter((c) => Number((counts as any)[c] || 0) > 0);
   const leftW = 80;
   const cellW = Math.floor((fullW - leftW) / Math.max(1, codes.length));
+  
   doc.setFont('helvetica', 'bold');
   const attTitle = 'Attendance Summary';
   const attTitleW = doc.getTextWidth(attTitle);
@@ -2469,8 +3450,46 @@ const computePPhPhf = (e: Payslip): PPhPhfVals => {
   doc.setDrawColor('black');
   let ay = tblTop + 14;
   
+  const codeLabel: Record<string,string> = {
+    P: 'Present',
+    A: 'Absent',
+    PT: 'Short',
+    PHF: 'PH Full',
+    PH: 'PH',
+    PL: 'Late',
+    AL: 'Annual Leave',
+    SL: 'Sick Leave',
+    EL: 'Emergency Leave',
+    ML: 'Maternity Leave',
+    UL: 'Unpaid Leave',
+    HL: 'Half Day Leave',
+    BM: 'Bereavement',
+    XL: 'Exam Leave',
+    B1: 'Bereavement 1',
+    B2: 'Bereavement 2',
+    NI: 'No In',
+    NO: 'No Out',
+    MO: 'Missing Out',
+    IP: 'Incomplete',
+  };
+
   const headerBg = (code: string): [number,number,number] | null => {
     switch (code) {
+      // Leave types - distinct colors
+      case 'AL': return [220,252,220]; // Annual - light green
+      case 'SL': return [232,212,248]; // Sick - light purple
+      case 'EL': return [255,228,181]; // Emergency - light orange
+      case 'ML': return [255,192,224]; // Maternity - light pink
+      case 'UL': return [255,224,224]; // Unpaid - light red
+      case 'HL': return [224,240,255]; // Hajj - light blue
+      case 'BM': return [211,211,211]; // Bereavement - gray
+      case 'XL': return [240,248,208]; // Excuse - light yellow-green
+      // Exception codes - warning colors
+      case 'NI': return [255,245,220]; // No In - light amber
+      case 'NO': return [255,240,210]; // No Out - light peach
+      case 'MO': return [255,235,200]; // Missing Out - light orange
+      case 'IP': return [255,250,230]; // Incomplete - light yellow
+      // Regular attendance codes
       case 'PHF': return [235,235,235];
       case 'PH':  return [230,230,230];
       case 'PT':  return [240,240,240];
@@ -2487,26 +3506,37 @@ const computePPhPhf = (e: Payslip): PPhPhfVals => {
     const isLast = i === codes.length - 1;
     const wAdj = isLast ? ((fullW - leftW) - (cellW * (codes.length - 1))) : cellW;
     const bg = headerBg(c);
-    if (bg) { (doc as any).setFillColor(bg[0], bg[1], bg[2]); doc.rect(x, ay, wAdj, 24, 'F'); }
+    if (bg) { 
+      (doc as any).setFillColor(bg[0], bg[1], bg[2]); 
+      doc.rect(x, ay, wAdj, 24, 'F'); 
+    }
     doc.rect(x, ay, wAdj, 24);
   });
+  
   doc.text('Code', margin + 8, ay + 16);
-  const codeLabel: Record<string,string> = {
-    P: 'Present',
-    A: 'Absent',
-    PT: 'Short',
-    PHF: 'PH Full',
-    PH: 'PH',
-    PL: 'Late',
-  };
   codes.forEach((c, i) => {
     const x = margin + leftW + i*cellW;
     const isLast = i === codes.length - 1;
     const wAdj = isLast ? ((fullW - leftW) - (cellW * (codes.length - 1))) : cellW;
     const tw = doc.getTextWidth(c);
-    // main code
+    
+    // **Color leave codes and exception codes in the header**
+    const isLeaveCode = ['AL','SL','EL','ML','UL','HL','BM','XL','B1','B2'].includes(c);
+    const isExceptionCode = ['NI','NO','MO','IP'].includes(c);
+    if (isLeaveCode) {
+      doc.setTextColor(0, 100, 0);
+      doc.setFont('helvetica', 'bold');
+    } else if (isExceptionCode) {
+      doc.setTextColor(200, 100, 0);
+      doc.setFont('helvetica', 'bold');
+    }
+    
     doc.text(c, x + (wAdj - tw)/2, ay + 13);
-    // small descriptor beneath
+    
+    // Reset styling
+    doc.setTextColor(0, 0, 0);
+    doc.setFont('helvetica', 'normal');
+    
     const desc = codeLabel[c];
     if (desc) {
       doc.setFontSize(7);
@@ -2536,128 +3566,55 @@ const computePPhPhf = (e: Payslip): PPhPhfVals => {
   });
   ay += 24;
 
-  // Adjustments table under attendance removed (already shown next to Commission Summary)
-  let adjY = ay;
-
-  // Leaves table
-  const leavesCols = [Math.floor(fullW*0.28), Math.floor(fullW*0.12), fullW - Math.floor(fullW*0.28) - Math.floor(fullW*0.12)];
-  const leavesX = margin;
-  let leavesBottomY = adjY;
-
-  const ls = emp.leaveSummary || ({} as Record<string,number>);
-  const leaveName: Record<string,string> = { AL:'Annual Leave', SL:'Sick Leave', EL:'Emergency Leave', ML:'Maternity Leave', XL:'Exam Leave', BM:'Bereavement', UL:'Unpaid Leave', HL:'Half-day Leave' };
-  const monthStart = dayjs(`${year}-${String(month).padStart(2,'0')}-01`).format('YYYY-MM-DD');
-  const monthEnd = dayjs(`${year}-${String(month).padStart(2,'0')}-01`).endOf('month').format('YYYY-MM-DD');
-  type LeaveRow = { id_emp:number; type:string|null; date_depart:string; date_end:string; state?:string|null; nbr_jour?: number };
-  const leaveRanges: Record<string, Array<{ start:string; end:string }>> = {};
-  const leaveDaysByCode: Record<string, number> = {};
-  
-  try {
-    const resLeaves = await fetch(`http://localhost:9000/leave/vacations-range?from=${monthStart}&to=${monthEnd}`, { headers: authHeader() as unknown as HeadersInit });
-    if (resLeaves.ok) {
-      const rows = await resLeaves.json() as LeaveRow[];
-      const my = rows.filter(r => Number(r.id_emp) === Number(emp.id_emp) && String(r.state||'').toLowerCase() !== 'rejected');
-      for (const r of my) {
-        const code = (r.type || '').toUpperCase();
-        if (!code || !(code in leaveName)) continue;
-        const s = dayjs(r.date_depart);
-        const e = dayjs(r.date_end);
-        const ms = dayjs(monthStart);
-        const me = dayjs(monthEnd);
-        const startLimit = (contractStart && contractStart.isAfter(ms)) ? contractStart : ms;
-        let sClamp = s.isAfter(startLimit) ? s : startLimit;
-        const eClamp = e.isBefore(me) ? e : me;
-        if (eClamp.isBefore(sClamp)) continue;
-        (leaveRanges[code] ||= []).push({ start: sClamp.format('DD/MM/YYYY'), end: eClamp.format('DD/MM/YYYY') });
-        const incDays = Math.max(0, eClamp.diff(sClamp, 'day') + 1);
-        leaveDaysByCode[code] = (leaveDaysByCode[code] || 0) + incDays;
-      }
-    }
-  } catch {}
-  
-  const leaves = Object.keys(leaveName).filter(k => (ls as any)[k] != null || leaveRanges[k]?.length);
-  if (leaves.length) {
-    const leavesTitleY = adjY + 8;
-    let ly2 = leavesTitleY + 14;
-    doc.setFont('helvetica', 'bold');
-    const leavesTitle = 'Leaves This Month';
-    const leavesTitleW = doc.getTextWidth(leavesTitle);
-    doc.setFontSize(10);
-    doc.text(leavesTitle, margin + (fullW - leavesTitleW)/2, leavesTitleY + 6);
-    doc.setFont('helvetica', 'normal');
-    doc.setFontSize(10);
-    doc.setDrawColor('black');
-    
-    doc.rect(leavesX, ly2, leavesCols[0], 24);
-    doc.rect(leavesX + leavesCols[0], ly2, leavesCols[1], 24);
-    doc.rect(leavesX + leavesCols[0] + leavesCols[1], ly2, leavesCols[2], 24);
-    const lh1='Leave', lh2='Days', lh3='Dates';
-    doc.text(lh1, leavesX + 8, ly2 + 16);
-    doc.text(lh2, leavesX + leavesCols[0] + 8, ly2 + 16);
-    doc.text(lh3, leavesX + leavesCols[0] + leavesCols[1] + 8, ly2 + 16);
-    ly2 += 24;
-    
-    leaves.forEach((k)=>{
-      const ranges = (leaveRanges[k]||[]).map(r => `${r.start} — ${r.end}`).join(', ');
-      const days = leaveDaysByCode[k] || (ls as any)[k] || 0;
-      doc.rect(leavesX, ly2, leavesCols[0], 16);
-      doc.rect(leavesX + leavesCols[0], ly2, leavesCols[1], 16);
-      doc.rect(leavesX + leavesCols[0] + leavesCols[1], ly2, leavesCols[2], 16);
-      doc.text(`${leaveName[k]||k} (${k})`, leavesX + 6, ly2 + 11);
-      const dStr = String(days);
-      const dw = doc.getTextWidth(dStr);
-      doc.text(dStr, leavesX + leavesCols[0] + (leavesCols[1]-dw)/2, ly2 + 11);
-      doc.text(fitText(ranges, leavesCols[2]-12), leavesX + leavesCols[0] + leavesCols[1] + 6, ly2 + 11);
-      ly2 += 16;
-    });
-    leavesBottomY = ly2;
-  }
-
-  // Compact attendance summary row right above the signature
-  let attCompactBottom = Math.max(ay, leavesBottomY);
-  try {
-    const pTxt = `P (Present)`;
-    const aTxt = `A (Absent)`;
-    const line = `${pTxt} | ${aTxt}`;
-    doc.setFontSize(9);
-    attCompactBottom += 16;
-    doc.text(line, margin, attCompactBottom);
-  } catch {}
-
-  // Net Salary at absolute bottom (after compact attendance summary)
-  // (Net Pay values are now shown in the band above the calendar; footer only contains notes/signature.)
-  const footerTop = Math.max(netBandBottomY + 24, attCompactBottom + 24);
-
-  // Footnotes for commissions just above the signature
-  let sigBaseY = footerTop;
-  try {
-    doc.setFont('helvetica','normal');
-    doc.setFontSize(9);
-    doc.setTextColor(0,0,0);
-    const goldWeightUsed = (commissionRole === 'sales_lead' || commissionRole === 'sales_manager') ? goldGramsScope : goldGramsSelf;
-    let footY = footerTop;
-    if (diamondItems > 0) {
-      const foot1 = `* Diamond items sold: ${Number(diamondItems||0).toLocaleString('en-US', { maximumFractionDigits: 0 })}`;
-      doc.text(foot1, margin, footY);
-      footY += 12;
-    }
-    if (goldWeightUsed > 0) {
-      const foot2 = `** Gold grams sold: ${Number(goldWeightUsed||0).toLocaleString('en-US', { maximumFractionDigits: 2 })} g`;
-      doc.text(foot2, margin, footY);
-      footY += 12;
-    }
-    sigBaseY = footY + 8;
-  } catch {}
-
-  // Employee Signature field at the absolute bottom (label only)
+  // Employee Signature field at the absolute bottom (bonus + label on same line)
   const sigY = doc.internal.pageSize.getHeight() - margin - 22;
   const sigWidth = 360;
+
+  // --- Build bonus text (no icons) ---
+  const goldWeightUsed =
+    (commissionRole === 'sales_lead' || commissionRole === 'sales_manager')
+      ? goldGramsScope
+      : goldGramsSelf;
+
+  const bonusParts: string[] = [];
+
+  if (diamondItems > 0) {
+    bonusParts.push(
+      `Diamond items sold: ${Number(diamondItems || 0).toLocaleString('en-US', {
+        maximumFractionDigits: 0,
+      })}`
+    );
+  }
+
+  if (goldWeightUsed > 0) {
+    bonusParts.push(
+      `Gold grams sold: ${Number(goldWeightUsed || 0).toLocaleString('en-US', {
+        maximumFractionDigits: 2,
+      })} g`
+    );
+  }
+
+  const bonusText = bonusParts.join('   |   ');
+
+  // --- Draw bonus text on same line (smaller, normal styling) ---
+  try {
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(9);          // smaller than signature label
+    doc.setTextColor(0, 0, 0);
+
+    if (bonusText) doc.text(bonusText, margin, sigY);
+  } catch {}
+
+  // --- Signature label (keep your existing sizing) ---
   doc.setFont('helvetica', 'normal');
   doc.setFontSize(12);
   doc.setTextColor(0, 0, 0);
+
   const sigLabel = 'Employee signature';
   const sigLabelX = pageW - margin - sigWidth;
   doc.text(sigLabel, sigLabelX, sigY);
+
+  // --- Signature line ---
   try {
     const tw = doc.getTextWidth(sigLabel);
     const x1 = sigLabelX + tw + 6;
@@ -2665,15 +3622,6 @@ const computePPhPhf = (e: Payslip): PPhPhfVals => {
     doc.setDrawColor('#999999');
     (doc as any).setLineWidth(1);
     if (x2 > x1) doc.line(x1, sigY + 2, x2, sigY + 2);
-  } catch {}
-
-  // Printed on at lower-left corner
-  try {
-    doc.setFont('helvetica','normal');
-    doc.setFontSize(9);
-    doc.setTextColor(0,0,0);
-    const footerY = doc.internal.pageSize.getHeight() - Math.max(12, margin/2);
-    doc.text(printedOnStr, margin, footerY);
   } catch {}
 
   const dataUrl = doc.output("datauristring");
@@ -2731,2680 +3679,3041 @@ const computePPhPhf = (e: Payslip): PPhPhfVals => {
     }
   };
 
+  const pickNum = (obj: any, keys: string[]) => {
+    for (const k of keys) {
+      const v = obj?.[k];
+      const n = Number(v);
+      if (Number.isFinite(n) && n !== 0) return n;
+    }
+    return 0;
+  };
+
+  const getVrForEmp = (empId: number) =>
+    (v2Rows || []).find((x: any) => Number(x.id_emp) === Number(empId)) || ({} as any);
+
+  const getGoldGrams = (empId: number) => {
+    const vr = getVrForEmp(empId);
+    return pickNum(vr, [
+      "gold_grams",
+      "gold_g",
+      "goldGram",
+      "gold_gram",
+      "gold_commission_grams",
+      "gold_comm_grams",
+      "gold_qty_g",
+    ]);
+  };
+
+  const getDiamondGrams = (empId: number) => {
+    const vr = getVrForEmp(empId);
+    return pickNum(vr, [
+      "diamond_grams",
+      "diamond_g",
+      "diamondGram",
+      "diamond_gram",
+      "diamond_commission_grams",
+      "diamond_comm_grams",
+      "diamond_qty_g",
+    ]);
+  };
+
+  const resolveCommissionFigures = (emp: Payslip) => {
+    const empId = Number(emp.id_emp);
+    const comm = commissionMapUI[empId];
+    const vr = getVrForEmp(empId);
+
+    const goldGramsUi = Number(comm?.goldGramsUsed);
+    const goldGrams = Number.isFinite(goldGramsUi)
+      ? goldGramsUi
+      : Number(getGoldGrams(empId) || 0);
+
+    const diamondGramsUi = Number(comm?.diamondItems);
+    const diamondGrams = Number.isFinite(diamondGramsUi)
+      ? diamondGramsUi
+      : Number(getDiamondGrams(empId) || 0);
+
+    const goldLyd = preferCommissionValue(
+      comm?.goldBonusLyd,
+      (vr as any)?.gold_bonus_lyd,
+      (emp as any)?.gold_bonus_lyd
+    );
+
+    const diamondLyd = preferCommissionValue(
+      comm?.diamondBonusLyd,
+      (vr as any)?.diamond_bonus_lyd,
+      (emp as any)?.diamond_bonus_lyd
+    );
+
+    return {
+      goldGrams,
+      goldLyd,
+      diamondGrams,
+      diamondLyd,
+    };
+  };
+
+  const totalsGold = React.useMemo(() => {
+    return (displayedRows || []).reduce(
+      (acc: { grams: number; lyd: number }, emp: Payslip) => {
+        const figs = resolveCommissionFigures(emp);
+        acc.grams += figs.goldGrams;
+        acc.lyd += figs.goldLyd;
+        return acc;
+      },
+      { grams: 0, lyd: 0 }
+    );
+  }, [displayedRows, commissionMapUI, v2Rows]);
+
+  const totalsDiamond = React.useMemo(() => {
+    return (displayedRows || []).reduce(
+      (acc: { grams: number; lyd: number }, emp: Payslip) => {
+        const figs = resolveCommissionFigures(emp);
+        acc.grams += figs.diamondGrams;
+        acc.lyd += figs.diamondLyd;
+        return acc;
+      },
+      { grams: 0, lyd: 0 }
+    );
+  }, [displayedRows, resolveCommissionFigures]);
+
   return (
-    <Box p={2}>
-      <Card sx={{ mb: 2 }}>
-  <CardContent>
-    <Tabs value={tab} onChange={(_, v) => setTab(v)} sx={{ mb: 1 }} TabIndicatorProps={{ sx: { display: 'none' } }}>
-        <Tab label={t("Payroll") || "Payroll"} value="payroll" />
-        <Tab label={t("Salary Advance") || "Salary Advance"} value="advances" />
-        <Tab label={t("Loans") || "Loans"} value="loans" />
-        <Tab label={t("Adjustments") || "Adjustments"} value="adjustments" />
-        {isAdmin && (<Tab label={t("Settings") || "Settings"} value="settings" />)}
-      </Tabs>
+  <Box p={2}>
+    <Card sx={{ mb: 2 }}>
+      <CardContent>
+        <Tabs
+          value={tab}
+          onChange={(_, v) => setTab(v)}
+          sx={{
+            mb: 1,
+            display: "flex",
+            justifyContent: "center",
+            "& .MuiTabs-flexContainer": {
+              gap: 1,
+            },
+          }}
+          TabIndicatorProps={{ sx: { display: "none" } }}
+        >
+          {[
+            { label: t("Payroll") || "Payroll", value: "payroll" },
+            { label: t("Salary Advance") || "Salary Advance", value: "advances" },
+            { label: t("Loans") || "Loans", value: "loans" },
+            { label: t("Reimbursements") || "Reimbursements", value: "adjustments" },
+            ...(isAdmin ? [{ label: t("Settings") || "Settings", value: "settings" }] : []),
+          ].map((tdef) => (
+            <Tab
+              key={tdef.value}
+              label={tdef.label}
+              value={tdef.value}
+              sx={{
+                minHeight: 0,
+                height: 32,
+                padding: "4px 14px",
+                lineHeight: 1,
+                color: "white !important",
+                borderRadius: 1,
+                textTransform: "none",
+                backgroundColor: tab === tdef.value ? "#b7a27d" : "#65a8bf",
+                "&.Mui-selected": {
+                  color: "white !important",
+                  backgroundColor: "#b7a27d",
+                },
+                "&:hover": {
+                  backgroundColor: tab === tdef.value ? "#b7a27d" : "#5793a7",
+                },
+              }}
+            />
+          ))}
+        </Tabs>
 
-    {tab === "payroll" && (
-      <Box display="flex" flexWrap="wrap" alignItems="center" gap={2}>
-        <Box minWidth={140}>
-          <TextField
-            select
-            fullWidth
-            label={t("hr.timesheets.year") || "Year"}
-            value={year}
-            onChange={(e) => setYear(Number(e.target.value))}
-            size="small"
-          >
-            {years.map((yy) => (
-              <MenuItem key={yy} value={yy}>
-                {yy}
-              </MenuItem>
-            ))}
-          </TextField>
-        </Box>
-        <Box minWidth={140}>
-          <TextField
-            select
-            fullWidth
-            label={t("hr.timesheets.month") || "Month"}
-            value={month}
-            onChange={(e) => setMonth(Number(e.target.value))}
-            size="small"
-          >
-            {months.map((mm) => (
-              <MenuItem key={mm} value={mm}>
-                {String(mm).padStart(2, "0")}
-              </MenuItem>
-            ))}
-          </TextField>
-        </Box>
-        <Box minWidth={160}>
-          <TextField
-            select
-            fullWidth
-            label={t("hr.timesheets.psPoint") || "PS"}
-            value={ps}
-            onChange={(e) => setPs(e.target.value)}
-            size="small"
-          >
-            <MenuItem value="">
-              {t("hr.timesheets.allPs") || "All PS"}
-            </MenuItem>
-            {psOptions.map((p) => (
-              <MenuItem key={String(p.PS)} value={String(p.PS)}>
-                {`${formatPs(p.PS)} (${p.count})`}
-              </MenuItem>
-            ))}
-          </TextField>
-        </Box>
-        <Box minWidth={180}>
-          <TextField
-            select
-            fullWidth
-            size="small"
-            label={t("Position") || "Position"}
-            value={positionFilter}
-            onChange={(e) => setPositionFilter(e.target.value)}
-          >
-            <MenuItem value="all">
-              {t("All Positions") || "All Positions"}
-            </MenuItem>
-            {positionOptions.map((pos) => (
-              <MenuItem key={pos.id} value={String(pos.id)}>
-                {pos.label}
-              </MenuItem>
-            ))}
-          </TextField>
-        </Box>
-        <Box minWidth={200}>
-          <TextField
-            size="small"
-            fullWidth
-            label={t("Search") || "Search"}
-            value={filterText}
-            onChange={(e) => setFilterText(e.target.value)}
-          />
-        </Box>
-
-        {/* Actions: export CSV, export PDF, save, close month, bulk send */}
-        <Box display="flex" flexWrap="wrap" alignItems="center" gap={1.5}>
-          <Button
-            variant="outlined"
-            onClick={async () => {
-              // Export CSV
-              const headers: string[] = [
-                "Employee",
-                "Working Days",
-                "Deduction Days",
-                "Present Days",
-                "Holidays Worked",
-                "Base",
-                "Food",
-                "Transportation",
-                "Communication",
-                "Base Pay",
-                "Allowance Pay",
-              ];
-              if (cols.advances) headers.push("Advance");
-              if (cols.loans) headers.push("Loans");
-              if (cols.salesQty) headers.push("Sales Qty");
-              if (cols.salesTotal) headers.push("Sales Total (LYD)");
-              headers.push("Total (LYD)");
-              if (cols.totalUsd) headers.push("Total (USD)");
-              const lines = [headers.join(",")];
-              displayedRows.forEach((e) => {
-                const s = sales[String(e.id_emp)] || {
-                  qty: 0,
-                  total_lyd: 0,
-                };
-                const adj = e.components?.adjustments || {
-                  bonus: 0,
-                  deduction: 0,
-                  advance: 0,
-                  loanPayment: 0,
-                };
-                const advVal = Number(adj.advance || 0) * -1;
-                const loanVal = Number(adj.loanPayment || 0) * -1;
-                const W = Math.max(1, e.workingDays || 1);
-                const F =
-                  e.factorSum != null && e.factorSum > 0
-                    ? e.factorSum
-                    : (e.components?.basePay || 0) /
-                      (Math.max(1, e.baseSalary || 0) / W);
-                const baseUsd = e.baseSalaryUsd ? (e.baseSalaryUsd / W) * F : 0;
-                const vr = (v2Rows || []).find((x: any) => Number(x.id_emp) === Number(e.id_emp)) || {};
-                const commUsd = Number((vr as any).diamond_bonus_usd || 0) + Number((vr as any).gold_bonus_usd || 0);
-                const row: any[] = [
-                  `${nameMap[e.id_emp] ?? e.name}`,
-                  e.workingDays,
-                  e.deductionDays,
-                  e.presentWorkdays,
-                  e.holidayWorked,
-                  (e.baseSalary || 0).toFixed(2),
-                  (() => {
-                    const W = Math.max(1, e.workingDays || 1);
-                    const vr = (v2Rows || []).find((x: any) => Number(x.id_emp) === Number(e.id_emp)) || {};
-                    let foodPer = Number((e as any).FOOD || (e as any).FOOD_ALLOWANCE || 0);
-                    if (!foodPer) {
-                      const totalFoodLyd = Number((vr as any).wd_food_lyd || 0);
-                      foodPer = totalFoodLyd && W ? totalFoodLyd / W : 0;
-                    }
-                    const present = Number(presentDaysMap[e.id_emp] ?? e.presentWorkdays ?? 0) || 0;
-                    const fd = present;
-                    const v = foodPer * fd;
-                    return (Number.isFinite(v) ? v : 0).toFixed(2);
-                  })(),
-                  (() => {
-                    const W = Math.max(1, e.workingDays || 1);
-                    const vr = (v2Rows || []).find((x: any) => Number(x.id_emp) === Number(e.id_emp)) || {};
-                    const fuel = Number(((e as any).FUEL ?? (vr as any).FUEL) || 0);
-                    return (fuel * W).toFixed(2);
-                  })(),
-                  (() => {
-                    const W = Math.max(1, e.workingDays || 1);
-                    const vr = (v2Rows || []).find((x: any) => Number(x.id_emp) === Number(e.id_emp)) || {};
-                    const comm = Number(((e as any).COMMUNICATION ?? (vr as any).COMMUNICATION) || 0);
-                    return (comm * W).toFixed(2);
-                  })(),
-                  (e.components?.basePay || 0).toFixed(2),
-                  (e.components?.allowancePay || 0).toFixed(2),
-                ];
-                if (cols.advances) row.push(advVal.toFixed(2));
-                if (cols.loans) row.push(loanVal.toFixed(2));
-                if (cols.salesQty) row.push((s.qty || 0).toFixed(0));
-                if (cols.salesTotal)
-                  row.push((s.total_lyd || 0).toFixed(2));
-                { row.push(computeNetLYDFor(e.id_emp).toFixed(2)); }
-                if (cols.totalUsd) { const vr=(v2Rows||[]).find((x:any)=>Number(x.id_emp)===Number(e.id_emp))||{}; const commUsd=Number((vr as any).diamond_bonus_usd||0)+Number((vr as any).gold_bonus_usd||0); const totalUsdVal=baseUsd+commUsd; row.push(totalUsdVal.toFixed(2)); }
-                lines.push(row.join(","));
-              });
-              const blob = new Blob([lines.join("\n")], {
-                type: "text/csv;charset=utf-8;",
-              });
-              const url = URL.createObjectURL(blob);
-              const a = document.createElement("a");
-              a.href = url;
-              a.download = `payroll_${year}-${String(month).padStart(
-                2,
-                "0"
-              )}.csv`;
-              a.click();
-              URL.revokeObjectURL(url);
-            }}
-          >
-            {t("Export CSV") || "Export CSV"}
-          </Button>
-
-          <Button
-            variant="outlined"
-            onClick={async () => {
-              const doc = new jsPDF({
-                orientation: "landscape",
-                unit: "pt",
-                format: "a4",
-              });
-              doc.setFontSize(12);
-              doc.text(
-                `Payroll ${year}-${String(month).padStart(2, "0")}`,
-                36,
-                32
-              );
-
-              let y0 = 48;
-
-              // Base header
-              const header: string[] = [
-                "Employee",
-                "WD",
-                "DD",
-                "PD",
-                "HW",
-                "Base",
-                "Allow",
-              ];
-              const colX: number[] = [36, 220, 260, 300, 340, 380, 450];
-
-              // Extra columns – make sure X positions never overlap
-              if (cols.advances) {
-                header.push("Adv");
-                colX.push(520);
-              }
-              if (cols.loans) {
-                header.push("Loan");
-                colX.push(560);
-              }
-              if (cols.salesQty) {
-                header.push("Qty");
-                colX.push(600);
-              }
-              if (cols.salesTotal) {
-                header.push("Sales");
-                colX.push(640);
-              }
-
-              header.push("Total");
-              colX.push(680);
-
-              if (cols.totalUsd) {
-                header.push("USD");
-                colX.push(740);
-              }
-
-              // Header row
-              header.forEach((h, i) => doc.text(h, colX[i], y0));
-              y0 += 16;
-
-              displayedRows.forEach((e) => {
-                const s = sales[String(e.id_emp)] || {
-                  qty: 0,
-                  total_lyd: 0,
-                };
-                const adj = e.components?.adjustments || {
-                  bonus: 0,
-                  deduction: 0,
-                  advance: 0,
-                  loanPayment: 0,
-                };
-
-                const W = Math.max(1, e.workingDays || 1);
-                const F =
-                  e.factorSum != null && e.factorSum > 0
-                    ? e.factorSum
-                    : (e.components?.basePay || 0) /
-                      (Math.max(1, e.baseSalary || 0) / W);
-
-                const baseUsd = e.baseSalaryUsd
-                  ? (e.baseSalaryUsd / W) * F
-                  : 0;
-
-                const vr =
-                  (v2Rows || []).find(
-                    (x: any) => Number(x.id_emp) === Number(e.id_emp)
-                  ) || {};
-                const commUsd =
-                  Number((vr as any).diamond_bonus_usd || 0) +
-                  Number((vr as any).gold_bonus_usd || 0);
-
-                const vals: any[] = [
-                  e.name,
-                  e.workingDays,
-                  e.deductionDays,
-                  e.presentWorkdays,
-                  e.holidayWorked,
-                  (e.components?.basePay || 0).toFixed(0),
-                  (e.components?.allowancePay || 0).toFixed(0),
-                ];
-
-                if (cols.advances)
-                  vals.push((Number(adj.advance || 0) * -1).toFixed(2));
-                if (cols.loans)
-                  vals.push((Number(adj.loanPayment || 0) * -1).toFixed(2));
-                if (cols.salesQty) vals.push((s.qty || 0).toFixed(0));
-                if (cols.salesTotal)
-                  vals.push((s.total_lyd || 0).toFixed(2));
-
-                vals.push(computeNetLYDFor(e.id_emp).toFixed(2));
-                if (cols.totalUsd)
-                  vals.push((baseUsd + commUsd).toFixed(0));
-
-                vals.forEach((v, i) => doc.text(String(v), colX[i], y0));
-                y0 += 14;
-                if (y0 > 560) {
-                  doc.addPage();
-                  y0 = 36;
-                }
-              });
-
-              doc.save(
-                `payroll_${year}_${String(month).padStart(2, "0")}.pdf`
-              );
-            }}
-          >
-            {t("Export PDF") || "Export PDF"}
-          </Button>
-
-          <Button
-            variant="outlined"
-            onClick={() => {
-              const sel: Record<number, boolean> = {};
-              (displayedRows || []).forEach(e => { sel[e.id_emp] = true; });
-              setSendSelection(sel);
-              setSendDialogOpen(true);
-            }}
-          >
-            {t("Send Payslips") || "Send Payslips"}
-          </Button>
-
-          <Button
-            variant="contained"
-            disabled={viewOnly}
-            onClick={async () => {
-              if (viewOnly) return;
-              const bankAcc = window.prompt("Bank/Cash Account No", "");
-              if (!bankAcc) return;
-              const salaryExpenseAcc = window.prompt(
-                "Salary Expense Account No",
-                ""
-              );
-              if (!salaryExpenseAcc) return;
-              const note = window.prompt("Note", "");
-              try {
-                await closePayrollV2({
-                  year,
-                  month,
-                  bankAcc,
-                  salaryExpenseAcc,
-                  note: note || undefined,
-                });
-                alert("Month closed");
-                setViewOnly(true);
-              } catch (e: any) {
-                alert(e?.message || "Failed to close");
-              }
-            }}
-          >
-            {t("Close Month") || "Close Month"}
-          </Button>
-        </Box>
-      </Box>
-    )}
-
-    {tab === "advances" && (
-            <Box display="grid" gap={2}>
-              <Typography variant="subtitle1">{t("Salary Advance")}</Typography>
+        {tab === "payroll" && (
+          <Box display="flex" flexWrap="wrap" alignItems="center" gap={2}>
+            <Box minWidth={140}>
               <TextField
                 select
+                fullWidth
+                label={t("hr.timesheets.year") || "Year"}
+                value={year}
+                onChange={(e) => setYear(Number(e.target.value))}
                 size="small"
-                label={t("Employee") || "Employee"}
-                value={adjEmpId || ""}
-                onChange={(e) => setAdjEmpId(Number(e.target.value) || null)}
-                sx={{ maxWidth: 400 }}
               >
-                {(result?.employees || []).map((emp) => (
-                  <MenuItem key={emp.id_emp} value={emp.id_emp}>
-                    {emp.name} (ID: {emp.id_emp})
+                {years.map((yy) => (
+                  <MenuItem key={yy} value={yy}>
+                    {yy}
                   </MenuItem>
                 ))}
               </TextField>
-              {(() => {
-                const emp = (result?.employees || []).find((x) => x.id_emp === adjEmpId);
-                if (!emp) return null;
-                const salary = Number(emp.baseSalary || 0);
-                const maxAdvance = salary * (advanceMaxPercent / 100);
-                const availableAdvance = Math.max(0, maxAdvance - existingAdvances);
-                return (
-                  <Box display="grid" gap={1.5} maxWidth={400}>
-                    <Typography variant="caption">
-                      Salary: {salary.toFixed(2)} LYD | Existing Advances: {existingAdvances.toFixed(2)} LYD
-                    </Typography>
-                    <TextField
-                      size="small"
-                      type="number"
-                      label={t("LYD") || "LYD"}
-                      value={adjForm.amount}
-                      onChange={(e) => {
-                        const v = Number(e.target.value || 0);
-                        const clamped = Math.min(Math.max(v, 0), availableAdvance);
-                        setAdjForm((f) => ({ ...f, amount: String(clamped) }));
-                      }}
-                      inputProps={{ step: "0.01", min: 0, max: availableAdvance }}
-                      helperText={`Available: ${availableAdvance.toFixed(2)} LYD (${advanceMaxPercent}% - existing advances)`}
-                    />
-                    <Button
-                      variant="contained"
-                      onClick={async () => {
-                        if (!adjEmpId || !adjForm.amount) return;
-                        setAdjLoading(true);
-                        try {
-                          const amt = Number(adjForm.amount);
-                          if (amt > availableAdvance) {
-                            alert(`Amount exceeds available advance (${availableAdvance.toFixed(2)} LYD)`);
-                            setAdjLoading(false);
-                            return;
-                          }
-                          if (amt + existingAdvances > maxAdvance) {
-                            alert(`Total advances cannot exceed ${advanceMaxPercent}% of salary (${maxAdvance.toFixed(2)} LYD)`);
-                            setAdjLoading(false);
-                            return;
-                          }
-                          const payload = {
-                            year,
-                            month,
-                            employeeId: adjEmpId,
-                            type: "advance",
-                            amount: amt,
-                            currency: "LYD",
-                            note: "salary advance",
-                          };
-                          const res = await fetch(`http://localhost:9000/hr/payroll/adjustments`, {
-                            method: "POST",
-                            headers: { "Content-Type": "application/json", ...authHeader() } as unknown as HeadersInit,
-                            body: JSON.stringify(payload),
-                          });
-                          if (!res.ok) throw new Error("Failed to add advance");
-                          await onRun();
-                          setAdjForm({ type: "bonus", amount: "", currency: "LYD", note: "" });
-                          alert("Advance added");
-                        } catch (e: any) {
-                          alert(e?.message || "Failed");
-                        } finally {
-                          setAdjLoading(false);
-                        }
-                      }}
-                    >
-                      {t("Add Advance") || "Add Advance"}
-                    </Button>
-                  </Box>
-                );
-              })()}
             </Box>
-    )}
+            <Box minWidth={140}>
+              <TextField
+                select
+                fullWidth
+                label={t("hr.timesheets.month") || "Month"}
+                value={month}
+                onChange={(e) => setMonth(Number(e.target.value))}
+                size="small"
+              >
+                {months.map((mm) => (
+                  <MenuItem key={mm} value={mm}>
+                    {String(mm).padStart(2, "0")}
+                  </MenuItem>
+                ))}
+              </TextField>
+            </Box>
+            <Box minWidth={160}>
+              <TextField
+                select
+                fullWidth
+                label={t("hr.timesheets.psPoint") || "PS"}
+                value={ps}
+                onChange={(e) => setPs(e.target.value)}
+                size="small"
+              >
+                <MenuItem value="">{t("hr.timesheets.allPs") || "All PS"}</MenuItem>
+                {psOptions.map((p) => (
+                  <MenuItem key={String(p.PS)} value={String(p.PS)}>
+                    {`${formatPs(p.PS)} (${p.count})`}
+                  </MenuItem>
+                ))}
+              </TextField>
+            </Box>
+            <Box minWidth={180}>
+              <TextField
+                select
+                fullWidth
+                size="small"
+                label={t("Position") || "Position"}
+                value={positionFilter}
+                onChange={(e) => setPositionFilter(e.target.value)}
+              >
+                <MenuItem value="all">{t("All Positions") || "All Positions"}</MenuItem>
+                {positionOptions.map((pos) => (
+                  <MenuItem key={pos.id} value={String(pos.id)}>
+                    {pos.label}
+                  </MenuItem>
+                ))}
+              </TextField>
+            </Box>
+            <Box minWidth={200}>
+              <TextField
+                size="small"
+                fullWidth
+                label={t("Search") || "Search"}
+                value={filterText}
+                onChange={(e) => setFilterText(e.target.value)}
+              />
+            </Box>
 
-    {tab === "loans" && (
-              <Box display="grid" gap={2}>
-                <Typography variant="subtitle1">{t("Create Loan")}</Typography>
-                <TextField
-                  select
-                  size="small"
-                  label={t("Employee") || "Employee"}
-                  value={adjEmpId || ""}
-                  onChange={(e) => setAdjEmpId(Number(e.target.value) || null)}
-                  sx={{ maxWidth: 400 }}
-                >
-                  {(result?.employees || []).map((emp) => (
-                    <MenuItem key={emp.id_emp} value={emp.id_emp}>
-                      {emp.name} (ID: {emp.id_emp})
-                    </MenuItem>
-                  ))}
-                </TextField>
+            <Box display="flex" flexWrap="wrap" alignItems="center" gap={1.5}>
+              <Button
+                variant="outlined"
+                onClick={async () => {
+                  const headers: string[] = [
+                    "Employee",
+                    "Working Days",
+                    "Deduction Days",
+                    "Present Days",
+                    "Holidays Worked",
+                    "Base",
+                    "Food",
+                    "Transportation",
+                    "Communication",
+                    "Base Pay",
+                    "Allowance Pay",
+                  ];
+                  if (cols.advances) headers.push("Advance");
+                  if (cols.loans) headers.push("Loans");
+                  if (cols.salesQty) headers.push("Sales Qty");
+                  if (cols.salesTotal) headers.push("Sales Total (LYD)");
+                  headers.push("Total (LYD)");
+                  if (cols.totalUsd) headers.push("Total (USD)");
+
+                  const lines = [headers.join(",")];
+
+                  displayedRows.forEach((e) => {
+                    const s = sales[String(e.id_emp)] || { qty: 0, total_lyd: 0 };
+                    const adj = e.components?.adjustments || {
+                      bonus: 0,
+                      deduction: 0,
+                      advance: 0,
+                      loanPayment: 0,
+                    };
+
+                    const advVal = Number(adj.advance || 0) * -1;
+                    const loanVal = Number(adj.loanPayment || 0) * -1;
+
+                    const W = Math.max(1, e.workingDays || 1);
+                    const F =
+                      e.factorSum != null && e.factorSum > 0
+                        ? e.factorSum
+                        : (e.components?.basePay || 0) / (Math.max(1, e.baseSalary || 0) / W);
+
+                    const baseUsd = e.baseSalaryUsd ? (e.baseSalaryUsd / W) * F : 0;
+
+                    const vr =
+                      (v2Rows || []).find((x: any) => Number(x.id_emp) === Number(e.id_emp)) || {};
+                    const commUsd =
+                      Number((vr as any).diamond_bonus_usd || 0) +
+                      Number((vr as any).gold_bonus_usd || 0);
+
+                    const row: any[] = [
+                      `${nameMap[e.id_emp] ?? e.name}`,
+                      e.workingDays,
+                      e.deductionDays,
+                      e.presentWorkdays,
+                      e.holidayWorked,
+                      (e.baseSalary || 0).toFixed(2),
+                      (() => {
+                        const W = Math.max(1, e.workingDays || 1);
+                        const vr =
+                          (v2Rows || []).find(
+                            (x: any) => Number(x.id_emp) === Number(e.id_emp)
+                          ) || {};
+                        let foodPer = Number(
+                          (e as any).FOOD || (e as any).FOOD_ALLOWANCE || 0
+                        );
+                        if (!foodPer) {
+                          const totalFoodLyd = Number((vr as any).wd_food_lyd || 0);
+                          foodPer = totalFoodLyd && W ? totalFoodLyd / W : 0;
+                        }
+                        const present =
+                          Number(presentDaysMap[e.id_emp] ?? e.presentWorkdays ?? 0) || 0;
+                        const v = foodPer * present;
+                        return (Number.isFinite(v) ? v : 0).toFixed(2);
+                      })(),
+                      (() => {
+                        const W = Math.max(1, e.workingDays || 1);
+                        const vr =
+                          (v2Rows || []).find(
+                            (x: any) => Number(x.id_emp) === Number(e.id_emp)
+                          ) || {};
+                        const fuel = Number(((e as any).FUEL ?? (vr as any).FUEL) || 0);
+                        return (fuel * W).toFixed(2);
+                      })(),
+                      (() => {
+                        const W = Math.max(1, e.workingDays || 1);
+                        const vr =
+                          (v2Rows || []).find(
+                            (x: any) => Number(x.id_emp) === Number(e.id_emp)
+                          ) || {};
+                        const comm = Number(
+                          ((e as any).COMMUNICATION ?? (vr as any).COMMUNICATION) || 0
+                        );
+                        return (comm * W).toFixed(2);
+                      })(),
+                      (e.components?.basePay || 0).toFixed(2),
+                      (e.components?.allowancePay || 0).toFixed(2),
+                    ];
+
+                    if (cols.advances) row.push(advVal.toFixed(2));
+                    if (cols.loans) row.push(loanVal.toFixed(2));
+                    if (cols.salesQty) row.push((s.qty || 0).toFixed(0));
+                    if (cols.salesTotal) row.push((s.total_lyd || 0).toFixed(2));
+
+                    row.push(computeNetLYDFor(e.id_emp).toFixed(2));
+
+                    if (cols.totalUsd) {
+                      const totalUsdVal = baseUsd + commUsd;
+                      row.push(totalUsdVal.toFixed(2));
+                    }
+
+                    lines.push(row.join(","));
+                  });
+
+                  const blob = new Blob([lines.join("\n")], {
+                    type: "text/csv;charset=utf-8;",
+                  });
+                  const url = URL.createObjectURL(blob);
+                  const a = document.createElement("a");
+                  a.href = url;
+                  a.download = `payroll_${year}-${String(month).padStart(2, "0")}.csv`;
+                  a.click();
+                  URL.revokeObjectURL(url);
+                }}
+              >
+                {t("Export CSV") || "Export CSV"}
+              </Button>
+
+              <Button
+                variant="outlined"
+                onClick={async () => {
+                  const doc = new jsPDF({
+                    orientation: "landscape",
+                    unit: "pt",
+                    format: "a4",
+                  });
+                  doc.setFontSize(12);
+                  doc.text(`Payroll ${year}-${String(month).padStart(2, "0")}`, 36, 32);
+
+                  let y0 = 48;
+
+                  const header: string[] = ["Employee", "WD", "DD", "PD", "HW", "Base", "Allow"];
+                  const colX: number[] = [36, 220, 260, 300, 340, 380, 450];
+
+                  if (cols.advances) {
+                    header.push("Adv");
+                    colX.push(520);
+                  }
+                  if (cols.loans) {
+                    header.push("Loan");
+                    colX.push(560);
+                  }
+                  if (cols.salesQty) {
+                    header.push("Qty");
+                    colX.push(600);
+                  }
+                  if (cols.salesTotal) {
+                    header.push("Sales");
+                    colX.push(640);
+                  }
+
+                  header.push("Total");
+                  colX.push(680);
+
+                  if (cols.totalUsd) {
+                    header.push("USD");
+                    colX.push(740);
+                  }
+
+                  header.forEach((h, i) => doc.text(h, colX[i], y0));
+                  y0 += 16;
+
+                  displayedRows.forEach((e) => {
+                    const s = sales[String(e.id_emp)] || { qty: 0, total_lyd: 0 };
+                    const adj = e.components?.adjustments || {
+                      bonus: 0,
+                      deduction: 0,
+                      advance: 0,
+                      loanPayment: 0,
+                    };
+
+                    const W = Math.max(1, e.workingDays || 1);
+                    const F =
+                      e.factorSum != null && e.factorSum > 0
+                        ? e.factorSum
+                        : (e.components?.basePay || 0) / (Math.max(1, e.baseSalary || 0) / W);
+
+                    const baseUsd = e.baseSalaryUsd ? (e.baseSalaryUsd / W) * F : 0;
+
+                    const vr =
+                      (v2Rows || []).find(
+                        (x: any) => Number(x.id_emp) === Number(e.id_emp)
+                      ) || {};
+                    const commUsd =
+                      Number((vr as any).diamond_bonus_usd || 0) +
+                      Number((vr as any).gold_bonus_usd || 0);
+
+                    const vals: any[] = [
+                      e.name,
+                      e.workingDays,
+                      e.deductionDays,
+                      e.presentWorkdays,
+                      e.holidayWorked,
+                      (e.components?.basePay || 0).toFixed(0),
+                      (e.components?.allowancePay || 0).toFixed(0),
+                    ];
+
+                    if (cols.advances) vals.push((Number(adj.advance || 0) * -1).toFixed(2));
+                    if (cols.loans)
+                      vals.push((Number(adj.loanPayment || 0) * -1).toFixed(2));
+                    if (cols.salesQty) vals.push((s.qty || 0).toFixed(0));
+                    if (cols.salesTotal) vals.push((s.total_lyd || 0).toFixed(2));
+
+                    vals.push(computeNetLYDFor(e.id_emp).toFixed(2));
+                    if (cols.totalUsd) vals.push((baseUsd + commUsd).toFixed(0));
+
+                    vals.forEach((v, i) => doc.text(String(v), colX[i], y0));
+                    y0 += 14;
+                    if (y0 > 560) {
+                      doc.addPage();
+                      y0 = 36;
+                    }
+                  });
+
+                  doc.save(`payroll_${year}_${String(month).padStart(2, "0")}.pdf`);
+                }}
+              >
+                {t("Export PDF") || "Export PDF"}
+              </Button>
+
+              <Button
+                variant="outlined"
+                onClick={() => {
+                  const sel: Record<number, boolean> = {};
+                  (displayedRows || []).forEach((e) => {
+                    sel[e.id_emp] = true;
+                  });
+                  setSendSelection(sel);
+                  setSendDialogOpen(true);
+                }}
+              >
+                {t("Send Payslips") || "Send Payslips"}
+              </Button>
+
+              <Button
+                variant="contained"
+                disabled={viewOnly}
+                onClick={async () => {
+                  if (viewOnly) return;
+                  const bankAcc = window.prompt("Bank/Cash Account No", "");
+                  if (!bankAcc) return;
+                  const salaryExpenseAcc = window.prompt("Salary Expense Account No", "");
+                  if (!salaryExpenseAcc) return;
+                  const note = window.prompt("Note", "");
+                  try {
+                    await closePayrollV2({
+                      year,
+                      month,
+                      bankAcc,
+                      salaryExpenseAcc,
+                      note: note || undefined,
+                    });
+                    alert("Month closed");
+                    setViewOnly(true);
+                  } catch (e: any) {
+                    alert(e?.message || "Failed to close");
+                  }
+                }}
+              >
+                {t("Close Month") || "Close Month"}
+              </Button>
+            </Box>
+          </Box>
+        )}
+
+        {tab === "advances" && (
+          <Box display="grid" gap={2}>
+            <Typography variant="subtitle1">{t("Salary Advance")}</Typography>
+            <TextField
+              select
+              size="small"
+              label={t("Employee") || "Employee"}
+              value={adjEmpId || ""}
+              onChange={(e) => setAdjEmpId(Number(e.target.value) || null)}
+              sx={{ maxWidth: 400 }}
+            >
+              {(result?.employees || []).map((emp) => (
+                <MenuItem key={emp.id_emp} value={emp.id_emp}>
+                  {emp.name} (ID: {emp.id_emp})
+                </MenuItem>
+              ))}
+            </TextField>
+            {(() => {
+              const emp = (result?.employees || []).find((x) => x.id_emp === adjEmpId);
+              if (!emp) return null;
+              const salary = Number(emp.baseSalary || 0);
+              const maxAdvance = salary * (advanceMaxPercent / 100);
+              const availableAdvance = Math.max(0, maxAdvance - existingAdvances);
+              return (
+                <Box display="grid" gap={1.5} maxWidth={400}>
+                  <Typography variant="caption">
+                    Salary: {salary.toFixed(2)} LYD | Existing Advances: {existingAdvances.toFixed(2)} LYD
+                  </Typography>
+                  <TextField
+                    size="small"
+                    type="number"
+                    label={t("LYD") || "LYD"}
+                    value={adjForm.amount}
+                    onChange={(e) => {
+                      const v = Number(e.target.value || 0);
+                      const clamped = Math.min(Math.max(v, 0), availableAdvance);
+                      setAdjForm((f) => ({ ...f, amount: String(clamped) }));
+                    }}
+                    inputProps={{ step: "0.01", min: 0, max: availableAdvance }}
+                    helperText={`Available: ${availableAdvance.toFixed(2)} LYD (${advanceMaxPercent}% - existing advances)`}
+                  />
+                  <Button
+                    variant="contained"
+                    onClick={async () => {
+                      if (!adjEmpId || !adjForm.amount) return;
+                      setAdjLoading(true);
+                      try {
+                        const amt = Number(adjForm.amount);
+                        if (amt > availableAdvance) {
+                          alert(`Amount exceeds available advance (${availableAdvance.toFixed(2)} LYD)`);
+                          setAdjLoading(false);
+                          return;
+                        }
+                        if (amt + existingAdvances > maxAdvance) {
+                          alert(`Total advances cannot exceed ${advanceMaxPercent}% of salary (${maxAdvance.toFixed(2)} LYD)`);
+                          setAdjLoading(false);
+                          return;
+                        }
+                        const payload = {
+                          year,
+                          month,
+                          employeeId: adjEmpId,
+                          type: "advance",
+                          amount: amt,
+                          currency: "LYD",
+                          note: "salary advance",
+                        };
+                        const res = await fetch(`http://localhost:9000/hr/payroll/adjustments`, {
+                          method: "POST",
+                          headers: { "Content-Type": "application/json", ...authHeader() } as unknown as HeadersInit,
+                          body: JSON.stringify(payload),
+                        });
+                        if (!res.ok) throw new Error("Failed to add advance");
+                        await onRun();
+                        setAdjForm({ type: "bonus", amount: "", currency: "LYD", note: "" });
+                        alert("Advance added");
+                      } catch (e: any) {
+                        alert(e?.message || "Failed");
+                      } finally {
+                        setAdjLoading(false);
+                      }
+                    }}
+                  >
+                    {t("Add Advance") || "Add Advance"}
+                  </Button>
+                </Box>
+              );
+            })()}
+          </Box>
+        )}
+
+        {tab === "loans" && (
+          <Box display="grid" gap={2}>
+            <Typography variant="subtitle1">{t("Create Loan")}</Typography>
+            <TextField
+              select
+              size="small"
+              label={t("Employee") || "Employee"}
+              value={adjEmpId || ""}
+              onChange={(e) => setAdjEmpId(Number(e.target.value) || null)}
+              sx={{ maxWidth: 400 }}
+            >
+              {(result?.employees || []).map((emp) => (
+                <MenuItem key={emp.id_emp} value={emp.id_emp}>
+                  {emp.name} (ID: {emp.id_emp})
+                </MenuItem>
+              ))}
+            </TextField>
+
+            {(() => {
+              const emp = (result?.employees || []).find((x) => x.id_emp === adjEmpId);
+              if (!emp) return null;
+              const salary = Number(emp.baseSalary || 0);
+              const maxPrincipal = salary * loanMaxMultiple;
+              return (
+                <Box display="grid" gap={1.5} maxWidth={400}>
+                  <Typography variant="caption">
+                    Salary: {salary.toFixed(2)} LYD — Max Principal: {(maxPrincipal || 0).toFixed(2)} LYD ({loanMaxMultiple}×)
+                  </Typography>
+                  {(() => {
+                    const csStr = contractStartMap[adjEmpId!] || null;
+                    const cs = csStr ? dayjs(csStr) : null;
+                    const eligible = cs && cs.isValid() ? cs.add(1, "year") : null;
+                    const now = dayjs();
+                    return (
+                      <Box
+                        sx={{
+                          p: 1,
+                          bgcolor: "background.paper",
+                          border: "1px solid",
+                          borderColor: "divider",
+                          borderRadius: 1,
+                        }}
+                      >
+                        <Typography variant="caption" color="text.secondary">
+                          Contract start: {cs && cs.isValid() ? cs.format("DD/MM/YYYY") : "—"}
+                        </Typography>
+                        <br />
+                        <Typography
+                          variant="caption"
+                          color={eligible && eligible.isBefore(now) ? "success.main" : "warning.main"}
+                        >
+                          Earliest loan eligibility: {eligible ? eligible.format("DD/MM/YYYY") : "—"}{" "}
+                          {eligible ? (eligible.isBefore(now) ? "(eligible)" : "(not yet)") : ""}
+                        </Typography>
+                      </Box>
+                    );
+                  })()}
+                  <TextField
+                    size="small"
+                    type="number"
+                    label={t("LYD") || "LYD"}
+                    value={loanAmount}
+                    onChange={(e) => setLoanAmount(e.target.value)}
+                    inputProps={{ step: "0.01", min: 0 }}
+                    helperText={t("Enter loan principal amount") || "Enter loan principal amount"}
+                  />
+                  <Button
+                    variant="contained"
+                    onClick={async () => {
+                      if (!adjEmpId || !loanAmount) return;
+                      setAdjLoading(true);
+                      try {
+                        const principal = Number(loanAmount);
+                        if (principal <= 0) {
+                          alert("Loan amount must be greater than 0");
+                          setAdjLoading(false);
+                          return;
+                        }
+                        const emp = (result?.employees || []).find((x) => x.id_emp === adjEmpId);
+                        const baseSalary = Number(emp?.baseSalary || 0);
+                        const maxPrincipal = baseSalary * loanMaxMultiple;
+                        if (baseSalary > 0 && principal > maxPrincipal) {
+                          alert(
+                            `Loan exceeds maximum allowed (${loanMaxMultiple}× salary). Max: ${maxPrincipal.toFixed(2)} LYD`
+                          );
+                          setAdjLoading(false);
+                          return;
+                        }
+                        const vr =
+                          (v2Rows || []).find((x: any) => Number(x.id_emp) === Number(adjEmpId)) || ({} as any);
+                        const csRaw =
+                          contractStartMap[adjEmpId!] ||
+                          (vr as any).CONTRACT_START ||
+                          (vr as any).contract_start ||
+                          (vr as any).contractStart ||
+                          (vr as any).T_START;
+                        if (!csRaw) {
+                          alert(
+                            "Employee contract start date is missing. Loans are only available 1 year after contract start."
+                          );
+                          setAdjLoading(false);
+                          return;
+                        }
+                        const cs = dayjs(csRaw);
+                        if (!cs.isValid() || dayjs().isBefore(cs.add(1, "year"))) {
+                          alert("Loan not available: must be at least 1 year after contract start date.");
+                          setAdjLoading(false);
+                          return;
+                        }
+                        await createV2Loan({
+                          employeeId: adjEmpId,
+                          principal,
+                          startYear: year,
+                          startMonth: month,
+                          monthlyPercent: loanMonthlyPercent / 100,
+                          capMultiple: loanMaxMultiple,
+                        });
+
+                        try {
+                          const empName =
+                            (result?.employees || []).find((x) => x.id_emp === adjEmpId)?.name || String(adjEmpId);
+                          const toList = [
+                            ...String(hrEmails || "")
+                              .split(",")
+                              .map((s) => s.trim()),
+                            ...String(financeEmails || "")
+                              .split(",")
+                              .map((s) => s.trim()),
+                          ]
+                            .filter(Boolean)
+                            .join(",");
+                          if (toList) {
+                            const doc2 = new jsPDF({ unit: "pt", format: "a4" });
+                            doc2.setFontSize(14);
+                            doc2.text("Loan Issued", 36, 36);
+                            doc2.setFontSize(11);
+                            doc2.text(`Employee: ${empName} (ID: ${adjEmpId})`, 36, 56);
+                            doc2.text(`Principal: ${principal.toFixed(2)} LYD`, 36, 72);
+                            doc2.text(`Start: ${String(year)}-${String(month).padStart(2, "0")}`, 36, 88);
+                            doc2.text(`Monthly Deduction: ${loanMonthlyPercent.toFixed(2)}%`, 36, 104);
+                            const dataUrl2 = doc2.output("datauristring");
+                            const subject = `Loan Issued — ${empName} (${adjEmpId})`;
+                            const html = `<div><p>Loan issued for employee <b>${empName}</b> (ID: ${adjEmpId}).</p><p>Principal: ${principal.toFixed(
+                              2
+                            )} LYD<br/>Start: ${String(year)}-${String(month).padStart(
+                              2,
+                              "0"
+                            )}<br/>Monthly Deduction: ${loanMonthlyPercent.toFixed(2)}%</p></div>`;
+                            await sendPayslipClient({
+                              to: toList,
+                              subject,
+                              html,
+                              pdfBase64: dataUrl2,
+                              filename: `loan_${adjEmpId}_${year}${String(month).padStart(2, "0")}.pdf`,
+                            });
+                          }
+                        } catch {}
+
+                        await onRun();
+                        setLoanAmount("");
+                        alert("Loan created");
+                      } catch (e: any) {
+                        alert(e?.message || "Failed");
+                      } finally {
+                        setAdjLoading(false);
+                      }
+                    }}
+                  >
+                    {t("Create Loan") || "Create Loan"}
+                  </Button>
+                </Box>
+              );
+            })()}
+
+            <Box>
+              <Typography variant="subtitle1">
+                {t("Loans for Employee") || "Loans for Employee"}{" "}
                 {(() => {
                   const emp = (result?.employees || []).find((x) => x.id_emp === adjEmpId);
-                  if (!emp) return null;
-                  const salary = Number(emp.baseSalary || 0);
-                  const maxPrincipal = salary * loanMaxMultiple;
-                  return (
-                    <Box display="grid" gap={1.5} maxWidth={400}>
-                      <Typography variant="caption">
-                        Salary: {salary.toFixed(2)} LYD — Max Principal: {(maxPrincipal || 0).toFixed(2)} LYD ({loanMaxMultiple}×)
+                  return emp ? `${emp.name} (ID: ${emp.id_emp})` : "";
+                })()}
+              </Typography>
+              <Box my={1}>
+                {(loanRows || []).length === 0 && (
+                  <Typography variant="body2" color="text.secondary">
+                    {t("No loans")}
+                  </Typography>
+                )}
+                {(loanRows || []).map((ln: any) => (
+                  <Box key={ln.id} sx={{ py: 0.5, borderTop: "1px solid", borderColor: "divider" }}>
+                    <Box display="flex" alignItems="center" justifyContent="space-between">
+                      <Box>
+                        <Typography variant="body2">
+                          {`Loan #${ln.id}`} — {t("Remaining") || "Remaining"}:{" "}
+                          {Number(ln.remaining || 0).toFixed(2)} LYD
+                        </Typography>
+                        <Typography variant="caption" color="text.secondary">
+                          {dayjs(ln.createdAt).format("DD/MM/YYYY")}
+                        </Typography>
+                      </Box>
+                      <Box display="flex" gap={1}>
+                        <Button
+                          size="small"
+                          variant="outlined"
+                          onClick={async () => {
+                            try {
+                              await skipV2LoanMonth({ loanId: ln.id, year, month });
+                              alert(t("Skipped this month deduction") || "Skipped this month deduction");
+                              const js = await listV2Loans(adjEmpId!);
+                              setLoanRows(js?.rows || []);
+                            } catch (e: any) {
+                              alert(e?.message || "Failed");
+                            }
+                          }}
+                        >
+                          {t("Skip this month") || "Skip this month"}
+                        </Button>
+                        <Button
+                          size="small"
+                          variant="contained"
+                          onClick={() => {
+                            setActiveLoan(ln);
+                            setPayoffOpen(true);
+                          }}
+                        >
+                          {t("Payoff") || "Payoff"}
+                        </Button>
+                      </Box>
+                    </Box>
+                    <Box mt={0.5} ml={0.5}>
+                      <Typography variant="caption" color="text.secondary">
+                        {t("Payoff history") || "Payoff history"}
                       </Typography>
-                      {(() => {
-                        const csStr = contractStartMap[adjEmpId!] || null;
-                        const cs = csStr ? dayjs(csStr) : null;
-                        const eligible = cs && cs.isValid() ? cs.add(1, 'year') : null;
-                        const now = dayjs();
-                        return (
-                          <Box sx={{ p: 1, bgcolor: 'background.paper', border: '1px solid', borderColor: 'divider', borderRadius: 1 }}>
+                      {Array.isArray(ln.history) && ln.history.length ? (
+                        <Box>
+                          {ln.history.map((h: any, i: number) => (
+                            <Box key={i} display="flex" justifyContent="space-between">
+                              <Typography variant="caption">{dayjs(h.ts).format("DD/MM/YYYY")}</Typography>
+                              <Typography variant="caption">{Number(h.amount || 0).toFixed(2)} LYD</Typography>
+                            </Box>
+                          ))}
+                        </Box>
+                      ) : (
+                        <Typography variant="caption">{t("No payoffs yet") || "No payoffs yet"}</Typography>
+                      )}
+                    </Box>
+                  </Box>
+                ))}
+              </Box>
+
+              <Box mt={2}>
+                <Typography variant="subtitle2">
+                  {t("Salary history (last 12 months)") || "Salary history (last 12 months)"}
+                </Typography>
+                {(historyPoints || []).length === 0 ? (
+                  <Typography variant="body2" color="text.secondary">
+                    {t("No data")}
+                  </Typography>
+                ) : (
+                  <Box>
+                    <Table>
+                      <TableHead>
+                        <TableRow>
+                          <TableCell>{t("Month") || "Month"}</TableCell>
+                          <TableCell>{t("Gold") || "Gold"}</TableCell>
+                          <TableCell>{t("Diamond") || "Diamond"}</TableCell>
+                          <TableCell>{t("Gross Salary") || "Gross Salary"}</TableCell>
+                          <TableCell>{t("Net Salary") || "Net Salary"}</TableCell>
+                        </TableRow>
+                      </TableHead>
+                      <TableBody>
+                        {(historyPoints || []).map((p, idx) => {
+                          const hp = p as any;
+                          const goldLyd = Number(hp.gold_lyd ?? 0);
+                          const goldUsd = Number(hp.gold_usd ?? 0);
+                          const diamondLyd = Number(hp.diamond_lyd ?? 0);
+                          const diamondUsd = Number(hp.diamond_usd ?? 0);
+                          const grossLyd = Number(hp.gross_lyd ?? 0);
+                          const grossUsd = Number(hp.gross_usd ?? 0);
+                          const netLyd = Number(hp.net_lyd ?? 0);
+                          const netUsd = Number(hp.net_usd ?? 0);
+                          return (
+                            <TableRow key={idx}>
+                              <TableCell>
+                                {dayjs(`${hp.year}-${String(hp.month).padStart(2, "0")}-01`).format("MMM YYYY")}
+                              </TableCell>
+                              <TableCell>
+                                {goldLyd.toFixed(2)} LYD / {goldUsd.toFixed(2)} USD
+                              </TableCell>
+                              <TableCell>
+                                {diamondLyd.toFixed(2)} LYD / {diamondUsd.toFixed(2)} USD
+                              </TableCell>
+                              <TableCell>
+                                {grossLyd.toFixed(2)} LYD / {grossUsd.toFixed(2)} USD
+                              </TableCell>
+                              <TableCell>
+                                {netLyd.toFixed(2)} LYD / {netUsd.toFixed(2)} USD
+                              </TableCell>
+                            </TableRow>
+                          );
+                        })}
+                      </TableBody>
+                    </Table>
+
+                    <Box>
+                      {(historyPoints || []).map((p) => (
+                        <Box
+                          key={`${p.year}-${p.month}`}
+                          display="flex"
+                          justifyContent="space-between"
+                          sx={{ py: 0.25, borderTop: "1px dotted", borderColor: "divider" }}
+                        >
+                          <Typography variant="caption">
+                            {dayjs(`${p.year}-${String(p.month).padStart(2, "0")}-01`).format("MMM YYYY")}
+                          </Typography>
+                          <Typography variant="caption">{Number((p as any).total || 0).toFixed(2)} LYD</Typography>
+                        </Box>
+                      ))}
+                    </Box>
+                  </Box>
+                )}
+              </Box>
+            </Box>
+          </Box>
+        )}
+
+        {tab === "adjustments" && (
+          <Box display="grid" gap={2}>
+            <Typography variant="subtitle1">{t("Adjustments") || "Adjustments"}</Typography>
+
+            <TextField
+              select
+              size="small"
+              label={t("Employee") || "Employee"}
+              value={adjEmpId || ""}
+              onChange={(e) => setAdjEmpId(Number(e.target.value) || null)}
+              sx={{ maxWidth: 400 }}
+            >
+              {(result?.employees || []).map((emp) => (
+                <MenuItem key={emp.id_emp} value={emp.id_emp}>
+                  {emp.name} (ID: {emp.id_emp})
+                </MenuItem>
+              ))}
+            </TextField>
+
+            {adjEmpId && (
+              <Box display="grid" gap={2} sx={{ maxWidth: 900 }}>
+                <Box>
+                  {(adjRows || []).length === 0 && (
+                    <Typography variant="body2" color="text.secondary">
+                      {t("No adjustments yet") || "No adjustments yet"}
+                    </Typography>
+                  )}
+                  {(adjRows || []).map((r, idx) => {
+                    const opt = adjTypeOptions.find((o) => o.value === r.type);
+                    const label = opt?.label || r.type;
+                    const amt = Number(r.amount || 0).toFixed(2);
+                    const dateStr = r.ts ? dayjs(r.ts).format("YYYY-MM-DD HH:mm") : "";
+                    return (
+                      <Box
+                        key={idx}
+                        display="flex"
+                        justifyContent="space-between"
+                        alignItems="flex-start"
+                        sx={{ py: 0.5, borderBottom: "1px dashed", borderColor: "divider" }}
+                      >
+                        <Box>
+                          <Typography variant="body2" sx={{ fontWeight: 600 }}>
+                            {label}
+                          </Typography>
+                          {r.note && <Typography variant="body2" color="text.secondary">{r.note}</Typography>}
+                          {dateStr && (
                             <Typography variant="caption" color="text.secondary">
-                              Contract start: {cs && cs.isValid() ? cs.format('DD/MM/YYYY') : '—'}
+                              {dateStr}
                             </Typography>
-                            <br />
-                            <Typography variant="caption" color={eligible && eligible.isBefore(now) ? 'success.main' : 'warning.main'}>
-                              Earliest loan eligibility: {eligible ? eligible.format('DD/MM/YYYY') : '—'} {eligible ? (eligible.isBefore(now) ? '(eligible)' : '(not yet)') : ''}
+                          )}
+                        </Box>
+                        <Typography variant="body2" sx={{ fontWeight: 600 }}>
+                          {r.currency} {amt}
+                        </Typography>
+                      </Box>
+                    );
+                  })}
+
+                  {Object.keys(adjTypeTotals).length > 0 && (
+                    <Box
+                      mt={1.5}
+                      p={1}
+                      sx={{ borderRadius: 1, border: "1px solid", borderColor: "divider", bgcolor: "background.default" }}
+                    >
+                      <Typography variant="subtitle2" gutterBottom>
+                        {t("Totals this month") || "Totals this month"}
+                      </Typography>
+                      {Object.entries(adjTypeTotals).map(([type, totals]) => {
+                        const opt = adjTypeOptions.find((o) => o.value === type);
+                        const label = opt?.label || type;
+                        const parts: string[] = [];
+                        if (totals.lyd) parts.push(`${totals.lyd.toFixed(2)} LYD`);
+                        if (totals.usd) parts.push(`${totals.usd.toFixed(2)} USD`);
+                        if (parts.length === 0) return null;
+                        return (
+                          <Box key={type} display="flex" justifyContent="space-between" sx={{ py: 0.25 }}>
+                            <Typography variant="body2">{label}</Typography>
+                            <Typography variant="body2" sx={{ fontWeight: 600 }}>
+                              {parts.join("  |  ")}
                             </Typography>
                           </Box>
                         );
-                      })()}
-                      <TextField
-                        size="small"
-                        type="number"
-                        label={t("LYD") || "LYD"}
-                        value={loanAmount}
-                        onChange={(e) => setLoanAmount(e.target.value)}
-                        inputProps={{ step: "0.01", min: 0 }}
-                        helperText={t('Enter loan principal amount') || 'Enter loan principal amount'}
-                      />
-                      <Button
-                        variant="contained"
-                        onClick={async () => {
-                          if (!adjEmpId || !loanAmount) return;
-                          setAdjLoading(true);
-                          try {
-                            const principal = Number(loanAmount);
-                            if (principal <= 0) {
-                              alert("Loan amount must be greater than 0");
-                              setAdjLoading(false);
-                              return;
-                            }
-                            const emp = (result?.employees || []).find((x) => x.id_emp === adjEmpId);
-                            const baseSalary = Number(emp?.baseSalary || 0);
-                            const maxPrincipal = baseSalary * loanMaxMultiple;
-                            if (baseSalary > 0 && principal > maxPrincipal) {
-                              alert(`Loan exceeds maximum allowed (${loanMaxMultiple}× salary). Max: ${maxPrincipal.toFixed(2)} LYD`);
-                              setAdjLoading(false);
-                              return;
-                            }
-                            const vr = (v2Rows || []).find((x: any) => Number(x.id_emp) === Number(adjEmpId)) || {} as any;
-                            const csRaw = contractStartMap[adjEmpId!] || (vr as any).CONTRACT_START || (vr as any).contract_start || (vr as any).contractStart || (vr as any).T_START;
-                            if (!csRaw) {
-                              alert('Employee contract start date is missing. Loans are only available 1 year after contract start.');
-                              setAdjLoading(false);
-                              return;
-                            }
-                            const cs = dayjs(csRaw);
-                            if (!cs.isValid() || dayjs().isBefore(cs.add(1, 'year'))) {
-                              alert('Loan not available: must be at least 1 year after contract start date.');
-                              setAdjLoading(false);
-                              return;
-                            }
-                            await createV2Loan({
-                              employeeId: adjEmpId,
-                              principal,
-                              startYear: year,
-                              startMonth: month,
-                              monthlyPercent: loanMonthlyPercent / 100,
-                              capMultiple: loanMaxMultiple,
-                            });
-                            try {
-                              const empName = (result?.employees || []).find((x)=>x.id_emp===adjEmpId)?.name || String(adjEmpId);
-                              const toList = [
-                                ...String(hrEmails||'').split(',').map(s=>s.trim()),
-                                ...String(financeEmails||'').split(',').map(s=>s.trim()),
-                              ].filter(Boolean).join(',');
-                              if (toList) {
-                                const doc2 = new jsPDF({ unit: 'pt', format: 'a4' });
-                                doc2.setFontSize(14);
-                                doc2.text('Loan Issued', 36, 36);
-                                doc2.setFontSize(11);
-                                doc2.text(`Employee: ${empName} (ID: ${adjEmpId})`, 36, 56);
-                                doc2.text(`Principal: ${principal.toFixed(2)} LYD`, 36, 72);
-                                doc2.text(`Start: ${String(year)}-${String(month).padStart(2,'0')}`, 36, 88);
-                                doc2.text(`Monthly Deduction: ${loanMonthlyPercent.toFixed(2)}%`, 36, 104);
-                                const dataUrl2 = doc2.output('datauristring');
-                                const subject = `Loan Issued — ${empName} (${adjEmpId})`;
-                                const html = `<div><p>Loan issued for employee <b>${empName}</b> (ID: ${adjEmpId}).</p><p>Principal: ${principal.toFixed(2)} LYD<br/>Start: ${String(year)}-${String(month).padStart(2,'0')}<br/>Monthly Deduction: ${loanMonthlyPercent.toFixed(2)}%</p></div>`;
-                                await sendPayslipClient({ to: toList, subject, html, pdfBase64: dataUrl2, filename: `loan_${adjEmpId}_${year}${String(month).padStart(2,'0')}.pdf` });
-                              }
-                            } catch {}
-                            await onRun();
-                            setLoanAmount("");
-                            alert("Loan created");
-                          } catch (e: any) {
-                            alert(e?.message || "Failed");
-                          } finally {
-                            setAdjLoading(false);
-                          }
-                        }}
-                      >
-                        {t("Create Loan") || "Create Loan"}
-                      </Button>
-                    </Box>
-                  );
-                })()}
-              <Box>
-                <Typography variant="subtitle1">
-                  {t("Loans for Employee") || "Loans for Employee"}{" "}
-                  {(() => {
-                    const emp = (result?.employees || []).find(
-                      (x) => x.id_emp === adjEmpId
-                    );
-                    return emp ? `${emp.name} (ID: ${emp.id_emp})` : "";
-                  })()}
-                </Typography>
-                <Box my={1}>
-                  {(loanRows || []).length === 0 && (
-                    <Typography variant="body2" color="text.secondary">{t('No loans')} </Typography>
-                  )}
-                  {(loanRows || []).map((ln: any) => (
-                    <Box key={ln.id} sx={{ py: 0.5, borderTop: '1px solid', borderColor: 'divider' }}>
-                      <Box display="flex" alignItems="center" justifyContent="space-between">
-                        <Box>
-                          <Typography variant="body2">{`Loan #${ln.id}`} — {t('Remaining') || 'Remaining'}: {Number(ln.remaining||0).toFixed(2)} LYD</Typography>
-                          <Typography variant="caption" color="text.secondary">{dayjs(ln.createdAt).format('DD/MM/YYYY')}</Typography>
-                        </Box>
-                        <Box display="flex" gap={1}>
-                          <Button size="small" variant="outlined" onClick={async ()=>{
-                            try {
-                              await skipV2LoanMonth({ loanId: ln.id, year, month });
-                              alert(t('Skipped this month deduction')||'Skipped this month deduction');
-                              const js = await listV2Loans(adjEmpId!); setLoanRows(js?.rows||[]);
-                            } catch(e:any){ alert(e?.message||'Failed'); }
-                          }}>{t('Skip this month')||'Skip this month'}</Button>
-                          <Button size="small" variant="contained" onClick={()=>{ setActiveLoan(ln); setPayoffOpen(true); }}>{t('Payoff')||'Payoff'}</Button>
-                        </Box>
-                      </Box>
-                      <Box mt={0.5} ml={0.5}>
-                        <Typography variant="caption" color="text.secondary">{t('Payoff history') || 'Payoff history'}</Typography>
-                        {Array.isArray(ln.history) && ln.history.length ? (
-                          <Box>
-                            {ln.history.map((h: any, i: number) => (
-                              <Box key={i} display="flex" justifyContent="space-between">
-                                <Typography variant="caption">{dayjs(h.ts).format('DD/MM/YYYY')}</Typography>
-                                <Typography variant="caption">{Number(h.amount||0).toFixed(2)} LYD</Typography>
-                              </Box>
-                            ))}
-                          </Box>
-                        ) : (
-                          <Typography variant="caption">{t('No payoffs yet') || 'No payoffs yet'}</Typography>
-                        )}
-                      </Box>
-                    </Box>
-                  ))}
-                </Box>
-                <Box mt={2}>
-                  <Typography variant="subtitle2">{t('Salary history (last 12 months)') || 'Salary history (last 12 months)'}</Typography>
-                  {(historyPoints||[]).length===0 ? (
-                    <Typography variant="body2" color="text.secondary">{t('No data')} </Typography>
-                  ) : (
-                    <Box>
-                      {(historyPoints||[]).map(p => (
-                        <Box key={`${p.year}-${p.month}`} display="flex" justifyContent="space-between" sx={{ py: 0.25, borderTop: '1px dotted', borderColor: 'divider' }}>
-                          <Typography variant="caption">{dayjs(`${p.year}-${String(p.month).padStart(2,'0')}-01`).format('MMM YYYY')}</Typography>
-                          <Typography variant="caption">{Number(p.total||0).toFixed(2)} LYD</Typography>
-                        </Box>
-                      ))}
+                      })}
                     </Box>
                   )}
                 </Box>
-              </Box>
-            </Box>
-          )}
 
-          {tab === "adjustments" && (
-            <Box display="grid" gap={2}>
-              <Typography variant="subtitle1">
-                {t("Adjustments") || "Adjustments"}
-              </Typography>
+                <Divider sx={{ my: 1.5 }} />
 
-              <TextField
-                select
-                size="small"
-                label={t("Employee") || "Employee"}
-                value={adjEmpId || ""}
-                onChange={(e) => setAdjEmpId(Number(e.target.value) || null)}
-                sx={{ maxWidth: 400 }}
-              >
-                {(result?.employees || []).map((emp) => (
-                  <MenuItem key={emp.id_emp} value={emp.id_emp}>
-                    {emp.name} (ID: {emp.id_emp})
-                  </MenuItem>
-                ))}
-              </TextField>
-
-              {adjEmpId && (
-                <Box display="grid" gap={2} sx={{ maxWidth: 900 }}>
-                  <Box>
-                    {(adjRows || []).length === 0 && (
-                      <Typography variant="body2" color="text.secondary">
-                        {t("No adjustments yet") || "No adjustments yet"}
-                      </Typography>
-                    )}
-                    {(adjRows || []).map((r, idx) => {
-                      const opt = adjTypeOptions.find((o) => o.value === r.type);
-                      const label = opt?.label || r.type;
-                      const amt = Number(r.amount || 0).toFixed(2);
-                      const dateStr = r.ts ? dayjs(r.ts).format("YYYY-MM-DD HH:mm") : "";
-                      return (
-                        <Box
-                          key={idx}
-                          display="flex"
-                          justifyContent="space-between"
-                          alignItems="flex-start"
-                          sx={{ py: 0.5, borderBottom: '1px dashed', borderColor: 'divider' }}
-                        >
-                          <Box>
-                            <Typography variant="body2" sx={{ fontWeight: 600 }}>
-                              {label}
-                            </Typography>
-                            {r.note && (
-                              <Typography variant="body2" color="text.secondary">
-                                {r.note}
-                              </Typography>
-                            )}
-                            {dateStr && (
-                              <Typography variant="caption" color="text.secondary">
-                                {dateStr}
-                              </Typography>
-                            )}
-                          </Box>
-                          <Typography variant="body2" sx={{ fontWeight: 600 }}>
-                            {r.currency} {amt}
-                          </Typography>
-                        </Box>
-                      );
-                    })}
-                    {Object.keys(adjTypeTotals).length > 0 && (
-                      <Box mt={1.5} p={1} sx={{ borderRadius: 1, border: '1px solid', borderColor: 'divider', bgcolor: 'background.default' }}>
-                        <Typography variant="subtitle2" gutterBottom>
-                          {t('Totals this month') || 'Totals this month'}
-                        </Typography>
-                        {Object.entries(adjTypeTotals).map(([type, totals]) => {
-                          const opt = adjTypeOptions.find((o) => o.value === type);
-                          const label = opt?.label || type;
-                          const parts: string[] = [];
-                          if (totals.lyd) parts.push(`${totals.lyd.toFixed(2)} LYD`);
-                          if (totals.usd) parts.push(`${totals.usd.toFixed(2)} USD`);
-                          if (parts.length === 0) return null;
-                          return (
-                            <Box key={type} display="flex" justifyContent="space-between" sx={{ py: 0.25 }}>
-                              <Typography variant="body2">{label}</Typography>
-                              <Typography variant="body2" sx={{ fontWeight: 600 }}>
-                                {parts.join('  |  ')}
-                              </Typography>
-                            </Box>
-                          );
-                        })}
-                      </Box>
-                    )}
-                  </Box>
-
-                  <Divider sx={{ my: 1.5 }} />
-
-                  <Box display="grid" gridTemplateColumns="repeat(4, 1fr)" gap={1}>
-                    <TextField
-                      select
-                      size="small"
-                      label={t("Type") || "Type"}
-                      value={adjForm.type}
-                      onChange={(e) => {
-                        const nextType = e.target.value;
-                        setAdjForm((f) => ({
-                          ...f,
-                          type: nextType,
-                          currency: adjLydOnlyTypes.has(nextType) ? 'LYD' : f.currency,
-                        }));
-                      }}
-                    >
-                      {adjTypeOptions.map((opt) => (
-                        <MenuItem key={opt.value} value={opt.value}>
-                          {t(opt.label) || opt.label}
-                        </MenuItem>
-                      ))}
-                    </TextField>
-                    <TextField
-                      size="small"
-                      type="number"
-                      label={t("Amount") || "Amount"}
-                      value={adjForm.amount}
-                      onChange={(e) =>
-                        setAdjForm((f) => ({ ...f, amount: e.target.value }))
-                      }
-                      inputProps={{ step: "0.01" }}
-                    />
-                    <TextField
-                      select
-                      size="small"
-                      label={t("Currency") || "Currency"}
-                      value={adjForm.currency}
-                      onChange={(e) =>
-                        setAdjForm((f) => ({ ...f, currency: e.target.value }))
-                      }
-                      disabled={adjLydOnlyTypes.has(adjForm.type)}
-                    >
-                      {["LYD", "USD"].map((x) => (
-                        <MenuItem key={x} value={x}>
-                          {x}
-                        </MenuItem>
-                      ))}
-                    </TextField>
-                    <TextField
-                      size="small"
-                      label={t("Note") || "Note"}
-                      value={adjForm.note}
-                      onChange={(e) =>
-                        setAdjForm((f) => ({ ...f, note: e.target.value }))
-                      }
-                    />
-                  </Box>
-                  <Box mt={1} display="flex" justifyContent="flex-end">
-                    <Button
-                      onClick={addAdjustment}
-                      variant="contained"
-                      disabled={adjLoading}
-                    >
-                      {t("common.add") || "Add"}
-                    </Button>
-                  </Box>
+                <Box display="grid" gridTemplateColumns="repeat(4, 1fr)" gap={1}>
+                  <TextField
+                    select
+                    size="small"
+                    label={t("Type") || "Type"}
+                    value={adjForm.type}
+                    onChange={(e) => {
+                      const nextType = e.target.value;
+                      setAdjForm((f) => ({
+                        ...f,
+                        type: nextType,
+                        currency: adjLydOnlyTypes.has(nextType) ? "LYD" : f.currency,
+                      }));
+                    }}
+                  >
+                    {adjTypeOptions.map((opt) => (
+                      <MenuItem key={opt.value} value={opt.value}>
+                        {t(opt.label) || opt.label}
+                      </MenuItem>
+                    ))}
+                  </TextField>
+                  <TextField
+                    size="small"
+                    type="number"
+                    label={t("Amount") || "Amount"}
+                    value={adjForm.amount}
+                    onChange={(e) => setAdjForm((f) => ({ ...f, amount: e.target.value }))}
+                    inputProps={{ step: "0.01" }}
+                  />
+                  <TextField
+                    select
+                    size="small"
+                    label={t("Currency") || "Currency"}
+                    value={adjForm.currency}
+                    onChange={(e) => setAdjForm((f) => ({ ...f, currency: e.target.value }))}
+                    disabled={adjLydOnlyTypes.has(adjForm.type)}
+                  >
+                    {["LYD", "USD"].map((x) => (
+                      <MenuItem key={x} value={x}>
+                        {x}
+                      </MenuItem>
+                    ))}
+                  </TextField>
+                  <TextField
+                    size="small"
+                    label={t("Note") || "Note"}
+                    value={adjForm.note}
+                    onChange={(e) => setAdjForm((f) => ({ ...f, note: e.target.value }))}
+                  />
                 </Box>
-              )}
-            </Box>
-          )}
 
-    {tab === "settings" && (() => {
-      if (!isAdmin) return <Typography color="error">{t('Access denied') || 'Access denied'}</Typography>;
-      return (
-        <Box display="grid" gap={3}>
-          <Box display="flex" alignItems="center" gap={1}>
-            <SettingsIcon fontSize="small" />
-            <Typography variant="h6">{t('Admin Settings') || 'Admin Settings'}</Typography>
-          </Box>
-
-          <Box>
-            <Typography variant="subtitle2">{t('Commission Management') || 'Commission Management'}</Typography>
-            {commLoading ? (
-              <Box display="flex" alignItems="center" gap={1} sx={{ mt: 1 }}>
-                <CircularProgress size={16} />
-                <Typography variant="body2">{t('Loading') || 'Loading...'}</Typography>
-              </Box>
-            ) : (
-              <Box sx={{ display:'grid', gap: 1, mt: 1 }}>
-                {commList.length === 0 ? (
-                  <Typography variant="body2" color="text.secondary">{t('No employees with commission roles') || 'No employees with commission roles'}</Typography>
-                ) : (
-                  commList.map((row:any) => {
-                    const dirty = commDirty[row.id] || {};
-                    const val = (k: string) => (dirty[k] !== undefined ? dirty[k] : row[k]);
-                    const setDirty = (patch: any) => setCommDirty((d) => ({ ...d, [row.id]: { ...(d[row.id]||{}), ...patch } }));
-                    const saveRow = async () => {
-                      const patch = commDirty[row.id];
-                      if (!patch || Object.keys(patch).length === 0) return;
-                      try {
-                        await updateEmployee(row.id, patch);
-                        setCommDirty(d => { const nd={...d}; delete nd[row.id]; return nd; });
-                        alert(t('Saved') || 'Saved');
-                      } catch (e:any) {
-                        alert(e?.message || 'Failed');
-                      }
-                    };
-                    return (
-                      <Box key={row.id} sx={{ p: 1, border: '1px solid', borderColor: 'divider', borderRadius: 1 }}>
-                        <Box sx={{ display:'flex', alignItems:'center', justifyContent:'space-between', flexWrap:'wrap', gap: 1 }}>
-                          <Typography variant="subtitle2">{row.name} — {row.role || '-'}</Typography>
-                          <Typography variant="caption" color="text.secondary">{t('PS') || 'PS'}: {Array.isArray(row.ps) && row.ps.length ? row.ps.join(', ') : '-'}</Typography>
-                        </Box>
-                        <Box sx={{ display:'flex', alignItems:'center', gap: 1, flexWrap:'wrap', mt: 1 }}>
-                          <TextField select size="small" sx={{ minWidth: 180 }} label={t('Gold Commission') || 'Gold Comm'} value={val('GOLD_COMM') || ''} onChange={(e)=> setDirty({ GOLD_COMM: e.target.value || '' })}>
-                            <MenuItem value="">{t('None') || 'None'}</MenuItem>
-                            <MenuItem value="percent">Percent</MenuItem>
-                            <MenuItem value="fixed">Fixed</MenuItem>
-                          </TextField>
-                          {((val('GOLD_COMM') === 'percent') || (val('GOLD_COMM') === 'fixed')) && (
-                            <TextField size="small" type="number" sx={{ width: 180 }} label={(val('GOLD_COMM') === 'percent') ? (t('Gold %') || 'Gold %') : (t('Gold Fixed (LYD)') || 'Gold Fixed (LYD)')} value={(val('GOLD_COMM_VALUE') ?? '')} onChange={(e)=> setDirty({ GOLD_COMM_VALUE: e.target.value === '' ? null : Number(e.target.value) })} inputProps={{ step: (val('GOLD_COMM') === 'percent') ? 0.1 : 1 }} />
-                          )}
-                          <TextField select size="small" sx={{ minWidth: 200 }} label={t('Diamond Comm') || 'Diamond Comm'} value={val('DIAMOND_COMM_TYPE') || ''} onChange={(e)=> setDirty({ DIAMOND_COMM_TYPE: e.target.value || '' })}>
-                            <MenuItem value="">{t('None') || 'None'}</MenuItem>
-                            <MenuItem value="percent">Percent</MenuItem>
-                            <MenuItem value="fixed">Fixed</MenuItem>
-                          </TextField>
-                          {((val('DIAMOND_COMM_TYPE') === 'percent') || (val('DIAMOND_COMM_TYPE') === 'fixed')) && (
-                            <TextField size="small" type="number" sx={{ width: 200 }} label={(val('DIAMOND_COMM_TYPE') === 'percent') ? (t('Diamond %') || 'Diamond %') : (t('Diamond Fixed (LYD)') || 'Diamond Fixed (LYD)')} value={(val('DIAMOND_COMM') ?? '')} onChange={(e)=> setDirty({ DIAMOND_COMM: e.target.value === '' ? null : Number(e.target.value) })} inputProps={{ step: (val('DIAMOND_COMM_TYPE') === 'percent') ? 0.1 : 1 }} />
-                          )}
-                          <Button size="small" variant="contained" onClick={saveRow}>{t('Save') || 'Save'}</Button>
-                        </Box>
-                      </Box>
-                    );
-                  })
-                )}
+                <Box mt={1} display="flex" justifyContent="flex-end">
+                  <Button onClick={addAdjustment} variant="contained" disabled={adjLoading}>
+                    {t("common.add") || "Add"}
+                  </Button>
+                </Box>
               </Box>
             )}
           </Box>
+        )}
 
-          <Box display="grid" gap={2} maxWidth={600}>
-            <Typography variant="h6">{t('Loan & Advance Settings') || 'Loan & Advance Settings'}</Typography>
-            <Typography variant="subtitle2">{t('Default Loan Parameters') || 'Default Loan Parameters'}</Typography>
-            <Box display="flex" flexWrap="wrap" gap={2}>
-              <TextField
-                type="number"
-                size="small"
-                sx={{ width: 160 }}
-                label={t('Max Multiple of Salary') || 'Max Multiple of Salary'}
-                value={loanMaxMultiple}
-                onChange={(e) => {
-                  const v = Number(e.target.value);
-                  const next = Number.isFinite(v) && v > 0 ? v : 0;
-                  setLoanMaxMultiple(next);
-                  try { localStorage.setItem('payroll_settings_loan_max_multiple', String(next || '')); } catch {}
-                }}
-                inputProps={{ step: 0.1, min: 0 }}
-              />
-              <TextField
-                type="number"
-                size="small"
-                sx={{ width: 160 }}
-                label={t('Monthly Deduction %') || 'Monthly Deduction %'}
-                value={loanMonthlyPercent}
-                onChange={(e) => {
-                  const v = Number(e.target.value);
-                  const next = Number.isFinite(v) && v >= 0 ? v : 0;
-                  setLoanMonthlyPercent(next);
-                  try { localStorage.setItem('payroll_settings_loan_monthly_percent', String(next || '')); } catch {}
-                }}
-                inputProps={{ step: 0.1, min: 0, max: 100 }}
-              />
+        {tab === "settings" &&
+          (!isAdmin ? (
+            <Typography color="error">{t("Access denied") || "Access denied"}</Typography>
+          ) : (
+            <Box display="grid" gap={3}>
+              <Box display="flex" alignItems="center" gap={1}>
+                <SettingsIcon fontSize="small" />
+                <Typography variant="h6">{t("Admin Settings") || "Admin Settings"}</Typography>
+              </Box>
+
+              <Box display="grid" gap={2} maxWidth={600}>
+                <Typography variant="h6">{t("Loan & Advance Settings") || "Loan & Advance Settings"}</Typography>
+                <Typography variant="subtitle2">{t("Default Loan Parameters") || "Default Loan Parameters"}</Typography>
+                <Box display="flex" flexWrap="wrap" gap={2}>
+                  <TextField
+                    type="number"
+                    size="small"
+                    sx={{ width: 160 }}
+                    label={t("Max Multiple of Salary") || "Max Multiple of Salary"}
+                    value={loanMaxMultiple}
+                    onChange={(e) => {
+                      const v = Number(e.target.value);
+                      const next = Number.isFinite(v) && v > 0 ? v : 0;
+                      setLoanMaxMultiple(next);
+                      try {
+                        localStorage.setItem("payroll_settings_loan_max_multiple", String(next || ""));
+                      } catch {}
+                    }}
+                    inputProps={{ step: 0.1, min: 0 }}
+                  />
+                  <TextField
+                    type="number"
+                    size="small"
+                    sx={{ width: 160 }}
+                    label={t("Monthly Deduction %") || "Monthly Deduction %"}
+                    value={loanMonthlyPercent}
+                    onChange={(e) => {
+                      const v = Number(e.target.value);
+                      const next = Number.isFinite(v) && v >= 0 ? v : 0;
+                      setLoanMonthlyPercent(next);
+                      try {
+                        localStorage.setItem("payroll_settings_loan_monthly_percent", String(next || ""));
+                      } catch {}
+                    }}
+                    inputProps={{ step: 0.1, min: 0, max: 100 }}
+                  />
+                </Box>
+                <Divider />
+                <Typography variant="subtitle2">{t("Salary Advance Limits") || "Salary Advance Limits"}</Typography>
+                <Box display="flex" flexWrap="wrap" gap={2}>
+                  <TextField
+                    type="number"
+                    size="small"
+                    sx={{ width: 200 }}
+                    label={t("Max % of Monthly Salary") || "Max % of Monthly Salary"}
+                    value={advanceMaxPercent}
+                    onChange={(e) => {
+                      const v = Number(e.target.value);
+                      const next = Number.isFinite(v) && v >= 0 ? v : 0;
+                      setAdvanceMaxPercent(next);
+                      try {
+                        localStorage.setItem("payroll_settings_advance_max_percent", String(next || ""));
+                      } catch {}
+                    }}
+                    inputProps={{ step: 0.5, min: 0, max: 100 }}
+                  />
+                </Box>
+                <Box sx={{ p: 2, bgcolor: "info.light", borderRadius: 1 }}>
+                  <Typography variant="caption" color="info.contrastText">
+                    {t(
+                      "Note: These limits are enforced at the application level. Contact system administrator to modify core parameters."
+                    ) ||
+                      "Note: These limits are enforced at the application level. Contact system administrator to modify core parameters."}
+                  </Typography>
+                </Box>
+              </Box>
             </Box>
-            <Divider />
-            <Typography variant="subtitle2">{t('Salary Advance Limits') || 'Salary Advance Limits'}</Typography>
-            <Box display="flex" flexWrap="wrap" gap={2}>
-              <TextField
-                type="number"
-                size="small"
-                sx={{ width: 200 }}
-                label={t('Max % of Monthly Salary') || 'Max % of Monthly Salary'}
-                value={advanceMaxPercent}
-                onChange={(e) => {
-                  const v = Number(e.target.value);
-                  const next = Number.isFinite(v) && v >= 0 ? v : 0;
-                  setAdvanceMaxPercent(next);
-                  try { localStorage.setItem('payroll_settings_advance_max_percent', String(next || '')); } catch {}
-                }}
-                inputProps={{ step: 0.5, min: 0, max: 100 }}
-              />
-            </Box>
-            <Box sx={{ p: 2, bgcolor: 'info.light', borderRadius: 1 }}>
-              <Typography variant="caption" color="info.contrastText">
-                {t('Note: These limits are enforced at the application level. Contact system administrator to modify core parameters.') || 'Note: These limits are enforced at the application level. Contact system administrator to modify core parameters.'}
-              </Typography>
-            </Box>
-          </Box>
-        </Box>
-      );
-    })()}
-        </CardContent>
-      </Card>
-
-      {loading && (
-        <Box display="flex" alignItems="center" gap={1}>
-          <CircularProgress size={20} />
-          <Typography>{t("hr.timesheets.loading") || "Loading..."}</Typography>
-        </Box>
-      )}
-      {!loading && result && tab === "payroll" && (
-        <Card>
-          <CardContent>
-            <Typography variant="subtitle1" gutterBottom>
-              {t("Period") || "Period"}:{" "}
-              {`${year}-${String(month).padStart(2, "0")}-01`} →{" "}
-              {`${year}-${String(month).padStart(2, "0")}-${String(new Date(year, month, 0).getDate()).padStart(2, "0")}`} {" "}
-              — {t("common.showing") || "Showing"} {result?.count ?? 0}
-            </Typography>
-            {/* summary boxes removed per request */}
-            <TableContainer sx={{ overflow: 'auto', maxHeight: 'calc(100vh - 280px)' }}>
-              <Table
-                stickyHeader
-                size="small"
-                sx={{
-                  tableLayout: "fixed",
-                  width: "100%",
-                  minWidth: tableMinWidth,
-                  "& .MuiTableCell-root": { py: 0.5, px: 1 },
-                  "& td, & th": { borderBottom: '1px solid', borderColor: 'divider' },
-                }}
-              >
-               <TableHead
-                sx={{
-                  backgroundColor: "grey.50",
-                  "& .MuiTableCell-head": {
-                    fontSize: 11,
-                    fontWeight: 600,
-                    color: "text.secondary",
-                    whiteSpace: "nowrap",
-                    lineHeight: 1.3,
-                    px: 1,
-                  },
-                  "& .MuiTableSortLabel-root": {
-                    fontSize: 11,
-                    "& .MuiTableSortLabel-icon": {
-                      opacity: 0.6,
-                    },
-                    "& .MuiTableSortLabel-label": {
-                      overflow: "hidden",
-                      textOverflow: "ellipsis",
-                      whiteSpace: "nowrap",
-                    },
-                  },
-                  "& .MuiTableCell-head .MuiIconButton-root": { display: "none" },
-                }}
-              >
-                  <TableRow>
-                    {/* Employee column header narrowed */}
-                    <TableCell
-                      sortDirection={
-                        sortKey === "name" ? sortDir : (false as any)
-                      }
-                      sx={{ width: 180, maxWidth: 180, position: 'sticky', left: 0, zIndex: 6, bgcolor: 'background.paper' }}
-                    >
-                      <TableSortLabel
-                        active={sortKey === "name"}
-                        direction={sortKey === "name" ? sortDir : "asc"}
-                        onClick={(e: any) => handleSort("name")}
-                      >
-                        {t("hr.timesheets.employee") || "Employee"}
-                      </TableSortLabel>
-                    </TableCell>
-                    <TableCell
-                      align="right"
-                      sortDirection={
-                        sortKey === "deductionDays" ? sortDir : (false as any)
-                      }
-                      sx={{ width: 110 }}
-                    >
-                      <Box display="flex" flexDirection="column" alignItems="flex-end">
-                        <TableSortLabel
-                          active={sortKey === "deductionDays"}
-                          direction={
-                            sortKey === "deductionDays" ? sortDir : "asc"
-                          }
-                          onClick={(e: any) => handleSort("deductionDays")}
-                        >
-                          {t("Absence") || "Absence"}
-                        </TableSortLabel>
-                        <span style={{ fontSize: 9 }}>(LYD) | (USD)</span>
-                      </Box>
-                    </TableCell>
-                    {cols.holidayWorked && (
-                      <TableCell
-                        align="right"
-                        sortDirection={
-                          sortKey === "holidayWorked" ? sortDir : (false as any)
-                        }
-                        sx={{ width: 64 }}
-                      >
-                        <Box display="flex" alignItems="center" justifyContent="space-between" sx={{ width: '100%' }}>
-                          <TableSortLabel
-                            active={sortKey === "holidayWorked"}
-                            direction={
-                              sortKey === "holidayWorked" ? sortDir : "asc"
-                            }
-                            onClick={(e: any) => {
-                              if (e.altKey) {
-                                e.preventDefault();
-                                e.stopPropagation();
-                                setCols((c) => ({ ...c, holidayWorked: !c.holidayWorked }));
-                              } else handleSort("holidayWorked");
-                            }}
-                            onDoubleClick={() => setCols((c) => ({
-                              ...c,
-                              presentWorkdays: true,
-                              holidayWorked: true,
-                              p: true,
-                              ph: true,
-                              phf: true,
-                              baseSalary: true,
-                              food: true,
-                              fuel: true,
-                              comm: true,
-                              advances: true,
-                              loans: true,
-                              salesQty: true,
-                              salesTotal: true,
-                              gold: true,
-                              diamond: true,
-                              watchComm: true,
-                              totalUsd: true,
-                            }))}
-                          >
-                            {t("Holidays Worked") || "Holidays Worked"}
-                          </TableSortLabel>
-                          <IconButton size="small" sx={{ ml: 0.5, p: 0.25 }} aria-label="hide column"
-                            onClick={(e) => { e.stopPropagation(); setCols(c => ({ ...c, holidayWorked: !c.holidayWorked })); }}>
-                            <VisibilityOffIcon fontSize="inherit" />
-                          </IconButton>
-                        </Box>
-                      </TableCell>
-                    )}
-                    {cols.p && (
-                      <TableCell align="right" sx={{ width: 110 }}>
-                        <Box display="flex" flexDirection="column" alignItems="flex-end">
-                          <span>P</span>
-                          <span style={{ fontSize: 9 }}>(LYD) | (USD)</span>
-                        </Box>
-                      </TableCell>
-                    )}
-                    {cols.ph && (
-                      <TableCell align="right" sx={{ width: 110 }}>
-                        <Box display="flex" flexDirection="column" alignItems="flex-end">
-                          <span>PH</span>
-                          <span style={{ fontSize: 9 }}>(LYD) | (USD)</span>
-                        </Box>
-                      </TableCell>
-                    )}
-                    {cols.phf && (
-                      <TableCell align="right" sx={{ width: 110 }}>
-                        <Box display="flex" flexDirection="column" alignItems="flex-end">
-                          <span>PHF</span>
-                          <span style={{ fontSize: 9 }}>(LYD) | (USD)</span>
-                        </Box>
-                      </TableCell>
-                    )}
-                    {cols.baseSalary && (
-                      <TableCell
-                        align="right"
-                        sortDirection={
-                          sortKey === "baseSalary" ? sortDir : (false as any)
-                        }
-                        sx={{ width: 80 }}
-                      >
-                        <Box display="flex" alignItems="center" justifyContent="space-between" sx={{ width: '100%' }}>
-                        <TableSortLabel
-                          active={sortKey === "baseSalary"}
-                          direction={sortKey === "baseSalary" ? sortDir : "asc"}
-                          onClick={(e: any) => {
-                            if (e.altKey) {
-                              e.preventDefault();
-                              e.stopPropagation();
-                              setCols((c) => ({ ...c, baseSalary: !c.baseSalary }));
-                            } else handleSort("baseSalary");
-                          }}
-                          onDoubleClick={() => setCols((c) => ({
-                            ...c,
-                            presentWorkdays: true,
-                            holidayWorked: true,
-                            baseSalary: true,
-                            food: true,
-                            fuel: true,
-                            comm: true,
-                            basePay: true,
-                            allowancePay: true,
-                            adjustments: true,
-                            salesQty: true,
-                            salesTotal: true,
-                            gold: true,
-                            diamond: true,
-                            totalUsd: true,
-                          }))}
-                        >
-                          {t("Base Pay") || "Base"}
-                        </TableSortLabel>
-                        <IconButton size="small" sx={{ ml: 0.5, p: 0.25 }} aria-label="hide column"
-                          onClick={(e) => { e.stopPropagation(); setCols(c => ({ ...c, baseSalary: !c.baseSalary })); }}>
-                          <VisibilityOffIcon fontSize="inherit" />
-                        </IconButton>
-                        </Box>
-                      </TableCell>
-                    )}
-                    {cols.food && (
-                      <TableCell
-                        align="right"
-                        sortDirection={
-                          sortKey === "food" ? sortDir : (false as any)
-                        }
-                        sx={{ width: 72 }}
-                      >
-                        <Box display="flex" alignItems="center" justifyContent="space-between" sx={{ width: '100%' }}>
-                        <TableSortLabel
-                          active={sortKey === "food"}
-                          direction={sortKey === "food" ? sortDir : "asc"}
-                          onClick={(e: any) => {
-                            if (e.altKey) {
-                              e.preventDefault();
-                              e.stopPropagation();
-                              setCols((c) => ({ ...c, food: !c.food }));
-                            } else handleSort("food");
-                          }}
-                          onDoubleClick={() => setCols((c) => ({
-                            ...c,
-                            presentWorkdays: true,
-                            holidayWorked: true,
-                            baseSalary: true,
-                            food: true,
-                            fuel: true,
-                            comm: true,
-                            basePay: true,
-                            allowancePay: true,
-                            adjustments: true,
-                            salesQty: true,
-                            salesTotal: true,
-                            gold: true,
-                            diamond: true,
-                            totalUsd: true,
-                          }))}
-                        >
-                          {t("Food Allowance") || "Food Allow."}
-                        </TableSortLabel>
-                        <IconButton size="small" sx={{ ml: 0.5, p: 0.25 }} aria-label="hide column"
-                          onClick={(e) => { e.stopPropagation(); setCols(c => ({ ...c, food: !c.food })); }}>
-                          <VisibilityOffIcon fontSize="inherit" />
-                        </IconButton>
-                        </Box>
-                      </TableCell>
-                    )}
-                    {cols.fuel && (
-                      <TableCell
-                        align="right"
-                        sortDirection={
-                          sortKey === "fuel" ? sortDir : (false as any)
-                        }
-                        sx={{ width: 72 }}
-                      >
-                        <Box display="flex" alignItems="center" justifyContent="space-between" sx={{ width: '100%' }}>
-                        <TableSortLabel
-                          active={sortKey === "fuel"}
-                          direction={sortKey === "fuel" ? sortDir : "asc"}
-                          onClick={(e: any) => {
-                            if (e.altKey) {
-                              e.preventDefault();
-                              e.stopPropagation();
-                              setCols((c) => ({ ...c, fuel: !c.fuel }));
-                            } else handleSort("fuel");
-                          }}
-                          onDoubleClick={() => setCols((c) => ({
-                            ...c,
-                            presentWorkdays: true,
-                            holidayWorked: true,
-                            baseSalary: true,
-                            food: true,
-                            fuel: true,
-                            comm: true,
-                            basePay: true,
-                            allowancePay: true,
-                            adjustments: true,
-                            salesQty: true,
-                            salesTotal: true,
-                            gold: true,
-                            diamond: true,
-                            totalUsd: true,
-                          }))}
-                        >
-                          {t("Fuel Allowance") || "Transport."}
-                        </TableSortLabel>
-                        <IconButton size="small" sx={{ ml: 0.5, p: 0.25 }} aria-label="hide column"
-                          onClick={(e) => { e.stopPropagation(); setCols(c => ({ ...c, fuel: !c.fuel })); }}>
-                          <VisibilityOffIcon fontSize="inherit" />
-                        </IconButton>
-                        </Box>
-                      </TableCell>
-                    )}
-                    {cols.comm && (
-                      <TableCell
-                        align="right"
-                        sortDirection={
-                          sortKey === "comm" ? sortDir : (false as any)
-                        }
-                        sx={{ width: 72 }}
-                      >
-                        <Box display="flex" alignItems="center" justifyContent="space-between" sx={{ width: '100%' }}>
-                        <TableSortLabel
-                          active={sortKey === "comm"}
-                          direction={sortKey === "comm" ? sortDir : "asc"}
-                          onClick={(e: any) => {
-                            if (e.altKey) {
-                              e.preventDefault();
-                              e.stopPropagation();
-                              setCols((c) => ({ ...c, comm: !c.comm }));
-                            } else handleSort("comm");
-                          }}
-                          onDoubleClick={() => setCols((c) => ({
-                            ...c,
-                            presentWorkdays: true,
-                            holidayWorked: true,
-                            baseSalary: true,
-                            food: true,
-                            fuel: true,
-                            comm: true,
-                            basePay: true,
-                            allowancePay: true,
-                            adjustments: true,
-                            salesQty: true,
-                            salesTotal: true,
-                            gold: true,
-                            diamond: true,
-                            totalUsd: true,
-                          }))}
-                        >
-                          {t("Communication Allowance") || "Comm."}
-                        </TableSortLabel>
-                        <IconButton size="small" sx={{ ml: 0.5, p: 0.25 }} aria-label="hide column"
-                          onClick={(e) => { e.stopPropagation(); setCols(c => ({ ...c, comm: !c.comm })); }}>
-                          <VisibilityOffIcon fontSize="inherit" />
-                        </IconButton>
-                        </Box>
-                      </TableCell>
-                    )}
-                    {cols.advances && (
-                      <TableCell align="right" sx={{ width: 78 }}>
-                        <Box display="flex" alignItems="center" justifyContent="space-between" sx={{ width: '100%' }}>
-                          <span>{t("Salary Advance") || "S. Adv"}</span>
-                          <IconButton size="small" sx={{ ml: 0.5, p: 0.25 }} aria-label="hide column"
-                            onClick={(e) => { e.stopPropagation(); setCols(c => ({ ...c, advances: !c.advances })); }}>
-                            <VisibilityOffIcon fontSize="inherit" />
-                          </IconButton>
-                        </Box>
-                      </TableCell>
-                    )}
-                    {cols.loans && (
-                      <TableCell align="right" sx={{ width: 78 }}>
-                        <Box display="flex" alignItems="center" justifyContent="space-between" sx={{ width: '100%' }}>
-                          <span>{t("Loans") || "Loans"}</span>
-                          <IconButton size="small" sx={{ ml: 0.5, p: 0.25 }} aria-label="hide column"
-                            onClick={(e) => { e.stopPropagation(); setCols(c => ({ ...c, loans: !c.loans })); }}>
-                            <VisibilityOffIcon fontSize="inherit" />
-                          </IconButton>
-                        </Box>
-                      </TableCell>
-                    )}
-                    {cols.salesQty && (
-                      <TableCell
-                        align="right"
-                        sortDirection={
-                          sortKey === "salesQty" ? sortDir : (false as any)
-                        }
-                        sx={{ width: 64 }}
-                      >
-                        <Box display="flex" alignItems="center" justifyContent="space-between" sx={{ width: '100%' }}>
-                        <TableSortLabel
-                          active={sortKey === "salesQty"}
-                          direction={sortKey === "salesQty" ? sortDir : "asc"}
-                          onClick={(e: any) => {
-                            if (e.altKey) {
-                              setCols((c) => ({ ...c, salesQty: !c.salesQty }));
-                              e.preventDefault();
-                              e.stopPropagation();
-                            } else handleSort("salesQty");
-                          }}
-                        >
-                          {t("Sales Qty") || "Sales Qty"}
-                        </TableSortLabel>
-                        <IconButton size="small" sx={{ ml: 0.5, p: 0.25 }} aria-label="hide column"
-                          onClick={(e) => { e.stopPropagation(); setCols(c => ({ ...c, salesQty: !c.salesQty })); }}>
-                          <VisibilityOffIcon fontSize="inherit" />
-                        </IconButton>
-                        </Box>
-                      </TableCell>
-                    )}
-                    {cols.salesTotal && (
-                      <TableCell
-                        align="right"
-                        sortDirection={
-                          sortKey === "salesTotal" ? sortDir : (false as any)
-                        }
-                        sx={{ width: 84 }}
-                      >
-                        <Box display="flex" alignItems="center" justifyContent="space-between" sx={{ width: '100%' }}>
-                        <TableSortLabel
-                          active={sortKey === "salesTotal"}
-                          direction={sortKey === "salesTotal" ? sortDir : "asc"}
-                          onClick={(e: any) => {
-                            if (e.altKey) {
-                              setCols((c) => ({
-                                ...c,
-                                salesTotal: !c.salesTotal,
-                              }));
-                              e.preventDefault();
-                              e.stopPropagation();
-                            } else handleSort("salesTotal");
-                          }}
-                        >
-                          {t("Sales Total (LYD)") || "Sales Total (LYD)"}
-                        </TableSortLabel>
-                        <IconButton size="small" sx={{ ml: 0.5, p: 0.25 }} aria-label="hide column"
-                          onClick={(e) => { e.stopPropagation(); setCols(c => ({ ...c, salesTotal: !c.salesTotal })); }}>
-                          <VisibilityOffIcon fontSize="inherit" />
-                        </IconButton>
-                        </Box>
-                      </TableCell>
-                    )}
-                    {cols.gold && (
-                      <TableCell
-                        align="right"
-                        sortDirection={
-                          sortKey === "gold" ? sortDir : (false as any)
-                        }
-                        sx={{ width: 96 }}
-                      >
-                        <Box display="flex" alignItems="center" justifyContent="space-between" sx={{ width: '100%' }}>
-                        <TableSortLabel
-                          active={sortKey === "gold"}
-                          direction={sortKey === "gold" ? sortDir : "asc"}
-                          onClick={(e: any) => {
-                            if (e.altKey) {
-                              e.preventDefault();
-                              e.stopPropagation();
-                              setCols((c) => ({ ...c, gold: !c.gold }));
-                            } else handleSort("gold");
-                          }}
-                          onDoubleClick={() => setCols((c) => ({
-                            ...c,
-                            presentWorkdays: true,
-                            holidayWorked: true,
-                            baseSalary: true,
-                            food: true,
-                            fuel: true,
-                            comm: true,
-                            basePay: true,
-                            allowancePay: true,
-                            adjustments: true,
-                            salesQty: true,
-                            salesTotal: true,
-                            gold: true,
-                            diamond: true,
-                            totalUsd: true,
-                          }))}
-                        >
-                          {t("Gold Commission") || "Gold Comm"}
-                        </TableSortLabel>
-                        <IconButton size="small" sx={{ ml: 0.5, p: 0.25 }} aria-label="hide column"
-                          onClick={(e) => { e.stopPropagation(); setCols(c => ({ ...c, gold: !c.gold })); }}>
-                          <VisibilityOffIcon fontSize="inherit" />
-                        </IconButton>
-                        </Box>
-                      </TableCell>
-                    )}
-                    {cols.diamond && (
-                      <TableCell
-                        align="right"
-                        sortDirection={
-                          sortKey === "diamond" ? sortDir : (false as any)
-                        }
-                        sx={{ width: 96 }}
-                      >
-                        <Box display="flex" alignItems="center" justifyContent="space-between" sx={{ width: '100%' }}>
-                        <TableSortLabel
-                          active={sortKey === "diamond"}
-                          direction={sortKey === "diamond" ? sortDir : "asc"}
-                          onClick={(e: any) => {
-                            if (e.altKey) {
-                              e.preventDefault();
-                              e.stopPropagation();
-                              setCols((c) => ({ ...c, diamond: !c.diamond }));
-                            } else handleSort("diamond");
-                          }}
-                          onDoubleClick={() => setCols((c) => ({
-                            ...c,
-                            presentWorkdays: true,
-                            holidayWorked: true,
-                            baseSalary: true,
-                            food: true,
-                            fuel: true,
-                            comm: true,
-                            basePay: true,
-                            allowancePay: true,
-                            adjustments: true,
-                            salesQty: true,
-                            salesTotal: true,
-                            gold: true,
-                            diamond: true,
-                            totalUsd: true,
-                          }))}
-                        >
-                          {t("Diamond Commission") || "Diamond Comm"}
-                        </TableSortLabel>
-                        <IconButton size="small" sx={{ ml: 0.5, p: 0.25 }} aria-label="hide column"
-                          onClick={(e) => { e.stopPropagation(); setCols(c => ({ ...c, diamond: !c.diamond })); }}>
-                          <VisibilityOffIcon fontSize="inherit" />
-                        </IconButton>
-                        </Box>
-                      </TableCell>
-                    )}
-                    {cols.watchComm && (
-                      <TableCell align="right" sx={{ width: 84 }}>
-                        <Box display="flex" alignItems="center" justifyContent="space-between" sx={{ width: '100%' }}>
-                          <span>{t("Watch Commission") || "Watch Comm"}</span>
-                          <IconButton size="small" sx={{ ml: 0.5, p: 0.25 }} aria-label="hide column"
-                            onClick={(e) => { e.stopPropagation(); setCols(c => ({ ...c, watchComm: !c.watchComm })); }}>
-                            <VisibilityOffIcon fontSize="inherit" />
-                          </IconButton>
-                        </Box>
-                      </TableCell>
-                    )}
-                    <TableCell
-                      align="right"
-                      sx={{ width: 120 }}
-                    >
-                      <Box display="flex" flexDirection="column" alignItems="flex-end">
-                        <span>{t("Gross") || "Gross"}</span>
-                        <span style={{ fontSize: 9 }}>(LYD) | (USD)</span>
-                      </Box>
-                    </TableCell>
-                    <TableCell
-                      align="right"
-                      sortDirection={
-                        sortKey === "total" ? sortDir : (false as any)
-                      }
-                      sx={{ width: 120 }}
-                    >
-                      <TableSortLabel
-                        active={sortKey === "total"}
-                        direction={sortKey === "total" ? sortDir : "asc"}
-                        onClick={(e: any) => handleSort("total")}
-                      >
-                        <Box display="flex" flexDirection="column" alignItems="flex-end">
-                          <span>{t("Total") || "Total"}</span>
-                          <span style={{ fontSize: 9 }}>(LYD) | (USD)</span>
-                        </Box>
-                      </TableSortLabel>
-                    </TableCell>
-                    <TableCell align="right" sx={{ width: 220, position: 'sticky', right: 0, zIndex: 6, bgcolor: 'background.paper' }}>
-                      <Box display="flex" alignItems="center" justifyContent="flex-end" gap={0.5}>
-                        <span>{t("Actions") || "Actions"}</span>
-                        <IconButton size="small" aria-label="columns" onClick={(e)=> setColsAnchor(e.currentTarget)}>
-                          <SettingsIcon fontSize="inherit" />
-                        </IconButton>
-                      </Box>
-                    </TableCell>
-                  </TableRow>
-                </TableHead>
-                <TableBody>
-                  {displayedRows.map((e: Payslip) => (
-                    <TableRow
-                      key={e.id_emp}
-                      hover
-                      sx={{ "&:nth-of-type(odd)": { bgcolor: "action.hover" } }}
-                    >
-                      <TableCell sx={{ width: 180, maxWidth: 180, position: 'sticky', left: 0, zIndex: 2, bgcolor: 'background.paper' }}>
-                        <Box display="flex" alignItems="center" gap={1.25}>
-                          <Avatar src={`http://localhost:9000/employees/${e.id_emp}/picture`} sx={{ width: 28, height: 28 }} />
-                          <Box
-                            display="flex"
-                            flexDirection="column"
-                            sx={{
-                              maxWidth: 220,
-                              overflow: "hidden",
-                              textOverflow: "ellipsis",
-                            }}
-                          >
-                            <Typography
-                              fontWeight={500}
-                              noWrap
-                              sx={{ cursor: "pointer" }}
-                              onClick={() => openCalendar(e.id_emp, nameMap[e.id_emp] ?? e.name)}
-                            >
-                              {nameMap[e.id_emp] ?? e.name}
-                            </Typography>
-                            <Typography variant="caption">
-                              {(() => {
-                                const vr = (v2Rows || []).find((x: any) => Number(x.id_emp) === Number(e.id_emp)) || {};
-                                const pick = (s: any) => {
-                                  if (!s) return '';
-                                  const m = String(s).match(/(\d{1,2}):(\d{2})/);
-                                  return m ? m[0] : '';
-                                };
-                                const s1 = pick((vr as any).T_START || (vr as any).t_start || (vr as any).SCHEDULE_START || (vr as any).shift_start);
-                                const s2 = pick((vr as any).T_END || (vr as any).t_end || (vr as any).SCHEDULE_END || (vr as any).shift_end);
-                                const sch = s1 && s2 ? ` • ${s1}–${s2}` : '';
-                                return `ID: ${e.id_emp} ${e.PS != null ? `• PS: ${formatPs(e.PS)}` : ''} ${e.designation ? `• ${e.designation}` : ''}${sch}`;
-                              })()}
-                            </Typography>
-                          </Box>
-                        </Box>
-                      </TableCell>
-                      <TableCell align="right" sx={{ width: 110 }}>
-                        {(() => {
-                          const vr = (v2Rows || []).find((x: any) => Number(x.id_emp) === Number(e.id_emp)) || {};
-                          const lyd = Number((vr as any).absence_lyd || 0) || 0;
-                          const usd = Number((vr as any).absence_usd || 0) || 0;
-                          if (!lyd && !usd) return "";
-                          return (
-                            <Box component="span">
-                              <Box component="span" sx={{ color: '#65a8bf' }}>
-                                {formatMoney(lyd)}
-                              </Box>
-                              {usd ? (
-                                <>
-                                  {" | "}
-                                  <Box component="span" sx={{ color: '#b7a27d' }}>
-                                    {formatMoney(usd)}
-                                  </Box>
-                                </>
-                              ) : null}
-                            </Box>
-                          );
-                        })()}
-                      </TableCell>
-                      {cols.holidayWorked && (
-                        <TableCell align="right" sx={{ width: 64 }}>
-                          {e.holidayWorked || ""}
-                        </TableCell>
-                      )}
-                      {cols.p && (
-                        <TableCell align="right" sx={{ width: 110 }}>
-                          {(() => {
-                            const vals = computePPhPhf(e);
-                            if (!vals.pLyd && !vals.pUsd) return "";
-                            return (
-                              <Box component="span">
-                                <Box component="span" sx={{ color: '#65a8bf' }}>{formatMoney(vals.pLyd)}</Box>
-                                {vals.pUsd ? (
-                                  <>
-                                    {" | "}
-                                    <Box component="span" sx={{ color: '#b7a27d' }}>{formatMoney(vals.pUsd)}</Box>
-                                  </>
-                                ) : null}
-                              </Box>
-                            );
-                          })()}
-                        </TableCell>
-                      )}
-                      {cols.ph && (
-                        <TableCell align="right" sx={{ width: 110 }}>
-                          {(() => {
-                            const vals = computePPhPhf(e);
-                            if (!vals.phLyd && !vals.phUsd) return "";
-                            return (
-                              <Box component="span">
-                                <Box component="span" sx={{ color: '#65a8bf' }}>{formatMoney(vals.phLyd)}</Box>
-                                {vals.phUsd ? (
-                                  <>
-                                    {" | "}
-                                    <Box component="span" sx={{ color: '#b7a27d' }}>{formatMoney(vals.phUsd)}</Box>
-                                  </>
-                                ) : null}
-                              </Box>
-                            );
-                          })()}
-                        </TableCell>
-                      )}
-                      {cols.phf && (
-                        <TableCell align="right" sx={{ width: 110 }}>
-                          {(() => {
-                            const vals = computePPhPhf(e);
-                            if (!vals.phfLyd && !vals.phfUsd) return "";
-                            return (
-                              <Box component="span">
-                                <Box component="span" sx={{ color: '#65a8bf' }}>{formatMoney(vals.phfLyd)}</Box>
-                                {vals.phfUsd ? (
-                                  <>
-                                    {" | "}
-                                    <Box component="span" sx={{ color: '#b7a27d' }}>{formatMoney(vals.phfUsd)}</Box>
-                                  </>
-                                ) : null}
-                              </Box>
-                            );
-                          })()}
-                        </TableCell>
-                      )}
-                      {cols.baseSalary && (
-                        <TableCell align="right" sx={{ width: 80 }}>
-                          {(() => {
-                            const lyd = Number(e.baseSalary || 0) || 0;
-                            const usd = Number((e as any).baseSalaryUsd || 0) || 0;
-                            if (!lyd && !usd) return "";
-                            return (
-                              <Box component="span">
-                                <Box component="span" sx={{ color: '#65a8bf' }}>
-                                  {formatMoney(lyd)}
-                                </Box>
-                                {usd ? (
-                                  <>
-                                    {" | "}
-                                    <Box component="span" sx={{ color: '#b7a27d' }}>
-                                      {formatMoney(usd)}
-                                    </Box>
-                                  </>
-                                ) : null}
-                              </Box>
-                            );
-                          })()}
-                        </TableCell>
-                      )}
-                      {cols.food && (
-                        <TableCell align="right" sx={{ width: 72 }}>
-                          {(() => {
-                            const W = Math.max(1, e.workingDays || 1);
-                            const vr = (v2Rows || []).find((x: any) => Number(x.id_emp) === Number(e.id_emp)) || {};
-                            let per = Number((e as any).FOOD || (e as any).FOOD_ALLOWANCE || 0);
-                            if (!per) {
-                              const totalFoodLyd = Number((vr as any).wd_food_lyd || 0);
-                              per = totalFoodLyd && W ? totalFoodLyd / W : 0;
-                            }
-                            const present = Number(presentDaysMap[e.id_emp] ?? e.presentWorkdays ?? 0) || 0;
-                            const fd = present;
-                            const v = per * fd;
-                            return Number.isFinite(v) ? formatMoney(v) : "0.00";
-                          })()}
-                        </TableCell>
-                      )}
-                      {cols.fuel && (
-                        <TableCell align="right" sx={{ width: 72 }}>
-                          {(() => {
-                            const vr = (v2Rows || []).find((x: any) => Number(x.id_emp) === Number(e.id_emp)) || {};
-                            const v = Number(((e as any).FUEL ?? (vr as any).FUEL) || 0);
-                            return v ? formatMoney(v) : "";
-                          })()}
-                        </TableCell>
-                      )}
-                      {cols.comm && (
-                        <TableCell align="right" sx={{ width: 72 }}>
-                          {(() => {
-                            const vr = (v2Rows || []).find((x: any) => Number(x.id_emp) === Number(e.id_emp)) || {};
-                            const v = Number(((e as any).COMMUNICATION ?? (vr as any).COMMUNICATION) || 0);
-                            return v ? formatMoney(v) : "";
-                          })()}
-                        </TableCell>
-                      )}
-                      {/* Base Pay / Allowance Pay columns removed per new layout */}
-                      {cols.advances && (
-                        <TableCell align="right" sx={{ width: 78 }}>
-                          {(() => {
-                            const a = e.components?.adjustments || ({} as any);
-                            const advFromState = Number(advMap[e.id_emp] || 0);
-                            const advLocal = Number(a.advance || 0);
-                            const adv = advFromState || advLocal;
-                            const v = adv ? -Math.abs(adv) : 0;
-                            return v ? (
-                              <Box component="span" sx={{ color: 'error.main' }}>{formatMoney(v)}</Box>
-                            ) : "";
-                          })()}
-                        </TableCell>
-                      )}
-                      {cols.loans && (
-                        <TableCell align="right" sx={{ width: 78 }}>
-                          {(() => {
-                            const vr =
-                              (v2Rows || []).find(
-                                (x: any) => Number(x.id_emp) === Number(e.id_emp)
-                              ) || ({} as any);
-
-                            const remaining = Number(
-                              (vr as any).remaining || (vr as any).principal || 0
-                            );
-                            const thisMonth = Number((vr as any).loan_credit_lyd || 0);
-                            const thisMonthNeg = thisMonth ? -Math.abs(thisMonth) : 0;
-
-                            if (!remaining && !thisMonthNeg) return "";
-
-                            return (
-                              <Box
-                                display="flex"
-                                flexDirection="column"
-                                alignItems="flex-end"
-                              >
-                                {/* This month deduction on top */}
-                                {thisMonthNeg ? (
-                                  <Box component="span" sx={{ color: 'error.main' }}>
-                                    {formatMoney(thisMonthNeg)}
-                                  </Box>
-                                ) : null}
-                                {/* Remaining balance under it */}
-                                {remaining ? (
-                                  <Box component="span">
-                                    {formatMoney(remaining)}
-                                  </Box>
-                                ) : null}
-                              </Box>
-                            );
-                          })()}
-                        </TableCell>
-                      )}
-                      {cols.salesQty && (
-                        <TableCell align="right" sx={{ width: 64 }}>
-                          {(() => {
-                            const v = sales[String(e.id_emp)]?.qty ?? 0;
-                            return v ? formatInt(v) : "";
-                          })()}
-                        </TableCell>
-                      )}
-                      {cols.salesTotal && (
-                        <TableCell align="right" sx={{ width: 84 }}>
-                          {(() => {
-                            const v = sales[String(e.id_emp)]?.total_lyd ?? 0;
-                            return v ? formatMoney(v) : "";
-                          })()}
-                        </TableCell>
-                      )}
-                      {cols.gold && (
-                        <TableCell align="right" sx={{ width: 96 }}>
-                          {(() => {
-                            const vr =
-                              (v2Rows || []).find(
-                                (x: any) =>
-                                  Number(x.id_emp) === Number(e.id_emp)
-                              ) || {};
-                            const v = Number((vr as any).gold_bonus_lyd || 0);
-                            return v ? formatMoney(v) : "";
-                          })()}
-                        </TableCell>
-                      )}
-                      {cols.diamond && (
-                        <TableCell align="right" sx={{ width: 96 }}>
-                          {(() => {
-                            const vr =
-                              (v2Rows || []).find(
-                                (x: any) =>
-                                  Number(x.id_emp) === Number(e.id_emp)
-                              ) || {};
-                            const v = Number(
-                              (vr as any).diamond_bonus_lyd || 0
-                            );
-                            return v ? formatMoney(v) : "";
-                          })()}
-                        </TableCell>
-                      )}
-                      {cols.watchComm && (
-                        <TableCell align="right" sx={{ width: 84 }}>
-                          {/* Watch commission placeholder */}
-                        </TableCell>
-                      )}
-                      <TableCell align="right" sx={{ width: 120 }}>
-                        {(() => {
-                          const vr =
-                            (v2Rows || []).find(
-                              (x: any) =>
-                                Number(x.id_emp) === Number(e.id_emp)
-                            ) || ({} as any);
-                          const grossLyd = Number(
-                            (vr as any).total_salary_lyd ?? (vr as any).totalLyd ?? 0
-                          );
-                          const grossUsd = Number(
-                            (vr as any).total_salary_usd ?? (vr as any).totalUsd ?? 0
-                          );
-                          if (!grossLyd && !grossUsd) return "";
-                          return (
-                            <Box component="span">
-                              <Box component="span" sx={{ color: '#65a8bf' }}>
-                                {formatMoney(grossLyd)}
-                              </Box>
-                              {grossUsd ? (
-                                <>
-                                  {" | "}
-                                  <Box component="span" sx={{ color: '#b7a27d' }}>
-                                    {formatMoney(grossUsd)}
-                                  </Box>
-                                </>
-                              ) : null}
-                            </Box>
-                          );
-                        })()}
-                      </TableCell>
-                      <TableCell align="right" sx={{ width: 120 }}>
-                        {(() => {
-                          const vr =
-                            (v2Rows || []).find(
-                              (x: any) =>
-                                Number(x.id_emp) === Number(e.id_emp)
-                            ) || ({} as any);
-                          const lyd = Number(
-                            (vr as any).net_salary_lyd ?? (vr as any).D16 ?? 0
-                          );
-                          const usd = Number(
-                            (vr as any).net_salary_usd ?? (vr as any).C16 ?? 0
-                          );
-                          if (!lyd && !usd) return "";
-                          return (
-                            <Box component="span">
-                              <Box component="span" sx={{ color: '#65a8bf' }}>
-                                {formatMoney(lyd)}
-                              </Box>
-                              {usd ? (
-                                <>
-                                  {" | "}
-                                  <Box component="span" sx={{ color: '#b7a27d' }}>
-                                    {formatMoney(usd)}
-                                  </Box>
-                                </>
-                              ) : null}
-                            </Box>
-                          );
-                        })()}
-                      </TableCell>
-                      <TableCell align="right" sx={{ width: 220, position: 'sticky', right: 0, zIndex: 2, bgcolor: 'background.paper' }}>
-                        <Box display="flex" flexDirection="row" gap={1} alignItems="center" justifyContent="flex-end">
-                          {savingRows[e.id_emp] && <CircularProgress size={14} />}
-                          {/* <Button
-                            size="small"
-                            variant="text"
-                            startIcon={<EditIcon fontSize="small" />}
-                            disabled={viewOnly}
-                            onClick={() => openRowEditor(e.id_emp)}
-                          >
-                            {t('Edit') || 'Edit'}
-                          </Button> */}
-                          <Button
-                            size="small"
-                            variant="outlined"
-                            startIcon={<PictureAsPdfOutlinedIcon fontSize="small" />}
-                            onClick={() => exportPdfClient(e)}
-                          >
-                            {t("Payslip") || "Payslip"}
-                          </Button>
-                          <Button
-                            size="small"
-                            variant="contained"
-                            startIcon={<SendOutlinedIcon fontSize="small" />}
-                            onClick={() => sendPayslipEmailClient(e)}
-                          >
-                            {t("Send") || "Send"}
-                          </Button>
-                        </Box>
-                      </TableCell>
-                    </TableRow>
-                  ))}
-                  {/* Totals row */}
-                  <TableRow>
-                    <TableCell>
-                      <strong style={{ fontSize: 16 }}>{t("Totals") || "Totals"}</strong>
-                    </TableCell>
-                    <TableCell align="right">
-                      <strong>{formatMoney(totals.deductionDays)}</strong>
-                    </TableCell>
-                    {cols.holidayWorked && (
-                      <TableCell align="right">
-                        <strong>{formatInt(totals.holidayWorked)}</strong>
-                      </TableCell>
-                    )}
-                    {cols.p && (
-                      <TableCell align="right">
-                        <strong>
-                          <Box component="span">
-                            <Box component="span" sx={{ color: '#65a8bf' }}>
-                              {formatMoney(totals.pLyd)}
-                            </Box>
-                            {totals.pUsd ? (
-                              <>
-                                {" | "}
-                                <Box component="span" sx={{ color: '#b7a27d' }}>
-                                  {formatMoney(totals.pUsd)}
-                                </Box>
-                              </>
-                            ) : null}
-                          </Box>
-                        </strong>
-                      </TableCell>
-                    )}
-                    {cols.ph && (
-                      <TableCell align="right">
-                        <strong>
-                          <Box component="span">
-                            <Box component="span" sx={{ color: '#65a8bf' }}>
-                              {formatMoney(totals.phLyd)}
-                            </Box>
-                            {totals.phUsd ? (
-                              <>
-                                {" | "}
-                                <Box component="span" sx={{ color: '#b7a27d' }}>
-                                  {formatMoney(totals.phUsd)}
-                                </Box>
-                              </>
-                            ) : null}
-                          </Box>
-                        </strong>
-                      </TableCell>
-                    )}
-                    {cols.phf && (
-                      <TableCell align="right">
-                        <strong>
-                          <Box component="span">
-                            <Box component="span" sx={{ color: '#65a8bf' }}>
-                              {formatMoney(totals.phfLyd)}
-                            </Box>
-                            {totals.phfUsd ? (
-                              <>
-                                {" | "}
-                                <Box component="span" sx={{ color: '#b7a27d' }}>
-                                  {formatMoney(totals.phfUsd)}
-                                </Box>
-                              </>
-                            ) : null}
-                          </Box>
-                        </strong>
-                      </TableCell>
-                    )}
-                    {cols.baseSalary && (
-                      <TableCell align="right">
-                        <strong>
-                          <Box component="span">
-                            <Box component="span" sx={{ color: '#65a8bf' }}>
-                              {formatMoney(totals.baseSalary)}
-                            </Box>
-                            {totals.baseSalaryUsd ? (
-                              <>
-                                {" | "}
-                                <Box component="span" sx={{ color: '#b7a27d' }}>
-                                  {formatMoney(totals.baseSalaryUsd)}
-                                </Box>
-                              </>
-                            ) : null}
-                          </Box>
-                        </strong>
-                      </TableCell>
-                    )}
-                    {cols.food && (
-                      <TableCell align="right">
-                        <strong>{formatMoney(totals.food)}</strong>
-                      </TableCell>
-                    )}
-                    {cols.fuel && (
-                      <TableCell align="right">
-                        <strong>{formatMoney(totals.fuel)}</strong>
-                      </TableCell>
-                    )}
-                    {cols.comm && (
-                      <TableCell align="right">
-                        <strong>{formatMoney(totals.comm)}</strong>
-                      </TableCell>
-                    )}
-                    {/* Base Pay / Allowance Pay totals removed per new layout */}
-                    {cols.advances && (
-                      <TableCell align="right">
-                        {(() => {
-                          const sum = displayedRows.reduce((acc, e) => {
-                            const a = e.components?.adjustments || ({} as any);
-                            const advFromState = Number(advMap[e.id_emp] || 0);
-                            const advLocal = Number(a.advance || 0);
-                            const adv = advFromState || advLocal;
-                            const v = adv ? -Math.abs(adv) : 0;
-                            return acc + v;
-                          }, 0);
-                          return (
-                            <Box
-                              component="strong"
-                              sx={{ color: sum < 0 ? 'error.main' : undefined }}
-                            >
-                              {formatMoney(sum)}
-                            </Box>
-                          );
-                        })()}
-                      </TableCell>
-                    )}
-                    {cols.loans && (
-                      <TableCell align="right">
-                        {(() => {
-                          let totalRemaining = 0;
-                          let totalThisMonth = 0;
-
-                          (displayedRows || []).forEach((e) => {
-                            const vr =
-                              (v2Rows || []).find(
-                                (x: any) => Number(x.id_emp) === Number(e.id_emp)
-                              ) || ({} as any);
-                            totalRemaining += Number(
-                              (vr as any).remaining || (vr as any).principal || 0
-                            );
-                            totalThisMonth += Number((vr as any).loan_credit_lyd || 0);
-                          });
-
-                          const totalThisMonthNeg = totalThisMonth
-                            ? -Math.abs(totalThisMonth)
-                            : 0;
-
-                          return (
-                            <Box
-                              display="flex"
-                              flexDirection="column"
-                              alignItems="flex-end"
-                              component="strong"
-                            >
-                              {/* This month deduction at top */}
-                              <Box
-                                component="span"
-                                sx={{
-                                  color: totalThisMonthNeg < 0 ? 'error.main' : undefined,
-                                }}
-                              >
-                                {formatMoney(totalThisMonthNeg)}
-                              </Box>
-                              {/* Remaining total under it */}
-                              <Box component="span">
-                                {formatMoney(totalRemaining)}
-                              </Box>
-                            </Box>
-                          );
-                        })()}
-                      </TableCell>
-                    )}
-                    {cols.salesQty && (
-                      <TableCell align="right">
-                        <strong>{formatInt(totals.salesQty)}</strong>
-                      </TableCell>
-                    )}
-                    {cols.salesTotal && (
-                      <TableCell align="right">
-                        <strong>{formatMoney(totals.salesTotal)}</strong>
-                      </TableCell>
-                    )}
-                    {cols.gold && (
-                      <TableCell align="right">
-                        <strong>{formatMoney(totals.gold)}</strong>
-                      </TableCell>
-                    )}
-                    {cols.diamond && (
-                      <TableCell align="right">
-                        <strong>{formatMoney(totals.diamond)}</strong>
-                      </TableCell>
-                    )}
-                    {cols.watchComm && (
-                      <TableCell align="right">
-                        {/* Watch commission total placeholder */}
-                      </TableCell>
-                    )}
-                    <TableCell align="right">
-                      <strong>
-                        <Box component="span">
-                          <Box component="span" sx={{ color: '#65a8bf' }}>
-                            {formatMoney(totals.grossLyd)}
-                          </Box>
-                          {totals.grossUsd ? (
-                            <>
-                              {" | "}
-                              <Box component="span" sx={{ color: '#b7a27d' }}>
-                                {formatMoney(totals.grossUsd)}
-                              </Box>
-                            </>
-                          ) : null}
-                        </Box>
-                      </strong>
-                    </TableCell>
-                    <TableCell align="right">
-                      <strong>
-                        <Box component="span">
-                          <Box component="span" sx={{ color: '#65a8bf' }}>
-                            {formatMoney(totals.totalLyd)}
-                          </Box>
-                          {totals.totalUsd ? (
-                            <>
-                              {" | "}
-                              <Box component="span" sx={{ color: '#b7a27d' }}>
-                                {formatMoney(totals.totalUsd)}
-                              </Box>
-                            </>
-                          ) : null}
-                        </Box>
-                      </strong>
-                    </TableCell>
-                    <TableCell align="right">—</TableCell>
-                  </TableRow>
-                </TableBody>
-              </Table>
-            </TableContainer>
-        </CardContent>
-      </Card>
-      )}
-
-      {/* Columns gear menu */}
-      <Menu
-        anchorEl={colsAnchor}
-        open={Boolean(colsAnchor)}
-        onClose={() => setColsAnchor(null)}
-        anchorOrigin={{ vertical: 'bottom', horizontal: 'right' }}
-        transformOrigin={{ vertical: 'top', horizontal: 'right' }}
-      >
-        <Box px={1} py={0.5} display="grid" gridTemplateColumns="repeat(2, 1fr)" gap={0.5}>
-          {(
-            [
-              ['holidayWorked', 'Holiday Worked'],
-              ['p', 'P (LYD|USD)'],
-              ['ph', 'PH (LYD|USD)'],
-              ['phf', 'PHF (LYD|USD)'],
-              ['baseSalary', 'Base'],
-              ['food', 'Food'],
-              ['fuel', 'Fuel'],
-              ['comm', 'Communication'],
-              ['advances', 'S. Adv'],
-              ['loans', 'Loans'],
-              ['salesQty', 'Sales Qty'],
-              ['salesTotal', 'Sales Total'],
-              ['gold', 'Gold Bonus'],
-              ['diamond', 'Diamond Bonus'],
-              ['watchComm', 'Watch Comm'],
-              ['totalUsd', 'Total USD'],
-            ] as Array<[keyof typeof cols, string]>
-          ).map(([k, label]) => (
-            <FormControlLabel
-              key={String(k)}
-              control={
-                <Checkbox
-                  size="small"
-                  checked={Boolean((cols as any)[k])}
-                  onChange={(e) => setCols((c:any) => ({ ...c, [k]: e.target.checked }))}
-                />
-              }
-              label={label}
-            />
           ))}
-        </Box>
-      </Menu>
+      </CardContent>
+    </Card>
 
-      {error && (
-        <Box mt={2}>
-          <Typography color="error">{error}</Typography>
-        </Box>
-      )}
+    {loading && (
+      <Box display="flex" alignItems="center" gap={1}>
+        <CircularProgress size={20} />
+        <Typography>{t("hr.timesheets.loading") || "Loading..."}</Typography>
+      </Box>
+    )}
 
-      <Dialog
-        open={calOpen}
-        onClose={() => setCalOpen(false)}
-        fullWidth
-        maxWidth="md"
-      >
-        <DialogTitle>
-          {calEmp
-            ? `${calEmp.name} — ${String(year)}-${String(month).padStart(2, "0")}`
-            : "Calendar"}
-        </DialogTitle>
-        <DialogContent>
-          {calLoading && (
-            <Box display="flex" alignItems="center" gap={1}>
-              <CircularProgress size={18} />
-              <Typography>
-                {t("hr.timesheets.loading") || "Loading..."}
-              </Typography>
-            </Box>
-          )}
-          {!calLoading && calDays && (
-            <Box>
-              <Box display="grid" gridTemplateColumns="repeat(7, 1fr)" gap={1}>
-                {["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"].map((d) => (
-                  <Box key={d} sx={{ fontWeight: 600, textAlign: "center" }}>
-                    {d}
-                  </Box>
-                ))}
-                {(() => {
-                  const first = dayjs(
-                    `${year}-${String(month).padStart(2, "0")}-01`
-                  );
-                  const dow = first.day(); // 0..6, Sunday=0
-                  const startIdx = (dow + 6) % 7; // convert to Monday-first 0..6
-                  const dim = new Date(year, month, 0).getDate();
-                  const cells: React.ReactNode[] = [];
-                  for (let i = 0; i < startIdx; i++)
-                    cells.push(
-                      <Box
-                        key={`e${i}`}
-                        sx={{ p: 1, minHeight: 80, bgcolor: "#fafafa" }}
-                      />
-                    );
-                  for (let d = 1; d <= dim; d++) {
-                    const day = calDays[d - 1];
-                    const code = String(day?.code || "").toUpperCase();
-                    const delta = roundedHoursWithSign(day?.deltaMin ?? null);
-                    const badge =
-                      code ||
-                      (day?.present ? (day?.isHoliday ? "PH" : "P") : "A");
-                    const bg = (() => {
-                      if (badge === "PHF") return "#e6ffe6";
-                      if (badge === "PH") return "#fff3cd";
-                      if (badge === "PT") return "#e0f7fa";
-                      if (badge === "PL") return "#ffebee";
-                      if (badge === "A") return "#fdecea";
-                      if (badge) return "#eef7ff";
-                      return "#fafafa";
-                    })();
-                    cells.push(
-                      <Box
-                        key={`d${d}`}
-                        sx={{
-                          p: 1,
-                          minHeight: 80,
-                          bgcolor: bg,
-                          border: "1px solid #eee",
+    {!loading && result && tab === "payroll" && (
+      <Card>
+        <CardContent>
+          <Typography variant="subtitle1" gutterBottom>
+            {t("Period") || "Period"}: {`${year}-${String(month).padStart(2, "0")}-01`} →{" "}
+            {`${year}-${String(month).padStart(2, "0")}-${String(new Date(year, month, 0).getDate()).padStart(
+              2,
+              "0"
+            )}`}{" "}
+            — {t("common.showing") || "Showing"} {result?.count ?? 0}
+          </Typography>
+
+          <TableContainer sx={{ overflow: "auto", maxHeight: "calc(100vh - 280px)" }}>
+            <Table
+              stickyHeader
+              size="small"
+              sx={{
+                tableLayout: "fixed",
+                width: "100%",
+                minWidth: tableMinWidth,
+                "& .MuiTableCell-root": { py: 0.5, px: 1 },
+                "& td, & th": { borderBottom: "1px solid", borderColor: "divider" },
+              }}
+            >
+              <TableHead>
+              <TableRow>
+                {/* Employee - stays first */}
+                <TableCell
+                  sortDirection={sortKey === "name" ? sortDir : (false as any)}
+                  sx={{ width: 180, maxWidth: 180, position: "sticky", left: 0, zIndex: 6, bgcolor: "background.paper" }}
+                >
+                  <TableSortLabel
+                    active={sortKey === "name"}
+                    direction={sortKey === "name" ? sortDir : "asc"}
+                    onClick={() => handleSort("name")}
+                  >
+                    {t("hr.timesheets.employee") || "Employee"}
+                  </TableSortLabel>
+                </TableCell>
+
+                {/* Basic Salary */}
+                {cols.baseSalary && (
+                  <TableCell align="right" sortDirection={sortKey === "baseSalary" ? sortDir : (false as any)} sx={{ width: 110 }}>
+                    <Box display="flex" alignItems="center" justifyContent="space-between">
+                      <TableSortLabel
+                        active={sortKey === "baseSalary"}
+                        direction={sortKey === "baseSalary" ? sortDir : "asc"}
+                        onClick={(e: any) => {
+                          if (e.altKey) {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            setCols((c) => ({ ...c, baseSalary: !c.baseSalary }));
+                          } else handleSort("baseSalary");
                         }}
                       >
-                        <Box display="flex" justifyContent="space-between">
-                          <Typography variant="caption">{d}</Typography>
-                          <Typography variant="caption">{badge}</Typography>
+                        <Box display="flex" flexDirection="column" alignItems="flex-end">
+                          <span>{t("Basic Salary") || "Base"}</span>
+                          <span style={{ fontSize: 9 }}>(LYD) | (USD)</span>
                         </Box>
-                        {day?.entry && (
-                          <Typography variant="caption">
-                            {String(day.entry).slice(11, 16)} →{" "}
-                            {day?.exit
-                              ? String(day.exit).slice(11, 16)
-                              : "--:--"}
-                          </Typography>
-                        )}
-                        {delta && (
-                          <Typography variant="caption">Δ {delta}</Typography>
-                        )}
-                      </Box>
-                    );
-                  }
-                  return cells;
-                })()}
-              </Box>
-            </Box>
-          )}
-        </DialogContent>
-        <DialogActions>
-          <Button onClick={() => setCalOpen(false)}>
-            {t("common.close") || "Close"}
-          </Button>
-        </DialogActions>
-      </Dialog>
+                      </TableSortLabel>
+                      <IconButton
+                        size="small"
+                        sx={{ ml: 0.5, p: 0.25 }}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setCols((c) => ({ ...c, baseSalary: !c.baseSalary }));
+                        }}
+                      >
+                        <VisibilityOffIcon fontSize="inherit" />
+                      </IconButton>
+                    </Box>
+                  </TableCell>
+                )}
 
-      {/* Bulk Send Payslips dialog */}
-      <Dialog
-        open={sendDialogOpen}
-        onClose={() => setSendDialogOpen(false)}
-        fullWidth
-        maxWidth="sm"
-      >
-        <DialogTitle>{t('Send Payslips') || 'Send Payslips'}</DialogTitle>
-        <DialogContent dividers>
-          <Typography variant="body2" sx={{ mb: 1 }}>
-            {t('Select employees to send payslips to for this period.') || 'Select employees to send payslips to for this period.'}
-          </Typography>
-          <Box sx={{ maxHeight: 360, overflow: 'auto' }}>
-            {(displayedRows || []).map(emp => (
-              <FormControlLabel
-                key={emp.id_emp}
-                control={
-                  <Checkbox
-                    size="small"
-                    checked={!!sendSelection[emp.id_emp]}
-                    onChange={(e) => {
-                      const checked = e.target.checked;
-                      setSendSelection(prev => ({ ...prev, [emp.id_emp]: checked }));
-                    }}
-                  />
-                }
-                label={`${nameMap[emp.id_emp] ?? emp.name} (ID: ${emp.id_emp})`}
-              />
-            ))}
-          </Box>
-        </DialogContent>
-        <DialogActions>
-          <Button onClick={() => setSendDialogOpen(false)}>
-            {t('Cancel') || 'Cancel'}
-          </Button>
-          <Button
-            variant="contained"
-            onClick={async () => {
-              const list = (displayedRows || []).filter(e => sendSelection[e.id_emp]);
-              if (!list.length) {
-                alert(t('No employees selected') || 'No employees selected');
-                return;
-              }
-              try {
-                for (const emp of list) {
-                  await sendPayslipEmailClient(emp);
-                }
-                alert(t('Payslips sent') || 'Payslips sent');
-              } catch (e: any) {
-                alert(e?.message || 'Failed to send some payslips');
-              } finally {
-                setSendDialogOpen(false);
-              }
-            }}
-          >
-            {t('Send') || 'Send'}
-          </Button>
-        </DialogActions>
-      </Dialog>
+                {/* P (Present Days) */}
+                {cols.p && (
+                  <TableCell align="right" sx={{ width: 110 }}>
+                    <Box display="flex" flexDirection="column" alignItems="flex-end">
+                      <span>P</span>
+                      <span style={{ fontSize: 9 }}>(LYD) | (USD)</span>
+                    </Box>
+                  </TableCell>
+                )}
 
-      {/* Row adjustments editor (autosave) */}
-      <Dialog open={rowEditOpen} onClose={() => setRowEditOpen(false)} fullWidth maxWidth="sm">
-        <DialogTitle>
-          {t('Adjustments') || 'Adjustments'} — {String(rowEdit?.name || rowEdit?.id_emp || '')}
-        </DialogTitle>
-        <DialogContent>
-          <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 1 }}>
-            {t('Autosaves on change') || 'Autosaves on change'}
-          </Typography>
-          <Box display="grid" gridTemplateColumns="repeat(2, 1fr)" gap={1.25}>
-            <TextField size="small" type="number" label="Gold Bonus (LYD)" disabled={viewOnly}
-              value={rowForm.gold_bonus_lyd ?? 0}
-              onChange={(e)=>{ const v=toN(e.target.value); setRowForm((f:any)=>({...f, gold_bonus_lyd:v})); if(rowEdit){ applyRowForm(rowEdit.id_emp, { gold_bonus_lyd:v }); queueAutoSave(rowEdit.id_emp);} }} />
-            <TextField size="small" type="number" label="Diamond Bonus (LYD)" disabled={viewOnly}
-              value={rowForm.diamond_bonus_lyd ?? 0}
-              onChange={(e)=>{ const v=toN(e.target.value); setRowForm((f:any)=>({...f, diamond_bonus_lyd:v})); if(rowEdit){ applyRowForm(rowEdit.id_emp, { diamond_bonus_lyd:v }); queueAutoSave(rowEdit.id_emp);} }} />
+                {/* PH (Paid Holiday) */}
+                {cols.ph && (
+                  <TableCell align="right" sx={{ width: 110 }}>
+                    <Box display="flex" flexDirection="column" alignItems="flex-end">
+                      <span>PH</span>
+                      <span style={{ fontSize: 9 }}>(LYD) | (USD)</span>
+                    </Box>
+                  </TableCell>
+                )}
 
-            <TextField size="small" type="number" label="Other Bonus 1 (LYD)" disabled={viewOnly}
-              value={rowForm.other_bonus1_lyd ?? 0}
-              onChange={(e)=>{ const v=toN(e.target.value); setRowForm((f:any)=>({...f, other_bonus1_lyd:v})); if(rowEdit){ applyRowForm(rowEdit.id_emp, { other_bonus1_lyd:v }); queueAutoSave(rowEdit.id_emp);} }} />
-            <TextField size="small" label="Other Bonus 1 Account" disabled={viewOnly}
-              value={rowForm.other_bonus1_acc ?? ''}
-              onChange={(e)=>{ const v=e.target.value; setRowForm((f:any)=>({...f, other_bonus1_acc:v})); if(rowEdit){ applyRowForm(rowEdit.id_emp, { other_bonus1_acc:v }); queueAutoSave(rowEdit.id_emp);} }} />
+                {/* PHF (Paid Holiday Full) */}
+                {cols.phf && (
+                  <TableCell align="right" sx={{ width: 110 }}>
+                    <Box display="flex" flexDirection="column" alignItems="flex-end">
+                      <span>PHF</span>
+                      <span style={{ fontSize: 9 }}>(LYD) | (USD)</span>
+                    </Box>
+                  </TableCell>
+                )}
 
-            <TextField size="small" type="number" label="Other Bonus 2 (LYD)" disabled={viewOnly}
-              value={rowForm.other_bonus2_lyd ?? 0}
-              onChange={(e)=>{ const v=toN(e.target.value); setRowForm((f:any)=>({...f, other_bonus2_lyd:v})); if(rowEdit){ applyRowForm(rowEdit.id_emp, { other_bonus2_lyd:v }); queueAutoSave(rowEdit.id_emp);} }} />
-            <TextField size="small" label="Other Bonus 2 Account" disabled={viewOnly}
-              value={rowForm.other_bonus2_acc ?? ''}
-              onChange={(e)=>{ const v=e.target.value; setRowForm((f:any)=>({...f, other_bonus2_acc:v})); if(rowEdit){ applyRowForm(rowEdit.id_emp, { other_bonus2_acc:v }); queueAutoSave(rowEdit.id_emp);} }} />
+                {/* Food Allowance */}
+                {cols.food && (
+                  <TableCell align="right" sortDirection={sortKey === "food" ? sortDir : (false as any)} sx={{ width: 72 }}>
+                    <Box display="flex" alignItems="center" justifyContent="space-between">
+                      <TableSortLabel
+                        active={sortKey === "food"}
+                        direction={sortKey === "food" ? sortDir : "asc"}
+                        onClick={(e: any) => {
+                          if (e.altKey) {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            setCols((c) => ({ ...c, food: !c.food }));
+                          } else handleSort("food");
+                        }}
+                      >
+                        {t("Food") || "Food"}
+                      </TableSortLabel>
+                      <IconButton
+                        size="small"
+                        sx={{ ml: 0.5, p: 0.25 }}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setCols((c) => ({ ...c, food: !c.food }));
+                        }}
+                      >
+                        <VisibilityOffIcon fontSize="inherit" />
+                      </IconButton>
+                    </Box>
+                  </TableCell>
+                )}
 
-            <TextField size="small" type="number" label="Other Additions (LYD)" disabled={viewOnly}
-              value={rowForm.other_additions_lyd ?? 0}
-              onChange={(e)=>{ const v=toN(e.target.value); setRowForm((f:any)=>({...f, other_additions_lyd:v})); if(rowEdit){ applyRowForm(rowEdit.id_emp, { other_additions_lyd:v }); queueAutoSave(rowEdit.id_emp);} }} />
-            <TextField size="small" type="number" label="Other Deductions (LYD)" disabled={viewOnly}
-              value={rowForm.other_deductions_lyd ?? 0}
-              onChange={(e)=>{ const v=toN(e.target.value); setRowForm((f:any)=>({...f, other_deductions_lyd:v})); if(rowEdit){ applyRowForm(rowEdit.id_emp, { other_deductions_lyd:v }); queueAutoSave(rowEdit.id_emp);} }} />
+                {/* Transportation */}
+                {cols.fuel && (
+                  <TableCell align="right" sortDirection={sortKey === "fuel" ? sortDir : (false as any)} sx={{ width: 72 }}>
+                    <Box display="flex" alignItems="center" justifyContent="space-between">
+                      <TableSortLabel
+                        active={sortKey === "fuel"}
+                        direction={sortKey === "fuel" ? sortDir : "asc"}
+                        onClick={(e: any) => {
+                          if (e.altKey) {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            setCols((c) => ({ ...c, fuel: !c.fuel }));
+                          } else handleSort("fuel");
+                        }}
+                      >
+                        {t("Transport") || "Transport"}
+                      </TableSortLabel>
+                      <IconButton
+                        size="small"
+                        sx={{ ml: 0.5, p: 0.25 }}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setCols((c) => ({ ...c, fuel: !c.fuel }));
+                        }}
+                      >
+                        <VisibilityOffIcon fontSize="inherit" />
+                      </IconButton>
+                    </Box>
+                  </TableCell>
+                )}
 
-            <TextField size="small" type="number" label="Loan Debit (LYD)" disabled={viewOnly}
-              value={rowForm.loan_debit_lyd ?? 0}
-              onChange={(e)=>{ const v=toN(e.target.value); setRowForm((f:any)=>({...f, loan_debit_lyd:v})); if(rowEdit){ applyRowForm(rowEdit.id_emp, { loan_debit_lyd:v }); queueAutoSave(rowEdit.id_emp);} }} />
-            <TextField size="small" type="number" label="Loan Credit (LYD)" disabled={viewOnly}
-              value={rowForm.loan_credit_lyd ?? 0}
-              onChange={(e)=>{ const v=toN(e.target.value); setRowForm((f:any)=>({...f, loan_credit_lyd:v})); if(rowEdit){ applyRowForm(rowEdit.id_emp, { loan_credit_lyd:v }); queueAutoSave(rowEdit.id_emp);} }} />
-          </Box>
-        </DialogContent>
-        <DialogActions>
-          <Button onClick={() => setRowEditOpen(false)}>
-            {t('common.close') || 'Close'}
-          </Button>
-        </DialogActions>
-      </Dialog>
+                {/* Communication */}
+                {cols.comm && (
+                  <TableCell align="right" sortDirection={sortKey === "comm" ? sortDir : (false as any)} sx={{ width: 72 }}>
+                    <Box display="flex" alignItems="center" justifyContent="space-between">
+                      <TableSortLabel
+                        active={sortKey === "comm"}
+                        direction={sortKey === "comm" ? sortDir : "asc"}
+                        onClick={(e: any) => {
+                          if (e.altKey) {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            setCols((c) => ({ ...c, comm: !c.comm }));
+                          } else handleSort("comm");
+                        }}
+                      >
+                        {t("Comm") || "Comm"}
+                      </TableSortLabel>
+                      <IconButton
+                        size="small"
+                        sx={{ ml: 0.5, p: 0.25 }}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setCols((c) => ({ ...c, comm: !c.comm }));
+                        }}
+                      >
+                        <VisibilityOffIcon fontSize="inherit" />
+                      </IconButton>
+                    </Box>
+                  </TableCell>
+                )}
 
-      <Dialog
-        open={bdOpen}
-        onClose={() => setBdOpen(false)}
-        fullWidth
-        maxWidth="sm"
-      >
-        <DialogTitle>
-          {bdEmp
-            ? `${bdEmp.name} — Breakdown (${String(year)}-${String(month).padStart(2, "0")})`
-            : "Breakdown"}
-        </DialogTitle>
-        <DialogContent>
-          <Table size="small">
-            <TableHead>
-              <TableRow>
-                <TableCell>Item</TableCell>
-                {bdShowLyd && <TableCell align="right">LYD</TableCell>}
-                {bdShowUsd && <TableCell align="right">USD</TableCell>}
-                <TableCell>Note</TableCell>
+                {/* Gold Commission */}
+                {cols.gold && (
+                  <TableCell align="right" sortDirection={sortKey === "gold" ? sortDir : (false as any)} sx={{ width: 96 }}>
+                    <Box display="flex" alignItems="center" justifyContent="space-between">
+                      <TableSortLabel
+                        active={sortKey === "gold"}
+                        direction={sortKey === "gold" ? sortDir : "asc"}
+                        onClick={(e: any) => {
+                          if (e.altKey) {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            setCols((c) => ({ ...c, gold: !c.gold }));
+                          } else handleSort("gold");
+                        }}
+                      >
+                        {t("Gold") || "Gold"}
+                      </TableSortLabel>
+                      <IconButton
+                        size="small"
+                        sx={{ ml: 0.5, p: 0.25 }}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setCols((c) => ({ ...c, gold: !c.gold }));
+                        }}
+                      >
+                        <VisibilityOffIcon fontSize="inherit" />
+                      </IconButton>
+                    </Box>
+                  </TableCell>
+                )}
+
+                {/* Diamond Commission */}
+                {cols.diamond && (
+                  <TableCell align="right" sortDirection={sortKey === "diamond" ? sortDir : (false as any)} sx={{ width: 96 }}>
+                    <Box display="flex" alignItems="center" justifyContent="space-between">
+                      <TableSortLabel
+                        active={sortKey === "diamond"}
+                        direction={sortKey === "diamond" ? sortDir : "asc"}
+                        onClick={(e: any) => {
+                          if (e.altKey) {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            setCols((c) => ({ ...c, diamond: !c.diamond }));
+                          } else handleSort("diamond");
+                        }}
+                      >
+                        {t("Diamond") || "Diamond"}
+                      </TableSortLabel>
+                      <IconButton
+                        size="small"
+                        sx={{ ml: 0.5, p: 0.25 }}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setCols((c) => ({ ...c, diamond: !c.diamond }));
+                        }}
+                      >
+                        <VisibilityOffIcon fontSize="inherit" />
+                      </IconButton>
+                    </Box>
+                  </TableCell>
+                )}
+
+                {/* Watch Commission */}
+                {cols.watchComm && (
+                  <TableCell align="right" sx={{ width: 84 }}>
+                    <Box display="flex" alignItems="center" justifyContent="space-between">
+                      <span>{t("Watch") || "Watch"}</span>
+                      <IconButton
+                        size="small"
+                        sx={{ ml: 0.5, p: 0.25 }}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setCols((c) => ({ ...c, watchComm: !c.watchComm }));
+                        }}
+                      >
+                        <VisibilityOffIcon fontSize="inherit" />
+                      </IconButton>
+                    </Box>
+                  </TableCell>
+                )}
+
+                {/* Salary Advance */}
+                {cols.advances && (
+                  <TableCell align="right" sx={{ width: 78 }}>
+                    <Box display="flex" alignItems="center" justifyContent="space-between">
+                      <span>{t("Advance") || "Advance"}</span>
+                      <IconButton
+                        size="small"
+                        sx={{ ml: 0.5, p: 0.25 }}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setCols((c) => ({ ...c, advances: !c.advances }));
+                        }}
+                      >
+                        <VisibilityOffIcon fontSize="inherit" />
+                      </IconButton>
+                    </Box>
+                  </TableCell>
+                )}
+
+                {/* Loans */}
+                {cols.loans && (
+                  <TableCell align="right" sx={{ width: 78 }}>
+                    <Box display="flex" alignItems="center" justifyContent="space-between">
+                      <span>{t("Loans") || "Loans"}</span>
+                      <IconButton
+                        size="small"
+                        sx={{ ml: 0.5, p: 0.25 }}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setCols((c) => ({ ...c, loans: !c.loans }));
+                        }}
+                      >
+                        <VisibilityOffIcon fontSize="inherit" />
+                      </IconButton>
+                    </Box>
+                  </TableCell>
+                )}
+
+                {/* Adjustments - NEW COLUMN */}
+                <TableCell align="right" sx={{ width: 90 }}>
+                  <span>{t("Adjustments") || "Adjustments"}</span>
+                </TableCell>
+
+                {/* Absence (Deduction Days) */}
+                <TableCell align="right" sortDirection={sortKey === "deductionDays" ? sortDir : (false as any)} sx={{ width: 110 }}>
+                  <Box display="flex" flexDirection="column" alignItems="flex-end">
+                    <TableSortLabel
+                      active={sortKey === "deductionDays"}
+                      direction={sortKey === "deductionDays" ? sortDir : "asc"}
+                      onClick={() => handleSort("deductionDays")}
+                    >
+                      {t("Absence") || "Absence"}
+                    </TableSortLabel>
+                    <span style={{ fontSize: 9 }}>(LYD) | (USD)</span>
+                  </Box>
+                </TableCell>
+
+                {/* Gross Salary */}
+                <TableCell align="right" sx={{ width: 120 }}>
+                  <Box display="flex" flexDirection="column" alignItems="flex-end">
+                    <span>{t("Gross Salary") || "Gross Salary"}</span>
+                    <span style={{ fontSize: 9 }}>(LYD) | (USD)</span>
+                  </Box>
+                </TableCell>
+
+                {/* Net Salary (Total) */}
+                <TableCell align="right" sortDirection={sortKey === "total" ? sortDir : (false as any)} sx={{ width: 120 }}>
+                  <TableSortLabel
+                    active={sortKey === "total"}
+                    direction={sortKey === "total" ? sortDir : "asc"}
+                    onClick={() => handleSort("total")}
+                  >
+                    <Box display="flex" flexDirection="column" alignItems="flex-end">
+                      <span>{t("Net Salary") || "Net Salary"}</span>
+                      <span style={{ fontSize: 9 }}>(LYD) | (USD)</span>
+                    </Box>
+                  </TableSortLabel>
+                </TableCell>
+
+                {/* Actions */}
+                <TableCell align="right" sx={{ width: 220, position: "sticky", right: 0, zIndex: 6, bgcolor: "background.paper" }}>
+                  <Box display="flex" alignItems="center" justifyContent="flex-end" gap={0.5}>
+                    <span>{t("Actions") || "Actions"}</span>
+                    <IconButton size="small" onClick={(e) => setColsAnchor(e.currentTarget)}>
+                      <SettingsIcon fontSize="inherit" />
+                    </IconButton>
+                  </Box>
+                </TableCell>
               </TableRow>
             </TableHead>
+
             <TableBody>
-              {bdLines.map((r, i) => (
-                <TableRow key={i}>
-                  <TableCell>{r.label}</TableCell>
-                  {bdShowLyd && (
-                    <TableCell align="right">
-                      {r.lyd
-                        ? r.lyd.toLocaleString(undefined, {
-                            maximumFractionDigits: 2,
-                          })
-                        : ""}
-                    </TableCell>
-                  )}
-                  {bdShowUsd && (
-                    <TableCell align="right">
-                      {r.usd
-                        ? r.usd.toLocaleString(undefined, {
-                            maximumFractionDigits: 2,
-                          })
-                        : ""}
-                    </TableCell>
-                  )}
-                  <TableCell>{r.note || ""}</TableCell>
-                </TableRow>
-              ))}
-            </TableBody>
-          </Table>
-        </DialogContent>
-        <DialogActions>
-          <Button onClick={() => setBdOpen(false)}>
-            {t("common.close") || "Close"}
-          </Button>
-        </DialogActions>
-      </Dialog>
+              {displayedRows.map((e: Payslip) => {
+                const breakdown = computePayBreakdown(e.id_emp);
+                const { goldGrams, goldLyd, diamondGrams, diamondLyd } = resolveCommissionFigures(e);
+                const netLydVal = Math.max(0, Number((breakdown.earningsLyd - breakdown.deductionsLyd).toFixed(2)));
+                const netUsdVal = Math.max(0, Number((breakdown.earningsUsd - breakdown.deductionsUsd).toFixed(2)));
 
-      <Dialog open={payoffOpen} onClose={() => { setPayoffOpen(false); setPayoffAmt(""); setActiveLoan(null); }} fullWidth maxWidth="xs">
-        <DialogTitle>{t('Payoff loan') || 'Payoff loan'}</DialogTitle>
-        <DialogContent>
-          <Typography variant="body2" sx={{ mb: 1 }}>
-            {t('Enter an amount to make a partial payoff, or leave blank to payoff the remaining balance.') || 'Enter an amount to make a partial payoff, or leave blank to payoff the remaining balance.'}
-          </Typography>
-          <TextField
-            fullWidth
-            size="small"
-            type="number"
-            label={t('LYD') || 'LYD'}
-            placeholder={t('Leave blank for full payoff') || 'Leave blank for full payoff'}
-            value={payoffAmt}
-            onChange={(e) => setPayoffAmt(e.target.value)}
-            inputProps={{ step: '0.01' }}
-          />
-        </DialogContent>
-        <DialogActions>
-          <Button onClick={() => { setPayoffOpen(false); setPayoffAmt(""); setActiveLoan(null); }}>
-            {t('common.cancel') || 'Cancel'}
-          </Button>
-          <Button
-            variant="contained"
-            onClick={async () => {
-              if (!adjEmpId || !activeLoan) { setPayoffOpen(false); return; }
-              try {
-                const body: any = { loanId: activeLoan.id, employeeId: adjEmpId };
-                const amt = Number(payoffAmt);
-                if (!isNaN(amt) && payoffAmt !== '') body.amount = amt;
-                await payoffV2Loan(body);
-                const js = await listV2Loans(adjEmpId);
-                setLoanRows(js?.rows || []);
-                alert(t('Payoff recorded') || 'Payoff recorded');
-              } catch (e: any) {
-                alert(e?.message || 'Failed');
-              } finally {
-                setPayoffOpen(false); setPayoffAmt(''); setActiveLoan(null);
-              }
-            }}
-          >
-            {t('Confirm') || 'Confirm'}
-          </Button>
-        </DialogActions>
-      </Dialog>
+                return (
+                  <TableRow key={e.id_emp} hover sx={{ "&:nth-of-type(odd)": { bgcolor: "action.hover" } }}>
+                    {/* Employee */}
+                    <TableCell
+                      sx={{
+                        width: 180,
+                        maxWidth: 180,
+                        position: "sticky",
+                        left: 0,
+                        zIndex: 2,
+                        bgcolor: "background.paper",
+                      }}
+                    >
+                      <Box display="flex" alignItems="center" gap={1.25}>
+                        <Avatar
+                          src={`http://localhost:9000/employees/${e.id_emp}/picture`}
+                          sx={{ width: 28, height: 28 }}
+                        />
+                        <Box
+                          display="flex"
+                          flexDirection="column"
+                          sx={{
+                            maxWidth: 220,
+                            overflow: "hidden",
+                            textOverflow: "ellipsis",
+                          }}
+                        >
+                          <Typography
+                            fontWeight={500}
+                            noWrap
+                            sx={{ cursor: "pointer" }}
+                            onClick={() => openCalendar(e.id_emp, nameMap[e.id_emp] ?? e.name)}
+                          >
+                            {nameMap[e.id_emp] ?? e.name}
+                          </Typography>
+                          <Typography variant="caption">
+                            {(() => {
+                              const vr =
+                                (v2Rows || []).find(
+                                  (x: any) => Number(x.id_emp) === Number(e.id_emp)
+                                ) || {};
+                              const pick = (s: any) => {
+                                if (!s) return "";
+                                const m = String(s).match(/(\d{1,2}):(\d{2})/);
+                                return m ? m[0] : "";
+                              };
+                              const s1 = pick(
+                                (vr as any).T_START ||
+                                  (vr as any).t_start ||
+                                  (vr as any).SCHEDULE_START ||
+                                  (vr as any).shift_start
+                              );
+                              const s2 = pick(
+                                (vr as any).T_END ||
+                                  (vr as any).t_end ||
+                                  (vr as any).SCHEDULE_END ||
+                                  (vr as any).shift_end
+                              );
+                              const sch = s1 && s2 ? ` • ${s1}–${s2}` : "";
+                              const psInfo = e.PS != null ? `• PS: ${formatPs(e.PS)}` : "";
+                              const designationInfo = e.designation ? `• ${e.designation}` : "";
+                              return `ID: ${e.id_emp} ${psInfo} ${designationInfo}${sch}`.trim();
+                            })()}
+                          </Typography>
 
-      <Dialog
-        open={adjOpen}
-        onClose={() => setAdjOpen(false)}
-        fullWidth
-        maxWidth="sm"
-      >
-        <DialogTitle>{t("Adjustments") || "Adjustments"}</DialogTitle>
-        <DialogContent>
-          {adjLoading ? (
-            <Box display="flex" alignItems="center" gap={1}>
-              <CircularProgress size={18} />
-              <Typography>{t("common.loading") || "Loading..."}</Typography>
+                          {(() => {
+                            // Use breakdown values instead of the removed variables
+                            const commGoldLyd = breakdown.goldLyd || 0;
+                            const commGoldUsd = breakdown.goldUsd || 0;
+                            const commDiamondLyd = breakdown.diamondLyd || 0;
+                            const commDiamondUsd = breakdown.diamondUsd || 0;
+
+                            if (!commGoldLyd && !commDiamondLyd && !commGoldUsd && !commDiamondUsd) return null;
+                            
+                            const goldLydText = commGoldLyd
+                              ? `${t("Gold Comm") || "Gold Comm"}: ${formatMoney(commGoldLyd)}`
+                              : "";
+                            const goldUsdText = commGoldUsd
+                              ? `${commGoldLyd ? " (" : ""}${formatMoney(commGoldUsd)} USD${commGoldLyd ? ")" : ""}`
+                              : "";
+                            const diamondLydText = commDiamondLyd
+                              ? `${t("Diamond Comm") || "Diamond Comm"}: ${formatMoney(commDiamondLyd)}`
+                              : "";
+                            const diamondUsdText = commDiamondUsd
+                              ? `${commDiamondLyd ? " (" : ""}${formatMoney(commDiamondUsd)} USD${commDiamondLyd ? ")" : ""}`
+                              : "";
+                            const needsDivider =
+                              (commGoldLyd || commGoldUsd) && (commDiamondLyd || commDiamondUsd);
+
+                            return (
+                              <Typography variant="caption" sx={{ color: "text.secondary" }}>
+                                {goldLydText}
+                                {goldUsdText ? ` ${goldUsdText}` : ""}
+                                {needsDivider ? " | " : ""}
+                                {diamondLydText}
+                                {diamondUsdText ? ` ${diamondUsdText}` : ""}
+                              </Typography>
+                            );
+                          })()}
+                        </Box>
+                      </Box>
+                    </TableCell>
+
+                    {cols.baseSalary && (
+                      <TableCell align="right" sx={{ width: 110 }}>
+                        {(() => {
+                          const lyd = Number(e.baseSalary || 0) || 0;
+                          const usd = Number((e as any).baseSalaryUsd || 0) || 0;
+                          if (!lyd && !usd) return "";
+                          return (
+                            <Box component="span">
+                              <Box component="span" sx={{ color: "#65a8bf" }}>
+                                {formatMoney(lyd)}
+                              </Box>
+                              {usd ? (
+                                <>
+                                  {" | "}
+                                  <Box component="span" sx={{ color: "#b7a27d" }}>
+                                    {formatMoney(usd)}
+                                  </Box>
+                                </>
+                              ) : null}
+                            </Box>
+                          );
+                        })()}
+                      </TableCell>
+                    )}
+
+        {/* P */}
+        {cols.p && (
+          <TableCell align="right" sx={{ width: 110 }}>
+            {(() => {
+              const vals = computePPhPhf(e);
+              if (!vals.pLyd && !vals.pUsd) return "";
+              return (
+                <Box component="span">
+                  <Box component="span" sx={{ color: "#65a8bf" }}>
+                    {formatMoney(vals.pLyd)}
+                  </Box>
+                  {vals.pUsd ? (
+                    <>
+                      {" | "}
+                      <Box component="span" sx={{ color: "#b7a27d" }}>
+                        {formatMoney(vals.pUsd)}
+                      </Box>
+                    </>
+                  ) : null}
+                </Box>
+              );
+            })()}
+          </TableCell>
+        )}
+
+        {/* PH */}
+        {cols.ph && (
+          <TableCell align="right" sx={{ width: 110 }}>
+            {(() => {
+              const vals = computePPhPhf(e);
+              if (!vals.phLyd && !vals.phUsd) return "";
+              return (
+                <Box component="span">
+                  <Box component="span" sx={{ color: "#65a8bf" }}>
+                    {formatMoney(vals.phLyd)}
+                  </Box>
+                  {vals.phUsd ? (
+                    <>
+                      {" | "}
+                      <Box component="span" sx={{ color: "#b7a27d" }}>
+                        {formatMoney(vals.phUsd)}
+                      </Box>
+                    </>
+                  ) : null}
+                </Box>
+              );
+            })()}
+          </TableCell>
+        )}
+
+        {/* PHF */}
+        {cols.phf && (
+          <TableCell align="right" sx={{ width: 110 }}>
+            {(() => {
+              const vals = computePPhPhf(e);
+              if (!vals.phfLyd && !vals.phfUsd) return "";
+              return (
+                <Box component="span">
+                  <Box component="span" sx={{ color: "#65a8bf" }}>
+                    {formatMoney(vals.phfLyd)}
+                  </Box>
+                  {vals.phfUsd ? (
+                    <>
+                      {" | "}
+                      <Box component="span" sx={{ color: "#b7a27d" }}>
+                        {formatMoney(vals.phfUsd)}
+                      </Box>
+                    </>
+                  ) : null}
+                </Box>
+              );
+            })()}
+          </TableCell>
+        )}
+
+        {/* Food */}
+        {cols.food && (
+          <TableCell align="right" sx={{ width: 72 }}>
+            {(() => {
+              const vr = (v2Rows || []).find((x: any) => Number(x.id_emp) === Number(e.id_emp)) || {};
+              const foodInfo = computeFoodAllowance(e, vr);
+              return Number.isFinite(foodInfo.allowance) ? formatMoney(foodInfo.allowance) : "0.00";
+            })()}
+          </TableCell>
+        )}
+
+        {/* Transportation */}
+        {cols.fuel && (
+          <TableCell align="right" sx={{ width: 72 }}>
+            {(() => {
+              const vr = (v2Rows || []).find((x: any) => Number(x.id_emp) === Number(e.id_emp)) || {};
+              const v = Number(((e as any).FUEL ?? (vr as any).FUEL) || 0);
+              return v ? formatMoney(v) : "";
+            })()}
+          </TableCell>
+        )}
+
+        {/* Communication */}
+        {cols.comm && (
+          <TableCell align="right" sx={{ width: 72 }}>
+            {(() => {
+              const vr = (v2Rows || []).find((x: any) => Number(x.id_emp) === Number(e.id_emp)) || {};
+              const v = Number(((e as any).COMMUNICATION ?? (vr as any).COMMUNICATION) || 0);
+              return v ? formatMoney(v) : "";
+            })()}
+          </TableCell>
+        )}
+
+        {/* Gold */}
+        {cols.gold && (
+          <TableCell align="right" sx={{ width: 120 }}>
+            <Box component="span">
+              {goldGrams > 0 ? (
+                <>
+                  <Box component="span" sx={{ fontWeight: 700 }}>
+                    {goldGrams.toLocaleString(undefined, { maximumFractionDigits: 2 })} g
+                  </Box>
+                  {"  "}
+                </>
+              ) : null}
+              <Box component="span" sx={{ color: "#65a8bf", fontWeight: 700 }}>
+                {formatMoney(goldLyd)}
+              </Box>
+            </Box>
+          </TableCell>
+        )}
+
+        {/* Diamond */}
+        {cols.diamond && (
+          <TableCell align="right" sx={{ width: 120 }}>
+            <Box component="span">
+              {diamondGrams > 0 ? (
+                <>
+                  <Box component="span" sx={{ fontWeight: 700 }}>
+                    {diamondGrams.toLocaleString(undefined, { maximumFractionDigits: 2 })} g
+                  </Box>
+                  {"  "}
+                </>
+              ) : null}
+              <Box component="span" sx={{ color: "#65a8bf", fontWeight: 700 }}>
+                {formatMoney(diamondLyd)}
+              </Box>
+            </Box>
+          </TableCell>
+        )}
+
+        {/* Watch */}
+        {cols.watchComm && <TableCell align="right" sx={{ width: 84 }} />}
+
+        {/* Salary Advance */}
+        {cols.advances && (
+          <TableCell align="right" sx={{ width: 78 }}>
+            {(() => {
+              const a = e.components?.adjustments || ({} as any);
+              const advFromState = Number(advMap[e.id_emp] || 0);
+              const advLocal = Number(a.advance || 0);
+              const adv = advFromState || advLocal;
+              const v = adv ? -Math.abs(adv) : 0;
+              return v ? <Box component="span" sx={{ color: "error.main" }}>{formatMoney(v)}</Box> : "";
+            })()}
+          </TableCell>
+        )}
+
+        {/* Loans */}
+        {cols.loans && (
+          <TableCell align="right" sx={{ width: 78 }}>
+            {(() => {
+              const vr = (v2Rows || []).find((x: any) => Number(x.id_emp) === Number(e.id_emp)) || ({} as any);
+              const remaining = Number((vr as any).remaining || (vr as any).principal || 0);
+              const thisMonth = Number((vr as any).loan_credit_lyd || 0);
+              const thisMonthNeg = thisMonth ? -Math.abs(thisMonth) : 0;
+
+              if (!remaining && !thisMonthNeg) return "";
+
+              return (
+                <Box display="flex" flexDirection="column" alignItems="flex-end">
+                  {thisMonthNeg ? (
+                    <Box component="span" sx={{ color: "error.main" }}>
+                      {formatMoney(thisMonthNeg)}
+                    </Box>
+                  ) : null}
+                  {remaining ? <Box component="span">{formatMoney(remaining)}</Box> : null}
+                </Box>
+              );
+            })()}
+          </TableCell>
+        )}
+
+        {/* Adjustments - NEW COLUMN */}
+        <TableCell align="right" sx={{ width: 90 }}>
+          {(() => {
+            const adjSums = adjSumsByEmp[e.id_emp] || { earnLyd: 0, earnUsd: 0, dedLyd: 0, dedUsd: 0 };
+            const netAdj = (adjSums.earnLyd - adjSums.dedLyd) + (adjSums.earnUsd - adjSums.dedUsd);
+            if (Math.abs(netAdj) < 0.01) return "";
+            const color = netAdj > 0 ? "success.main" : "error.main";
+            return (
+              <Box component="span" sx={{ color }}>
+                {formatMoney(Math.abs(netAdj))}
+              </Box>
+            );
+          })()}
+        </TableCell>
+
+        {/* Absence */}
+        <TableCell align="right" sx={{ width: 110 }}>
+          {(() => {
+            const vr = (v2Rows || []).find((x: any) => Number(x.id_emp) === Number(e.id_emp)) || {};
+            const absenceLyd = Number((vr as any).absence_lyd || 0) || 0;
+            const absenceUsd = Number((vr as any).absence_usd || 0) || 0;
+
+            // Latency minutes for this employee in the grid: use backend attendance
+            // minutes so hours line up with the monetary latency_lyd value.
+            const backendLatMin =
+              Number((vr as any).latencyMinutes ?? (vr as any).missing_minutes ?? 0) || 0;
+
+            // Monetary latency: use backend-calculated missing_lyd/latency_lyd
+            const latLyd = Number((vr as any).missing_lyd || (vr as any).latency_lyd || 0) || 0;
+            const latUsd = Number((vr as any).missing_usd || (vr as any).latency_usd || 0) || 0;
+
+            const latHours = Math.floor(backendLatMin / 60);
+            const latMins = Math.floor(backendLatMin % 60);
+
+            // Absence DAYS: use backend absence_days so that day count
+            // matches absence_lyd exactly (A, UL, and 0.5 * HL semantics).
+            const absenceDays = Number((vr as any).absence_days ?? 0) || 0;
+
+            // If there is *no* absence money and *no* latency minutes, hide the block.
+            // But if there are missing minutes, still show Latency even if its money is 0.
+            if (!absenceLyd && !absenceUsd && !latLyd && !latUsd && !backendLatMin) return "";
+
+            return (
+              <Box component="span" display="flex" flexDirection="column" alignItems="flex-end" gap={0.5}>
+                {(absenceLyd || absenceUsd) ? (
+                  <Box component="span" sx={{ color: "#f60b0bc4", fontSize: 11 }}>
+                    <Box component="strong" sx={{ display: 'block', mb: 0.25 }}>
+                      {t("Absence") || "Absence"}
+                    </Box>
+                    <Box component="span" sx={{ display: 'block', fontSize: 10 }} fontWeight="bold">
+                      {absenceDays} {Math.abs(absenceDays - 1) < 0.01 ? 'day' : 'days'}
+                    </Box>
+                    <Box component="span" sx={{ color: "#65a8bf" }}>
+                      {formatMoney(absenceLyd)}
+                    </Box>
+                    {absenceUsd ? (
+                      <>
+                        {" | "}
+                        <Box component="span" sx={{ color: "#b7a27d" }}>
+                          {formatMoney(absenceUsd)}
+                        </Box>
+                      </>
+                    ) : null}
+                  </Box>
+                ) : null}
+
+                {(latLyd || latUsd) ? (
+                  <Box component="span" sx={{ color: "#8c6c33", fontSize: 11 }}>
+                    <Box component="strong" sx={{ display: 'block', mb: 0.25 }}>
+                      {t("Latency") || "Latency"}
+                    </Box>
+                    <Box component="span" sx={{ display: 'block', fontSize: 10, fontWeight: 600 }}>
+                      {latHours}h {latMins}m
+                    </Box>
+                    <Box component="span" sx={{ color: "#65a8bf" }}>
+                      {formatMoney(latLyd)}
+                    </Box>
+                    {latUsd ? (
+                      <>
+                        {" | "}
+                        <Box component="span" sx={{ color: "#b7a27d" }}>
+                          {formatMoney(latUsd)}
+                        </Box>
+                      </>
+                    ) : null}
+                  </Box>
+                ) : null}
+              </Box>
+            );
+          })()}
+        </TableCell>
+
+        {/* Gross */}
+        <TableCell align="right" sx={{ width: 120 }}>
+          {breakdown.grossLyd || breakdown.grossUsd ? (
+            <Box component="span">
+              <Box component="span" sx={{ color: "#65a8bf" }}>
+                {formatMoney(breakdown.grossLyd)}
+              </Box>
+              {breakdown.grossUsd ? (
+                <>
+                  {" | "}
+                  <Box component="span" sx={{ color: "#b7a27d" }}>
+                    {formatMoney(breakdown.grossUsd)}
+                  </Box>
+                </>
+              ) : null}
             </Box>
           ) : (
-            <>
-              <Box>
-                {(adjRows || []).length === 0 && (
-                  <Typography variant="body2" color="text.secondary">
-                    {t("No adjustments yet") || "No adjustments yet"}
-                  </Typography>
-                )}
-                {(adjRows || []).map((r, idx) => {
-                  const opt = adjTypeOptions.find((o) => o.value === r.type);
-                  const label = opt?.label || r.type;
-                  const amt = Number(r.amount || 0).toFixed(2);
-                  const dateStr = r.ts ? dayjs(r.ts).format("YYYY-MM-DD HH:mm") : "";
-                  return (
-                    <Box
-                      key={idx}
-                      display="flex"
-                      justifyContent="space-between"
-                      alignItems="flex-start"
-                      sx={{ py: 0.5, borderBottom: '1px dashed', borderColor: 'divider' }}
-                    >
-                      <Box>
-                        <Typography variant="body2" sx={{ fontWeight: 600 }}>
-                          {label}
-                        </Typography>
-                        {r.note && (
-                          <Typography variant="body2" color="text.secondary">
-                            {r.note}
-                          </Typography>
-                        )}
-                        {dateStr && (
-                          <Typography variant="caption" color="text.secondary">
-                            {dateStr}
-                          </Typography>
-                        )}
-                      </Box>
-                      <Typography variant="body2" sx={{ fontWeight: 600 }}>
-                        {r.currency} {amt}
-                      </Typography>
-                    </Box>
-                  );
-                })}
-                {Object.keys(adjTypeTotals).length > 0 && (
-                  <Box mt={1.5} p={1} sx={{ borderRadius: 1, border: '1px solid', borderColor: 'divider', bgcolor: 'background.default' }}>
-                    <Typography variant="subtitle2" gutterBottom>
-                      {t('Totals this month') || 'Totals this month'}
-                    </Typography>
-                    {Object.entries(adjTypeTotals).map(([type, totals]) => {
-                      const opt = adjTypeOptions.find((o) => o.value === type);
-                      const label = opt?.label || type;
-                      const parts: string[] = [];
-                      if (totals.lyd) parts.push(`${totals.lyd.toFixed(2)} LYD`);
-                      if (totals.usd) parts.push(`${totals.usd.toFixed(2)} USD`);
-                      if (parts.length === 0) return null;
+            ""
+          )}
+        </TableCell>
+
+        {/* Net */}
+        <TableCell align="right" sx={{ width: 120 }}>
+          {netLydVal || netUsdVal ? (
+            <Box component="span">
+              <Box component="span" sx={{ color: "#65a8bf" }}>
+                {formatMoney(netLydVal)}
+              </Box>
+              {netUsdVal ? (
+                <>
+                  {" | "}
+                  <Box component="span" sx={{ color: "#b7a27d" }}>
+                    {formatMoney(netUsdVal)}
+                  </Box>
+                </>
+              ) : null}
+            </Box>
+          ) : (
+            ""
+          )}
+        </TableCell>
+
+        {/* Actions */}
+        <TableCell align="right" sx={{ width: 220, position: "sticky", right: 0, zIndex: 2, bgcolor: "background.paper" }}>
+          <Box display="flex" flexDirection="row" gap={1} alignItems="center" justifyContent="flex-end">
+            {savingRows[e.id_emp] && <CircularProgress size={14} />}
+            <Button
+              size="small"
+              variant="outlined"
+              startIcon={<PictureAsPdfOutlinedIcon fontSize="small" />}
+              onClick={() => exportPdfClient(e)}
+            >
+              {t("Payslip") || "Payslip"}
+            </Button>
+            <Button
+              size="small"
+              variant="contained"
+              startIcon={<SendOutlinedIcon fontSize="small" />}
+              onClick={() => sendPayslipEmailClient(e)}
+            >
+              {t("Send") || "Send"}
+            </Button>
+          </Box>
+        </TableCell>
+      </TableRow>
+    );
+  })}
+
+                {/* Totals row */}
+                <TableRow>
+                  <TableCell sx={{ position: "sticky", left: 0, zIndex: 3, bgcolor: "background.paper" }}>
+                    <strong style={{ fontSize: 16 }}>{t("Totals") || "Totals"}</strong>
+                  </TableCell>
+
+                  {cols.baseSalary && (
+                    <TableCell align="right">
+                      <strong>
+                        <Box component="span">
+                          <Box component="span" sx={{ color: "#65a8bf" }}>
+                            {formatMoney(totals.baseSalary)}
+                          </Box>
+                          {totals.baseSalaryUsd ? (
+                            <>
+                              {" | "}
+                              <Box component="span" sx={{ color: "#b7a27d" }}>
+                                {formatMoney(totals.baseSalaryUsd)}
+                              </Box>
+                            </>
+                          ) : null}
+                        </Box>
+                      </strong>
+                    </TableCell>
+                  )}
+
+                  {cols.p && (
+                    <TableCell align="right">
+                      <strong>
+                        <Box component="span">
+                          <Box component="span" sx={{ color: "#65a8bf" }}>
+                            {formatMoney(totals.pLyd)}
+                          </Box>
+                          {totals.pUsd ? (
+                            <>
+                              {" | "}
+                              <Box component="span" sx={{ color: "#b7a27d" }}>
+                                {formatMoney(totals.pUsd)}
+                              </Box>
+                            </>
+                          ) : null}
+                        </Box>
+                      </strong>
+                    </TableCell>
+                  )}
+
+                  {cols.ph && (
+                    <TableCell align="right">
+                      <strong>
+                        <Box component="span">
+                          <Box component="span" sx={{ color: "#65a8bf" }}>
+                            {formatMoney(totals.phLyd)}
+                          </Box>
+                          {totals.phUsd ? (
+                            <>
+                              {" | "}
+                              <Box component="span" sx={{ color: "#b7a27d" }}>
+                                {formatMoney(totals.phUsd)}
+                              </Box>
+                            </>
+                          ) : null}
+                        </Box>
+                      </strong>
+                    </TableCell>
+                  )}
+
+                  {cols.phf && (
+                    <TableCell align="right">
+                      <strong>
+                        <Box component="span">
+                          <Box component="span" sx={{ color: "#65a8bf" }}>
+                            {formatMoney(totals.phfLyd)}
+                          </Box>
+                          {totals.phfUsd ? (
+                            <>
+                              {" | "}
+                              <Box component="span" sx={{ color: "#b7a27d" }}>
+                                {formatMoney(totals.phfUsd)}
+                              </Box>
+                            </>
+                          ) : null}
+                        </Box>
+                      </strong>
+                    </TableCell>
+                  )}
+
+                  {cols.food && (
+                    <TableCell align="right">
+                      <strong>{formatMoney(totals.food)}</strong>
+                    </TableCell>
+                  )}
+
+                  {cols.fuel && (
+                    <TableCell align="right">
+                      <strong>{formatMoney(totals.fuel)}</strong>
+                    </TableCell>
+                  )}
+
+                  {cols.comm && (
+                    <TableCell align="right">
+                      <strong>{formatMoney(totals.comm)}</strong>
+                    </TableCell>
+                  )}
+
+                  {cols.gold && (
+                    <TableCell align="right">
+                      <strong>
+                        <Box component="span">
+                          {totalsGold.grams > 0 ? (
+                            <>
+                              <Box component="span" sx={{ fontWeight: 700 }}>
+                                {totalsGold.grams.toLocaleString(undefined, { maximumFractionDigits: 2 })} g
+                              </Box>
+                              {"  "}
+                            </>
+                          ) : null}
+                          <Box component="span" sx={{ color: "#65a8bf" }}>
+                            {formatMoney(totalsGold.lyd)}
+                          </Box>
+                        </Box>
+                      </strong>
+                    </TableCell>
+                  )}
+
+                  {cols.diamond && (
+                    <TableCell align="right">
+                      <strong>
+                        <Box component="span">
+                          {totalsDiamond.grams > 0 ? (
+                            <>
+                              <Box component="span" sx={{ fontWeight: 700 }}>
+                                {totalsDiamond.grams.toLocaleString(undefined, { maximumFractionDigits: 2 })} g
+                              </Box>
+                              {"  "}
+                            </>
+                          ) : null}
+                          <Box component="span" sx={{ color: "#65a8bf" }}>
+                            {formatMoney(totalsDiamond.lyd)}
+                          </Box>
+                        </Box>
+                      </strong>
+                    </TableCell>
+                  )}
+
+                  {cols.watchComm && <TableCell align="right" />}
+
+                  {cols.advances && (
+                    <TableCell align="right">
+                      {(() => {
+                        const sum = (displayedRows || []).reduce((acc, e) => {
+                          const a = e.components?.adjustments || ({} as any);
+                          const advFromState = Number(advMap[e.id_emp] || 0);
+                          const advLocal = Number(a.advance || 0);
+                          const adv = advFromState || advLocal;
+                          const v = adv ? -Math.abs(adv) : 0;
+                          return acc + v;
+                        }, 0);
+
+                        return (
+                          <Box component="strong" sx={{ color: sum < 0 ? "error.main" : undefined }}>
+                            {formatMoney(sum)}
+                          </Box>
+                        );
+                      })()}
+                    </TableCell>
+                  )}
+
+                  {cols.loans && (
+                    <TableCell align="right">
+                      {(() => {
+                        let totalRemaining = 0;
+                        let totalThisMonth = 0;
+
+                        (displayedRows || []).forEach((e) => {
+                          const vr =
+                            (v2Rows || []).find((x: any) => Number(x.id_emp) === Number(e.id_emp)) || ({} as any);
+                          totalRemaining += Number((vr as any).remaining || (vr as any).principal || 0);
+                          totalThisMonth += Number((vr as any).loan_credit_lyd || 0);
+                        });
+
+                        const totalThisMonthNeg = totalThisMonth ? -Math.abs(totalThisMonth) : 0;
+
+                        return (
+                          <Box display="flex" flexDirection="column" alignItems="flex-end" component="strong">
+                            <Box component="span" sx={{ color: totalThisMonthNeg < 0 ? "error.main" : undefined }}>
+                              {formatMoney(totalThisMonthNeg)}
+                            </Box>
+                            <Box component="span">{formatMoney(totalRemaining)}</Box>
+                          </Box>
+                        );
+                      })()}
+                    </TableCell>
+                  )}
+
+                  {/* Adjustments */}
+                  <TableCell align="right">
+                    {(() => {
+                      const adj = totals.adj || 0;
+                      if (!adj) return "";
+                      const color = adj > 0 ? "success.main" : "error.main";
                       return (
-                        <Box key={type} display="flex" justifyContent="space-between" sx={{ py: 0.25 }}>
-                          <Typography variant="body2">{label}</Typography>
-                          <Typography variant="body2" sx={{ fontWeight: 600 }}>
-                            {parts.join('  |  ')}
-                          </Typography>
+                        <Box component="strong" sx={{ color }}>
+                          {formatMoney(adj)}
                         </Box>
                       );
-                    })}
+                    })()}
+                  </TableCell>
+
+                  {/* In the totals row, update the absence/latency cell */}
+                  <TableCell align="right">
+                    <Box component="span" display="flex" flexDirection="column" alignItems="flex-end">
+                      {/* Absence total */}
+                      <Box component="span">
+                        <strong>
+                          <Box component="span" sx={{ color: "#65a8bf" }}>
+                            {formatMoney(totals.absenceLyd)}
+                          </Box>
+                          {totals.absenceUsd ? (
+                            <>
+                              {" | "}
+                              <Box component="span" sx={{ color: "#b7a27d" }}>
+                                {formatMoney(totals.absenceUsd)}
+                              </Box>
+                            </>
+                          ) : null}
+                        </strong>
+                        <Typography variant="caption" component="span" sx={{ display: "block", color: "text.secondary" }}>
+                          {t("Absence") || "Absence"}
+                        </Typography>
+                      </Box>
+                      
+                      {/* Latency total */}
+                      <Box component="span" sx={{ mt: 1 }}>
+                        <strong>
+                          <Box component="span" sx={{ color: "#65a8bf" }}>
+                            {formatMoney(totals.latencyLyd)}
+                          </Box>
+                          {totals.latencyUsd ? (
+                            <>
+                              {" | "}
+                              <Box component="span" sx={{ color: "#b7a27d" }}>
+                                {formatMoney(totals.latencyUsd)}
+                              </Box>
+                            </>
+                          ) : null}
+                        </strong>
+                        <Typography variant="caption" component="span" sx={{ display: "block", color: "text.secondary" }}>
+                          {t("Latency") || "Latency"} ({Math.floor(totals.latencyMinutes / 60)}h {Math.floor(totals.latencyMinutes % 60)}m)
+                        </Typography>
+                      </Box>
+                    </Box>
+                  </TableCell>
+
+                  <TableCell align="right">
+                    <strong>
+                      <Box component="span">
+                        <Box component="span" sx={{ color: "#65a8bf" }}>
+                          {formatMoney(totals.grossLyd)}
+                        </Box>
+                        {totals.grossUsd ? (
+                          <>
+                            {" | "}
+                            <Box component="span" sx={{ color: "#b7a27d" }}>
+                              {formatMoney(totals.grossUsd)}
+                            </Box>
+                          </>
+                        ) : null}
+                      </Box>
+                    </strong>
+                  </TableCell>
+
+                  <TableCell align="right">
+                    <strong>
+                      <Box component="span">
+                        <Box component="span" sx={{ color: "#65a8bf" }}>
+                          {formatMoney(totals.totalLyd)}
+                        </Box>
+                        {totals.totalUsd ? (
+                          <>
+                            {" | "}
+                            <Box component="span" sx={{ color: "#b7a27d" }}>
+                              {formatMoney(totals.totalUsd)}
+                            </Box>
+                          </>
+                        ) : null}
+                      </Box>
+                    </strong>
+                  </TableCell>
+
+                  <TableCell
+                    align="right"
+                    sx={{ position: "sticky", right: 0, zIndex: 3, bgcolor: "background.paper" }}
+                  >
+                    —
+                  </TableCell>
+                </TableRow>
+                </TableBody>
+                </Table>
+                </TableContainer>
+                </CardContent>
+                </Card>
+                )}
+
+                <Menu
+                  anchorEl={colsAnchor}
+                  open={Boolean(colsAnchor)}
+                  onClose={() => setColsAnchor(null)}
+                  anchorOrigin={{ vertical: "bottom", horizontal: "right" }}
+                  transformOrigin={{ vertical: "top", horizontal: "right" }}
+                >
+                  <Box px={1} py={0.5} display="grid" gridTemplateColumns="repeat(2, 1fr)" gap={0.5}>
+                    {(
+                      [
+                        ["holidayWorked", "Holiday Worked"],
+                        ["p", "P (LYD|USD)"],
+                        ["ph", "PH (LYD|USD)"],
+                        ["phf", "PHF (LYD|USD)"],
+                        ["baseSalary", "Base"],
+                        ["food", "Food"],
+                        ["fuel", "Fuel"],
+                        ["comm", "Communication"],
+                        ["advances", "S. Adv"],
+                        ["loans", "Loans"],
+                        ["salesQty", "Sales Qty"],
+                        ["salesTotal", "Sales Total"],
+                        ["gold", "Gold Bonus"],
+                        ["diamond", "Diamond Bonus"],
+                        ["watchComm", "Watch Comm"],
+                        ["totalUsd", "Total USD"],
+                      ] as Array<[keyof typeof cols, string]>
+                    ).map(([k, label]) => (
+                      <FormControlLabel
+                        key={String(k)}
+                        control={
+                          <Checkbox
+                            size="small"
+                            checked={Boolean((cols as any)[k])}
+                            onChange={(e) => setCols((c: any) => ({ ...c, [k]: e.target.checked }))}
+                          />
+                        }
+                        label={label}
+                      />
+                    ))}
+                  </Box>
+                </Menu>
+
+                {error && (
+                  <Box mt={2}>
+                    <Typography color="error">{error}</Typography>
                   </Box>
                 )}
-              </Box>
-              <Divider sx={{ my: 1.5 }} />
-              <Box display="grid" gridTemplateColumns="repeat(4, 1fr)" gap={1}>
-                <TextField
-                  select
-                  size="small"
-                  label={t("Type") || "Type"}
-                  value={adjForm.type}
-                  onChange={(e) => {
-                    const nextType = e.target.value;
-                    setAdjForm((f) => ({
-                      ...f,
-                      type: nextType,
-                      currency: adjLydOnlyTypes.has(nextType) ? 'LYD' : f.currency,
-                    }));
+
+                <Dialog open={calOpen} onClose={() => setCalOpen(false)} fullWidth maxWidth="md">
+                  <DialogTitle>
+                    {calEmp
+                      ? `${calEmp.name} — ${String(year)}-${String(month).padStart(2, "0")}`
+                      : "Calendar"}
+                  </DialogTitle>
+                  <DialogContent>
+                    {calLoading && (
+                      <Box display="flex" alignItems="center" gap={1}>
+                        <CircularProgress size={18} />
+                        <Typography>{t("hr.timesheets.loading") || "Loading..."}</Typography>
+                      </Box>
+                    )}
+
+                    {!calLoading && calDays && (
+                      <Box>
+                        <Box sx={{ mb: 2, p: 1.5, bgcolor: "background.paper", border: "1px solid", borderColor: "divider", borderRadius: 1 }}>
+                          <Typography variant="caption" sx={{ fontWeight: 600, display: "block", mb: 0.5 }}>
+                            {t("Attendance & Leave Codes") || "Attendance & Leave Codes"}:
+                          </Typography>
+                          <Box display="flex" flexWrap="wrap" gap={1.5}>
+                            <Typography variant="caption">P: Present</Typography>
+                            <Typography variant="caption">A: Absent</Typography>
+                            <Typography variant="caption">PH: Holiday (partial)</Typography>
+                            <Typography variant="caption">PHF: Holiday (full)</Typography>
+                            <Typography variant="caption">PT: Short Hours</Typography>
+                            <Typography variant="caption">PL: Late</Typography>
+                            <Typography variant="caption" sx={{ fontWeight: 600, color: "primary.main" }}>AL: Annual Leave</Typography>
+                            <Typography variant="caption" sx={{ fontWeight: 600, color: "primary.main" }}>SL: Sick Leave</Typography>
+                            <Typography variant="caption" sx={{ fontWeight: 600, color: "primary.main" }}>EL: Emergency</Typography>
+                            <Typography variant="caption" sx={{ fontWeight: 600, color: "primary.main" }}>ML: Maternity</Typography>
+                            <Typography variant="caption" sx={{ fontWeight: 600, color: "primary.main" }}>UL: Unpaid</Typography>
+                            <Typography variant="caption" sx={{ fontWeight: 600, color: "primary.main" }}>HL: Half Day</Typography>
+                            <Typography variant="caption" sx={{ fontWeight: 600, color: "primary.main" }}>XL: Exam Leave</Typography>
+                            <Typography variant="caption" sx={{ fontWeight: 600, color: "primary.main" }}>BM: Bereavement</Typography>
+                            <Typography variant="caption" sx={{ fontWeight: 600, color: "primary.main" }}>B1: Bereavement 1</Typography>
+                            <Typography variant="caption" sx={{ fontWeight: 600, color: "primary.main" }}>B2: Bereavement 2</Typography>
+                          </Box>
+                        </Box>
+
+                        <Box display="grid" gridTemplateColumns="repeat(7, 1fr)" gap={1}>
+                          {["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"].map((d) => (
+                            <Box key={d} sx={{ fontWeight: 600, textAlign: "center" }}>
+                              {d}
+                            </Box>
+                          ))}
+
+                          {(() => {
+                            const first = dayjs(`${year}-${String(month).padStart(2, "0")}-01`);
+                            const dow = first.day();
+                            const startIdx = (dow + 6) % 7;
+                            const dim = new Date(year, month, 0).getDate();
+                            const cells: React.ReactNode[] = [];
+
+                            for (let i = 0; i < startIdx; i++) {
+                              cells.push(<Box key={`e${i}`} sx={{ p: 1, minHeight: 80, bgcolor: "#fafafa" }} />);
+                            }
+
+                            const vrForEmp =
+                              (v2Rows || []).find((x: any) => Number(x.id_emp) === Number(calEmp?.id_emp)) || {};
+
+                            const schStartMin = (() => {
+                              const s = (vrForEmp as any).T_START || (vrForEmp as any).t_start;
+                              if (!s) return null;
+                              const m = String(s).match(/(\d{1,2}):(\d{2})/);
+                              if (!m) return null;
+                              return Number(m[1]) * 60 + Number(m[2]);
+                            })();
+
+                            const schEndMin = (() => {
+                              const s = (vrForEmp as any).T_END || (vrForEmp as any).t_end;
+                              if (!s) return null;
+                              const m = String(s).match(/(\d{1,2}):(\d{2})/);
+                              if (!m) return null;
+                              return Number(m[1]) * 60 + Number(m[2]);
+                            })();
+
+                            const timeHM = (v: any): string => {
+                              if (!v) return "";
+                              const m = String(v).match(/(\d{1,2}):(\d{2})/);
+                              if (!m) return "";
+                              const hh = String(m[1]).padStart(2, '0');
+                              const mm = String(m[2]).padStart(2, '0');
+                              return `${hh}:${mm}`;
+                            };
+
+                            for (let d = 1; d <= dim; d++) {
+                              const day = calDays[d - 1];
+                              const ymd = `${year}-${String(month).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+                              const vac = (calVacations || []).find((v) => {
+                                const st = String((v as any).date_depart || '').slice(0, 10);
+                                const en = String((v as any).date_end || '').slice(0, 10);
+                                const stateLower = String((v as any).state || '').toLowerCase();
+                                const okState = stateLower === 'approved' || stateLower.includes('موافق');
+                                return okState && ymd >= st && ymd <= en;
+                              });
+                              const vacIdKey = vac && (vac as any).id_can != null ? String((vac as any).id_can) : undefined;
+                              const vacLt = vacIdKey ? leaveTypeMap[vacIdKey] : undefined;
+                              const vacCode = vac ? String(vacLt?.code || (vac as any).type || 'V').toUpperCase() : '';
+
+                              const badge0 = codeBadge(day, schStartMin, schEndMin, calEmp?.id_emp);
+                              const badge = (vacCode && (badge0 === 'A' || badge0 === '')) ? vacCode : badge0;
+                              const delta = roundedHoursWithSign(day?.deltaMin ?? null);
+                              const leaveDesc = (day as any)?.leave_description || (day as any)?.leaveDescription || "";
+
+                              const isLeave = ["AL", "SL", "EL", "ML", "UL", "HL", "BM", "XL", "B1", "B2"].includes(String(badge));
+
+                              const bg = (() => {
+                                if (badge === "AL") return "#dcf5dc";
+                                if (badge === "SL") return "#e8d4f8";
+                                if (badge === "EL") return "#ffe4b5";
+                                if (badge === "ML") return "#ffc0e0";
+                                if (badge === "UL") return "#ffe0e0";
+                                if (badge === "HL") return "#e0f0ff";
+                                if (badge === "BM") return "#d3d3d3";
+                                if (badge === "XL") return "#f0f8d0";
+                                if (badge === "B1" || badge === "B2") return "#e6ddff";
+                                if (badge === "PHF") return "#e6ffe6";
+                                if (badge === "PH") return "#fff3cd";
+                                if (badge === "PT") return "#e0f7fa";
+                                if (badge === "PL") return "#ffebee";
+                                if (badge === "A") return "#fdecea";
+                                if (badge === "P") return "#eef7ff";
+                                if (vacCode && badge === vacCode) return "rgba(156, 136, 255, 0.20)";
+                                if (badge) return "#f5f5f5";
+                                return "#fafafa";
+                              })();
+
+                              cells.push(
+                                <Box
+                                  key={`d${d}`}
+                                  sx={{
+                                    p: 1,
+                                    minHeight: 80,
+                                    bgcolor: bg,
+                                    border: "1px solid #eee",
+                                    position: "relative",
+                                  }}
+                                >
+                                  <Box display="flex" justifyContent="space-between">
+                                    <Typography variant="caption" sx={{ fontWeight: 600 }}>
+                                      {d}
+                                    </Typography>
+                                    <Typography
+                                      variant="caption"
+                                      sx={{
+                                        fontWeight: 600,
+                                        color: isLeave ? "primary.main" : "inherit",
+                                      }}
+                                    >
+                                      {badge}
+                                    </Typography>
+                                  </Box>
+
+                                  {isLeave && leaveDesc ? (
+                                    <Typography
+                                      variant="caption"
+                                      sx={{
+                                        display: "block",
+                                        fontSize: "0.65rem",
+                                        color: "text.secondary",
+                                        mt: 0.5,
+                                        fontStyle: "italic",
+                                      }}
+                                    >
+                                      {leaveDesc}
+                                    </Typography>
+                                  ) : null}
+
+                                  {day?.entry && badge === "P" ? (
+                                    <Typography variant="caption">
+                                      {String(day.entry).slice(11, 16)} →{" "}
+                                      {day?.exit ? String(day.exit).slice(11, 16) : "--:--"}
+                                    </Typography>
+                                  ) : null}
+
+                                  {delta && Number(delta.replace(/[^\d.-]/g, '')) < 0 ? (
+                                    <Typography variant="caption" sx={{ display: "block", color: "error.main" }}>
+                                      Δ {delta}
+                                    </Typography>
+                                  ) : null}
+                                </Box>
+                              );
+                            }
+
+                            return cells;
+                          })()}
+                        </Box>
+                      </Box>
+                    )}
+                  </DialogContent>
+                  <DialogActions>
+                    <Button onClick={() => setCalOpen(false)}>{t("common.close") || "Close"}</Button>
+                  </DialogActions>
+                </Dialog>
+
+                <Dialog open={sendDialogOpen} onClose={() => setSendDialogOpen(false)} fullWidth maxWidth="sm">
+                  <DialogTitle>{t("Send Payslips") || "Send Payslips"}</DialogTitle>
+                  <DialogContent dividers>
+                    <Typography variant="body2" sx={{ mb: 1 }}>
+                      {t("Select employees to send payslips to for this period.") ||
+                        "Select employees to send payslips to for this period."}
+                    </Typography>
+                    <Box sx={{ maxHeight: 360, overflow: "auto" }}>
+                      {(displayedRows || []).map((emp) => (
+                        <FormControlLabel
+                          key={emp.id_emp}
+                          control={
+                            <Checkbox
+                              size="small"
+                              checked={!!sendSelection[emp.id_emp]}
+                              onChange={(e) => {
+                                const checked = e.target.checked;
+                                setSendSelection((prev) => ({ ...prev, [emp.id_emp]: checked }));
+                              }}
+                            />
+                          }
+                          label={`${nameMap[emp.id_emp] ?? emp.name} (ID: ${emp.id_emp})`}
+                        />
+                      ))}
+                    </Box>
+                  </DialogContent>
+                  <DialogActions>
+                    <Button onClick={() => setSendDialogOpen(false)}>{t("Cancel") || "Cancel"}</Button>
+                    <Button
+                      variant="contained"
+                      onClick={async () => {
+                        const list = (displayedRows || []).filter((e) => sendSelection[e.id_emp]);
+                        if (!list.length) {
+                          alert(t("No employees selected") || "No employees selected");
+                          return;
+                        }
+                        try {
+                          for (const emp of list) {
+                            await sendPayslipEmailClient(emp);
+                          }
+                          alert(t("Payslips sent") || "Payslips sent");
+                        } catch (e: any) {
+                          alert(e?.message || "Failed to send some payslips");
+                        } finally {
+                          setSendDialogOpen(false);
+                        }
+                      }}
+                    >
+                      {t("Send") || "Send"}
+                    </Button>
+                  </DialogActions>
+                </Dialog>
+
+                <Dialog open={rowEditOpen} onClose={() => setRowEditOpen(false)} fullWidth maxWidth="sm">
+                  <DialogTitle>
+                    {t("Adjustments") || "Adjustments"} — {String(rowEdit?.name || rowEdit?.id_emp || "")}
+                  </DialogTitle>
+                  <DialogContent>
+                    <Typography variant="caption" color="text.secondary" sx={{ display: "block", mb: 1 }}>
+                      {t("Autosaves on change") || "Autosaves on change"}
+                    </Typography>
+                    <Box display="grid" gridTemplateColumns="repeat(2, 1fr)" gap={1.25}>
+                      <TextField
+                        size="small"
+                        type="number"
+                        label="Gold Bonus (LYD)"
+                        disabled={viewOnly}
+                        value={rowForm.gold_bonus_lyd ?? 0}
+                        onChange={(e) => {
+                          const v = toN(e.target.value);
+                          setRowForm((f: any) => ({ ...f, gold_bonus_lyd: v }));
+                          if (rowEdit) {
+                            applyRowForm(rowEdit.id_emp, { gold_bonus_lyd: v });
+                            queueAutoSave(rowEdit.id_emp);
+                          }
+                        }}
+                      />
+                      <TextField
+                        size="small"
+                        type="number"
+                        label="Diamond Bonus (LYD)"
+                        disabled={viewOnly}
+                        value={rowForm.diamond_bonus_lyd ?? 0}
+                        onChange={(e) => {
+                          const v = toN(e.target.value);
+                          setRowForm((f: any) => ({ ...f, diamond_bonus_lyd: v }));
+                          if (rowEdit) {
+                            applyRowForm(rowEdit.id_emp, { diamond_bonus_lyd: v });
+                            queueAutoSave(rowEdit.id_emp);
+                          }
+                        }}
+                      />
+                      <TextField
+                        size="small"
+                        type="number"
+                        label="Other Bonus 1 (LYD)"
+                        disabled={viewOnly}
+                        value={rowForm.other_bonus1_lyd ?? 0}
+                        onChange={(e) => {
+                          const v = toN(e.target.value);
+                          setRowForm((f: any) => ({ ...f, other_bonus1_lyd: v }));
+                          if (rowEdit) {
+                            applyRowForm(rowEdit.id_emp, { other_bonus1_lyd: v });
+                            queueAutoSave(rowEdit.id_emp);
+                          }
+                        }}
+                      />
+                      <TextField
+                        size="small"
+                        label="Other Bonus 1 Account"
+                        disabled={viewOnly}
+                        value={rowForm.other_bonus1_acc ?? ""}
+                        onChange={(e) => {
+                          const v = e.target.value;
+                          setRowForm((f: any) => ({ ...f, other_bonus1_acc: v }));
+                          if (rowEdit) {
+                            applyRowForm(rowEdit.id_emp, { other_bonus1_acc: v });
+                            queueAutoSave(rowEdit.id_emp);
+                          }
+                        }}
+                      />
+                      <TextField
+                        size="small"
+                        type="number"
+                        label="Other Bonus 2 (LYD)"
+                        disabled={viewOnly}
+                        value={rowForm.other_bonus2_lyd ?? 0}
+                        onChange={(e) => {
+                          const v = toN(e.target.value);
+                          setRowForm((f: any) => ({ ...f, other_bonus2_lyd: v }));
+                          if (rowEdit) {
+                            applyRowForm(rowEdit.id_emp, { other_bonus2_lyd: v });
+                            queueAutoSave(rowEdit.id_emp);
+                          }
+                        }}
+                      />
+                      <TextField
+                        size="small"
+                        label="Other Bonus 2 Account"
+                        disabled={viewOnly}
+                        value={rowForm.other_bonus2_acc ?? ""}
+                        onChange={(e) => {
+                          const v = e.target.value;
+                          setRowForm((f: any) => ({ ...f, other_bonus2_acc: v }));
+                          if (rowEdit) {
+                            applyRowForm(rowEdit.id_emp, { other_bonus2_acc: v });
+                            queueAutoSave(rowEdit.id_emp);
+                          }
+                        }}
+                      />
+                      <TextField
+                        size="small"
+                        type="number"
+                        label="Other Additions (LYD)"
+                        disabled={viewOnly}
+                        value={rowForm.other_additions_lyd ?? 0}
+                        onChange={(e) => {
+                          const v = toN(e.target.value);
+                          setRowForm((f: any) => ({ ...f, other_additions_lyd: v }));
+                          if (rowEdit) {
+                            applyRowForm(rowEdit.id_emp, { other_additions_lyd: v });
+                            queueAutoSave(rowEdit.id_emp);
+                          }
+                        }}
+                      />
+                      <TextField
+                        size="small"
+                        type="number"
+                        label="Other Deductions (LYD)"
+                        disabled={viewOnly}
+                        value={rowForm.other_deductions_lyd ?? 0}
+                        onChange={(e) => {
+                          const v = toN(e.target.value);
+                          setRowForm((f: any) => ({ ...f, other_deductions_lyd: v }));
+                          if (rowEdit) {
+                            applyRowForm(rowEdit.id_emp, { other_deductions_lyd: v });
+                            queueAutoSave(rowEdit.id_emp);
+                          }
+                        }}
+                      />
+                      <TextField
+                        size="small"
+                        type="number"
+                        label="Loan Debit (LYD)"
+                        disabled={viewOnly}
+                        value={rowForm.loan_debit_lyd ?? 0}
+                        onChange={(e) => {
+                          const v = toN(e.target.value);
+                          setRowForm((f: any) => ({ ...f, loan_debit_lyd: v }));
+                          if (rowEdit) {
+                            applyRowForm(rowEdit.id_emp, { loan_debit_lyd: v });
+                            queueAutoSave(rowEdit.id_emp);
+                          }
+                        }}
+                      />
+                      <TextField
+                        size="small"
+                        type="number"
+                        label="Loan Credit (LYD)"
+                        disabled={viewOnly}
+                        value={rowForm.loan_credit_lyd ?? 0}
+                        onChange={(e) => {
+                          const v = toN(e.target.value);
+                          setRowForm((f: any) => ({ ...f, loan_credit_lyd: v }));
+                          if (rowEdit) {
+                            applyRowForm(rowEdit.id_emp, { loan_credit_lyd: v });
+                            queueAutoSave(rowEdit.id_emp);
+                          }
+                        }}
+                      />
+                    </Box>
+                  </DialogContent>
+                  <DialogActions>
+                    <Button onClick={() => setRowEditOpen(false)}>{t("common.close") || "Close"}</Button>
+                  </DialogActions>
+                </Dialog>
+
+                <Dialog open={bdOpen} onClose={() => setBdOpen(false)} fullWidth maxWidth="sm">
+                  <DialogTitle>
+                    {bdEmp
+                      ? `${bdEmp.name} — Breakdown (${String(year)}-${String(month).padStart(2, "0")})`
+                      : "Breakdown"}
+                  </DialogTitle>
+                  <DialogContent>
+                    <Table size="small">
+                      <TableHead>
+                        <TableRow>
+                          <TableCell>Item</TableCell>
+                          {bdShowLyd && <TableCell align="right">LYD</TableCell>}
+                          {bdShowUsd && <TableCell align="right">USD</TableCell>}
+                          <TableCell>Note</TableCell>
+                        </TableRow>
+                      </TableHead>
+                      <TableBody>
+                        {bdLines.map((r, i) => (
+                          <TableRow key={i}>
+                            <TableCell>{r.label}</TableCell>
+                            {bdShowLyd && (
+                              <TableCell align="right">
+                                {r.lyd
+                                  ? r.lyd.toLocaleString(undefined, { maximumFractionDigits: 2 })
+                                  : ""}
+                              </TableCell>
+                            )}
+                            {bdShowUsd && (
+                              <TableCell align="right">
+                                {r.usd
+                                  ? r.usd.toLocaleString(undefined, { maximumFractionDigits: 2 })
+                                  : ""}
+                              </TableCell>
+                            )}
+                            <TableCell>{r.note || ""}</TableCell>
+                          </TableRow>
+                        ))}
+                      </TableBody>
+                    </Table>
+                  </DialogContent>
+                  <DialogActions>
+                    <Button onClick={() => setBdOpen(false)}>{t("common.close") || "Close"}</Button>
+                  </DialogActions>
+                </Dialog>
+
+                <Dialog
+                  open={payoffOpen}
+                  onClose={() => {
+                    setPayoffOpen(false);
+                    setPayoffAmt("");
+                    setActiveLoan(null);
                   }}
+                  fullWidth
+                  maxWidth="xs"
                 >
-                  {adjTypeOptions.map((opt) => (
-                    <MenuItem key={opt.value} value={opt.value}>
-                      {t(opt.label) || opt.label}
-                    </MenuItem>
-                  ))}
-                </TextField>
-                <TextField
-                  size="small"
-                  type="number"
-                  label={t("Amount") || "Amount"}
-                  value={adjForm.amount}
-                  onChange={(e) =>
-                    setAdjForm((f) => ({ ...f, amount: e.target.value }))
-                  }
-                  inputProps={{ step: "0.01" }}
-                />
-                <TextField
-                  select
-                  size="small"
-                  label={t("Currency") || "Currency"}
-                  value={adjForm.currency}
-                  onChange={(e) =>
-                    setAdjForm((f) => ({ ...f, currency: e.target.value }))
-                  }
-                  disabled={adjLydOnlyTypes.has(adjForm.type)}
-                >
-                  {["LYD", "USD"].map((x) => (
-                    <MenuItem key={x} value={x}>
-                      {x}
-                    </MenuItem>
-                  ))}
-                </TextField>
-                <TextField
-                  size="small"
-                  label={t("Note") || "Note"}
-                  value={adjForm.note}
-                  onChange={(e) =>
-                    setAdjForm((f) => ({ ...f, note: e.target.value }))
-                  }
-                />
-              </Box>
-              <Box mt={1} display="flex" justifyContent="flex-end">
-                <Button
-                  onClick={addAdjustment}
-                  variant="contained"
-                  disabled={adjLoading}
-                >
-                  {t("common.add") || "Add"}
-                </Button>
-              </Box>
-            </>
-          )}
-        </DialogContent>
-        <DialogActions>
-          <Button onClick={() => setAdjOpen(false)} disabled={adjLoading}>
-            {t("common.close") || "Close"}
-          </Button>
-        </DialogActions>
-      </Dialog>
-    </Box>
-  );
-}
+                  <DialogTitle>{t("Payoff loan") || "Payoff loan"}</DialogTitle>
+                  <DialogContent>
+                    <Typography variant="body2" sx={{ mb: 1 }}>
+                      {t("Enter an amount to make a partial payoff, or leave blank to payoff the remaining balance.") ||
+                        "Enter an amount to make a partial payoff, or leave blank to payoff the remaining balance."}
+                    </Typography>
+                    <TextField
+                      fullWidth
+                      size="small"
+                      type="number"
+                      label={t("LYD") || "LYD"}
+                      placeholder={t("Leave blank for full payoff") || "Leave blank for full payoff"}
+                      value={payoffAmt}
+                      onChange={(e) => setPayoffAmt(e.target.value)}
+                      inputProps={{ step: "0.01" }}
+                    />
+                  </DialogContent>
+                  <DialogActions>
+                    <Button
+                      onClick={() => {
+                        setPayoffOpen(false);
+                        setPayoffAmt("");
+                        setActiveLoan(null);
+                      }}
+                    >
+                      {t("common.cancel") || "Cancel"}
+                    </Button>
+                    <Button
+                      variant="contained"
+                      onClick={async () => {
+                        if (!adjEmpId || !activeLoan) {
+                          setPayoffOpen(false);
+                          return;
+                        }
+                        try {
+                          const body: any = { loanId: activeLoan.id, employeeId: adjEmpId };
+                          const amt = Number(payoffAmt);
+                          if (!isNaN(amt) && payoffAmt !== "") body.amount = amt;
+                          await payoffV2Loan(body);
+                          const js = await listV2Loans(adjEmpId);
+                          setLoanRows(js?.rows || []);
+                          alert(t("Payoff recorded") || "Payoff recorded");
+                        } catch (e: any) {
+                          alert(e?.message || "Failed");
+                        } finally {
+                          setPayoffOpen(false);
+                          setPayoffAmt("");
+                          setActiveLoan(null);
+                        }
+                      }}
+                    >
+                      {t("Confirm") || "Confirm"}
+                    </Button>
+                  </DialogActions>
+                </Dialog>
+
+                <Dialog open={adjOpen} onClose={() => setAdjOpen(false)} fullWidth maxWidth="sm">
+                  <DialogTitle>{t("Adjustments") || "Adjustments"}</DialogTitle>
+                  <DialogContent>
+                    {adjLoading ? (
+                      <Box display="flex" alignItems="center" gap={1}>
+                        <CircularProgress size={18} />
+                        <Typography>{t("common.loading") || "Loading..."}</Typography>
+                      </Box>
+                    ) : (
+                      <>
+                        <Box>
+                          {(adjRows || []).length === 0 && (
+                            <Typography variant="body2" color="text.secondary">
+                              {t("No adjustments yet") || "No adjustments yet"}
+                            </Typography>
+                          )}
+
+                          {(adjRows || []).map((r, idx) => {
+                            const opt = adjTypeOptions.find((o) => o.value === r.type);
+                            const label = opt?.label || r.type;
+                            const amt = Number(r.amount || 0).toFixed(2);
+                            const dateStr = r.ts ? dayjs(r.ts).format("YYYY-MM-DD HH:mm") : "";
+                            return (
+                              <Box
+                                key={idx}
+                                display="flex"
+                                justifyContent="space-between"
+                                alignItems="flex-start"
+                                sx={{ py: 0.5, borderBottom: "1px dashed", borderColor: "divider" }}
+                              >
+                                <Box>
+                                  <Typography variant="body2" sx={{ fontWeight: 600 }}>
+                                    {label}
+                                  </Typography>
+                                  {r.note ? (
+                                    <Typography variant="body2" color="text.secondary">
+                                      {r.note}
+                                    </Typography>
+                                  ) : null}
+                                  {dateStr ? (
+                                    <Typography variant="caption" color="text.secondary">
+                                      {dateStr}
+                                    </Typography>
+                                  ) : null}
+                                </Box>
+                                <Typography variant="body2" sx={{ fontWeight: 600 }}>
+                                  {r.currency} {amt}
+                                </Typography>
+                              </Box>
+                            );
+                          })}
+
+                          {Object.keys(adjTypeTotals).length > 0 ? (
+                            <Box
+                              mt={1.5}
+                              p={1}
+                              sx={{ borderRadius: 1, border: "1px solid", borderColor: "divider", bgcolor: "background.default" }}
+                            >
+                              <Typography variant="subtitle2" gutterBottom>
+                                {t("Totals this month") || "Totals this month"}
+                              </Typography>
+                              {Object.entries(adjTypeTotals).map(([type, totals]) => {
+                                const opt = adjTypeOptions.find((o) => o.value === type);
+                                const label = opt?.label || type;
+                                const parts: string[] = [];
+                                if (totals.lyd) parts.push(`${totals.lyd.toFixed(2)} LYD`);
+                                if (totals.usd) parts.push(`${totals.usd.toFixed(2)} USD`);
+                                if (!parts.length) return null;
+                                return (
+                                  <Box key={type} display="flex" justifyContent="space-between" sx={{ py: 0.25 }}>
+                                    <Typography variant="body2">{label}</Typography>
+                                    <Typography variant="body2" sx={{ fontWeight: 600 }}>
+                                      {parts.join("  |  ")}
+                                    </Typography>
+                                  </Box>
+                                );
+                              })}
+                            </Box>
+                          ) : null}
+                        </Box>
+
+                        <Divider sx={{ my: 1.5 }} />
+
+                        <Box display="grid" gridTemplateColumns="repeat(4, 1fr)" gap={1}>
+                          <TextField
+                            select
+                            size="small"
+                            label={t("Type") || "Type"}
+                            value={adjForm.type}
+                            onChange={(e) => {
+                              const nextType = e.target.value;
+                              setAdjForm((f) => ({
+                                ...f,
+                                type: nextType,
+                                currency: adjLydOnlyTypes.has(nextType) ? "LYD" : f.currency,
+                              }));
+                            }}
+                          >
+                            {adjTypeOptions.map((opt) => (
+                              <MenuItem key={opt.value} value={opt.value}>
+                                {t(opt.label) || opt.label}
+                              </MenuItem>
+                            ))}
+                          </TextField>
+
+                          <TextField
+                            size="small"
+                            type="number"
+                            label={t("Amount") || "Amount"}
+                            value={adjForm.amount}
+                            onChange={(e) => setAdjForm((f) => ({ ...f, amount: e.target.value }))}
+                            inputProps={{ step: "0.01" }}
+                          />
+
+                          <TextField
+                            select
+                            size="small"
+                            label={t("Currency") || "Currency"}
+                            value={adjForm.currency}
+                            onChange={(e) => setAdjForm((f) => ({ ...f, currency: e.target.value }))}
+                            disabled={adjLydOnlyTypes.has(adjForm.type)}
+                          >
+                            {["LYD", "USD"].map((x) => (
+                              <MenuItem key={x} value={x}>
+                                {x}
+                              </MenuItem>
+                            ))}
+                          </TextField>
+
+                          <TextField
+                            size="small"
+                            label={t("Note") || "Note"}
+                            value={adjForm.note}
+                            onChange={(e) => setAdjForm((f) => ({ ...f, note: e.target.value }))}
+                          />
+                        </Box>
+
+                        <Box mt={1} display="flex" justifyContent="flex-end">
+                          <Button onClick={addAdjustment} variant="contained" disabled={adjLoading}>
+                            {t("common.add") || "Add"}
+                          </Button>
+                        </Box>
+                      </>
+                    )}
+                  </DialogContent>
+                  <DialogActions>
+                    <Button onClick={() => setAdjOpen(false)} disabled={adjLoading}>
+                      {t("common.close") || "Close"}
+                    </Button>
+                  </DialogActions>
+                </Dialog>
+                </Box>
+                  );
+                }

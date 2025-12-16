@@ -133,7 +133,6 @@ export default {
   addNew: 'Add New',
   createNew: 'Create New',
   update: 'Update',
-  delete: 'Delete',
   viewDetails: 'View Details',
   download: 'Download',
   upload: 'Upload',

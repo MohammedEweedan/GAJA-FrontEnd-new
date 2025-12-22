@@ -13,9 +13,27 @@ const LanguageContext = createContext<LanguageContextType | undefined>(undefined
 
 export const LanguageProvider: React.FC<{ children: ReactNode }> = ({ children }) => {
   const { i18n } = useTranslation();
-  const [language, setLanguage] = useState<string>(i18n.language);
+  const [language, setLanguage] = useState<string>(() => {
+    try {
+      const saved = localStorage.getItem('i18nextLng') || localStorage.getItem('lang');
+      if (saved) return String(saved).split('-')[0];
+    } catch {}
+    return String(i18n.language || 'en').split('-')[0];
+  });
   const [direction, setDirection] = useState<'ltr' | 'rtl'>('ltr');
   const isRTL = direction === 'rtl';
+
+  // Ensure i18n instance starts on the hydrated language
+  useEffect(() => {
+    const desired = String(language || 'en').split('-')[0];
+    const current = String(i18n.language || 'en').split('-')[0];
+    if (desired && desired !== current) {
+      try {
+        i18n.changeLanguage(desired);
+      } catch {}
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Update document direction and language when language changes
   useEffect(() => {
@@ -26,6 +44,7 @@ export const LanguageProvider: React.FC<{ children: ReactNode }> = ({ children }
     
     // Save language preference
     localStorage.setItem('i18nextLng', language);
+    localStorage.setItem('lang', language);
   }, [language]);
 
   const changeLanguage = (lng: string) => {

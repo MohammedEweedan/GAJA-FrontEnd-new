@@ -2,23 +2,13 @@
 import React, { useState, useEffect, useCallback, useRef } from "react";
 import GroupDialog from "./GroupDialog";
 import GroupIcon from "@mui/icons-material/Group";
-import DeleteOutlineIcon from "@mui/icons-material/DeleteOutline";
-import EditOutlinedIcon from "@mui/icons-material/EditOutlined";
-import CardGiftcardOutlinedIcon from "@mui/icons-material/CardGiftcardOutlined";
-import ViewModuleOutlinedIcon from "@mui/icons-material/ViewModuleOutlined";
-import AddOutlinedIcon from "@mui/icons-material/AddOutlined";
-import RemoveOutlinedIcon from "@mui/icons-material/RemoveOutlined";
 import axios from "../../../api";
 
 import IconButton from "@mui/material/IconButton";
 import { useNavigate } from "react-router-dom";
-import { Box, Button, Typography, TextField, MenuItem, Menu } from "@mui/material";
-import Switch from "@mui/material/Switch";
-import FormControlLabel from "@mui/material/FormControlLabel";
-import Collapse from "@mui/material/Collapse";
+import { Box, Button, Typography, TextField, MenuItem } from "@mui/material";
 import Chip from "@mui/material/Chip";
 import CircularProgress from "@mui/material/CircularProgress";
-import Divider from "@mui/material/Divider";
 
 import {
   Dialog,
@@ -31,7 +21,6 @@ import Snackbar from "@mui/material/Snackbar";
 import MuiAlert from "@mui/material/Alert";
 import InvoiceTotalsDialog from "./InvoiceTotalsDialog";
 import PrintInvoiceDialog from "./PrintInvoiceDialog"; // Import the PrintInvoiceDialog component
-import { hasRole } from "../../../Setup/getUserInfo";
 
 type Invoice = {
   id_fact: number;
@@ -812,19 +801,21 @@ const DNew_I = () => {
     ps = localStorage.getItem("ps");
     Cuser = localStorage.getItem("Cuser");
   }
-  // Determine admin status using the same role logic as Profile/Home.tsx
-  const isAdmin = (() => {
-    try {
-      if (hasRole("admin") || hasRole("ADMIN") || hasRole("Admin")) return true;
-      const raw = localStorage.getItem("user");
-      if (!raw) return false;
-      const u = JSON.parse(raw);
-      const type = String(u?.TYPE_USER ?? u?.type_user ?? u?.type ?? u?.role ?? "").toLowerCase();
-      return type === "admin";
-    } catch {
-      return false;
-    }
-  })();
+  // Determine admin status from stored user object (common property names)
+  let isAdmin = false;
+  try {
+    const u = userStr ? JSON.parse(userStr as string) : {};
+    isAdmin = !!(
+      u?.type === "admin" ||
+      u?.role === "admin" ||
+      u?.TYPE_USER === "admin" ||
+      u?.type_user === "admin" ||
+      u?.isAdmin === true ||
+      u?.role_id === "admin"
+    );
+  } catch {
+    isAdmin = false;
+  }
   const [data, setData] = useState<InventoryItem[]>([]);
 
   const [Sm, setSm] = useState<Sm[]>([]);
@@ -857,20 +848,6 @@ const DNew_I = () => {
 
   const [datainv, setDatainv] = useState<Invoice[]>([]);
 
-  const [issuedInvoicesOpen, setIssuedInvoicesOpen] = useState(false);
-  const [issuedInvoicesLoading, setIssuedInvoicesLoading] = useState(false);
-  const [issuedInvoices, setIssuedInvoices] = useState<Invoice[]>([]);
-  const [issuedDeleteConfirm, setIssuedDeleteConfirm] = useState<{ open: boolean; numFact: number | null }>({
-    open: false,
-    numFact: null,
-  });
-  const [issuedDeleteLoading, setIssuedDeleteLoading] = useState(false);
-  const [issuedReissueConfirm, setIssuedReissueConfirm] = useState<{ open: boolean; numFact: number | null }>({
-    open: false,
-    numFact: null,
-  });
-  const [issuedReissueLoading, setIssuedReissueLoading] = useState(false);
-
   const [emptyCartConfirmOpen, setEmptyCartConfirmOpen] = useState(false);
   const [emptyCartLoading, setEmptyCartLoading] = useState(false);
 
@@ -887,7 +864,6 @@ const DNew_I = () => {
   const [costMax, setCostMax] = useState<string>("");
   // Sidebar collapse state
   const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(false);
-  const [filtersExpanded, setFiltersExpanded] = useState<boolean>(true);
   // Brand filter state
   const [brandFilter, setBrandFilter] = useState<string>("");
   // General_Comment filter state
@@ -902,8 +878,6 @@ const DNew_I = () => {
   const [goldSeniority, setGoldSeniority] = useState<string>(""); // '', 'last7d','last1m','last3m','last6m','last1y','last2y','gt2y'
   const [goldWeightSort, setGoldWeightSort] = useState<string>(""); // '', 'asc', 'desc'
   const [goldTypeFilters, setGoldTypeFilters] = useState<string[]>([]); // multi-select supplier types for gold
-  // Diamond-only filters
-  const [diamondIdFilter, setDiamondIdFilter] = useState<string>("");
 
   // (Removed distinct lists; using free-text inputs for stone/color)
   // Compute distinct brands from data
@@ -1003,37 +977,16 @@ const DNew_I = () => {
     [navigate, ps, typeFilter]
   );
 
-  // Pagination + view state (must be declared before useEffects that reference them)
-  const [page, setPage] = useState(0);
-  const [rowsPerPage, setRowsPerPage] = useState(12);
-  const [gridView, setGridView] = useState<"3" | "4" | "5" | "6" | "8" | "icons">(
-    typeFilter === "gold" ? "3" : "4"
-  );
-  const [viewAnchorEl, setViewAnchorEl] = useState<null | HTMLElement>(null);
-
   useEffect(() => {
     fetchData("gold");
     fetchDataINV();
     fetchCustomers();
     fetchSms();
     // Adjust pagination defaults for gold type
-    setRowsPerPage(12);
+    setRowsPerPage(10);
     // Intentionally not listing fetchCustomers/fetchSms/fetchDataINV since they are stable within this module
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-
-  useEffect(() => {
-    if (gridView === "icons") {
-      setRowsPerPage(24);
-      setPage(0);
-      return;
-    }
-
-    if (gridView === "3" || gridView === "4" || gridView === "5" || gridView === "6" || gridView === "8") {
-      setRowsPerPage(12);
-      setPage(0);
-    }
-  }, [gridView]);
 
   // Add state for image dialog and selected image
   const [imageDialogOpen, setImageDialogOpen] = useState(false);
@@ -1041,12 +994,6 @@ const DNew_I = () => {
   // New state for dialog image navigation
   const [dialogImageList, setDialogImageList] = useState<string[]>([]);
   const [dialogImageIndex, setDialogImageIndex] = useState(0);
-  const [dialogZoom, setDialogZoom] = useState(1);
-  const [dialogItem, setDialogItem] = useState<InventoryItem | null>(null);
-
-  useEffect(() => {
-    if (imageDialogOpen) setDialogZoom(1);
-  }, [imageDialogOpen]);
 
   // Charges dialog (admin only)
   const [chargesDialogOpen, setChargesDialogOpen] = useState(false);
@@ -1092,26 +1039,18 @@ const DNew_I = () => {
       setDialogImageList(urls);
       setDialogImageIndex(pickPreferredImageIndex(urls));
     }
-    setDialogItem(row);
     setImageDialogOpen(true);
   };
+
+  // Pagination state
+  const [page, setPage] = useState(0);
+  const [rowsPerPage, setRowsPerPage] = useState(3);
 
   // Add search state
   const [search, setSearch] = useState("");
 
   // Filtered data based on search (matches all fields) and cost range
   const filteredData = data.filter((row) => {
-    // Hide items that are already present in the current cart
-    const isAlreadyInCart = datainv.some((inv) => {
-      if (inv.id_art === row.id_fact) return true;
-      const achat = inv.ACHATs?.[0];
-      // Fallbacks: sometimes the inventory id might live under ACHATs
-      if (achat && (achat as any).id_fact && (achat as any).id_fact === row.id_fact) return true;
-      if (achat && (achat as any).id_art && (achat as any).id_art === row.id_fact) return true;
-      return false;
-    });
-    if (isAlreadyInCart) return false;
-
     const searchLower = search.trim().toLowerCase();
     // Cost filter logic: check top-level and nested price fields
     let cost = 0;
@@ -1172,72 +1111,31 @@ const DNew_I = () => {
     const brandOk =
       brandFilter === "" || brandValue.includes(brandFilter.toLowerCase());
 
-    // General_Comment filter logic (used mainly for diamond groups)
+    // General_Comment filter logic
     const generalCommentValue = (row.General_Comment || "").toLowerCase();
-    let generalCommentOk = true;
-    if ((typeFilter || "").toLowerCase() === "diamond") {
-      // If 'الكل' is selected, show only items with unite > 1
-      if (generalCommentFilter === "") {
-        generalCommentOk = true;
-      } else if (generalCommentFilter === "الكل") {
-        // Check if Unite contains more than one item (comma-separated inside curly braces)
-        if (
-          typeof row.Unite === "string" &&
-          row.Unite.startsWith("{") &&
-          row.Unite.endsWith("}")
-        ) {
-          const items = row.Unite.slice(1, -1)
-            .split(",")
-            .map((s) => s.trim())
-            .filter(Boolean);
-          generalCommentOk = items.length > 1;
-        } else {
-          generalCommentOk = false;
-        }
-      } else {
-        generalCommentOk = generalCommentValue.includes(
-          generalCommentFilter.toLowerCase()
-        );
-      }
-    }
-
-    // Diamond-specific ID/group filter
-    let diamondExtraOk = true;
-    if ((typeFilter || "").toLowerCase() === "diamond" && diamondIdFilter.trim() !== "") {
-      const targetRaw = diamondIdFilter.trim();
-      const targetNum = Number(targetRaw);
-
-      const matchesIdFact = Number(row.id_fact) === targetNum;
-      const matchesIdArt = Number((row as any).id_art) === targetNum;
-
-      let matchesUnite = false;
+    // If 'الكل' is selected, show only items with unite > 1
+    let generalCommentOk = false;
+    if (generalCommentFilter === "") {
+      generalCommentOk = true;
+    } else if (generalCommentFilter === "الكل") {
+      // Check if Unite contains more than one item (comma-separated inside curly braces)
       if (
-        typeof (row as any).Unite === "string" &&
-        (row as any).Unite.startsWith("{") &&
-        (row as any).Unite.endsWith("}")
+        typeof row.Unite === "string" &&
+        row.Unite.startsWith("{") &&
+        row.Unite.endsWith("}")
       ) {
-        const ids = (row as any).Unite.slice(1, -1)
+        const items = row.Unite.slice(1, -1)
           .split(",")
-          .map((s: string) => s.trim())
+          .map((s) => s.trim())
           .filter(Boolean);
-        matchesUnite = ids.includes(targetRaw);
+        generalCommentOk = items.length > 1;
+      } else {
+        generalCommentOk = false;
       }
-
-      let matchesDiamondAchat = false;
-      const dpAny: any = (row as any).DistributionPurchase;
-      if (Array.isArray(dpAny) && dpAny.length > 0) {
-        const diamond = dpAny[0]?.OriginalAchatDiamond;
-        if (diamond && typeof diamond.id_achat !== "undefined") {
-          matchesDiamondAchat = Number(diamond.id_achat) === targetNum;
-        }
-      } else if (dpAny && typeof dpAny === "object") {
-        const diamond = dpAny.OriginalAchatDiamond;
-        if (diamond && typeof diamond.id_achat !== "undefined") {
-          matchesDiamondAchat = Number(diamond.id_achat) === targetNum;
-        }
-      }
-
-      diamondExtraOk = matchesIdFact || matchesIdArt || matchesUnite || matchesDiamondAchat;
+    } else {
+      generalCommentOk = generalCommentValue.includes(
+        generalCommentFilter.toLowerCase()
+      );
     }
 
     // Gold-specific extra filters
@@ -1313,7 +1211,7 @@ const DNew_I = () => {
       }
     }
 
-    if (!searchLower) return typeOk && costOk && brandOk && generalCommentOk && goldOk && diamondExtraOk;
+    if (!searchLower) return typeOk && costOk && brandOk && generalCommentOk && goldOk;
     // Add to filter panel UI (JSX):
     // <TextField
     //   select
@@ -1352,8 +1250,7 @@ const DNew_I = () => {
       typeOk &&
       costOk &&
       brandOk &&
-      goldOk &&
-      diamondExtraOk
+      goldOk
     );
   });
 
@@ -1463,147 +1360,6 @@ const DNew_I = () => {
 
   const apiUrlinv = `${apiIp}/invoices`;
 
-  const fetchIssuedInvoices = async () => {
-    const token = localStorage.getItem("token");
-    if (!token) return navigate("/");
-    setIssuedInvoicesLoading(true);
-    try {
-      const res = await axios.get<Invoice[]>(`${apiUrlinv}/Getinvoice`, {
-        headers: { Authorization: `Bearer ${token}` },
-        params: {
-          ps: ps,
-          num_fact: -1,
-          usr: isAdmin ? -1 : Cuser,
-        },
-      });
-      const list = Array.isArray(res.data) ? res.data : [];
-      setIssuedInvoices(list.filter((r) => Number(r.num_fact || 0) > 0));
-    } catch (err: any) {
-      if (err.response?.status === 401) navigate("/");
-      setIssuedInvoices([]);
-    } finally {
-      setIssuedInvoicesLoading(false);
-    }
-  };
-
-  const issuedInvoiceSummaries = React.useMemo(() => {
-    const map = new Map<number, { num_fact: number; date_fact?: string; client_name?: string; itemCount: number }>();
-    for (const row of issuedInvoices) {
-      const nf = Number(row.num_fact || 0);
-      if (!nf) continue;
-      const existing = map.get(nf);
-      const next = {
-        num_fact: nf,
-        date_fact: row.date_fact,
-        client_name: (row as any)?.Client?.client_name,
-        itemCount: (existing?.itemCount || 0) + 1,
-      };
-      if (!existing) {
-        map.set(nf, next);
-      } else {
-        map.set(nf, { ...existing, ...next, itemCount: next.itemCount });
-      }
-    }
-    return Array.from(map.values()).sort((a, b) => b.num_fact - a.num_fact);
-  }, [issuedInvoices]);
-
-  const handleOpenIssuedInvoices = async () => {
-    setIssuedInvoicesOpen(true);
-    await fetchIssuedInvoices();
-  };
-
-  const handleLoadIssuedInvoice = async (numFact: number) => {
-    const token = localStorage.getItem("token");
-    if (!token) return navigate("/");
-    try {
-      const res = await axios.get<Invoice[]>(`${apiUrlinv}/Getinvoice`, {
-        headers: { Authorization: `Bearer ${token}` },
-        params: {
-          ps: ps,
-          num_fact: numFact,
-          usr: isAdmin ? -1 : Cuser,
-        },
-      });
-      const items = Array.isArray(res.data) ? res.data : [];
-      setDatainv(items);
-      setCanPrint(true);
-      setIssuedInvoicesOpen(false);
-      setPrintDialog({ open: true, invoice: items[0] || null });
-    } catch (e: any) {
-      alert(e?.response?.data?.message || "Failed to load invoice");
-    }
-  };
-
-  const handleDeleteIssuedInvoice = async (numFact: number) => {
-    const token = localStorage.getItem("token");
-    if (!token) return navigate("/");
-    setIssuedDeleteLoading(true);
-    try {
-      const res = await axios.get<Invoice[]>(`${apiUrlinv}/Getinvoice`, {
-        headers: { Authorization: `Bearer ${token}` },
-        params: {
-          ps: ps,
-          num_fact: numFact,
-          usr: isAdmin ? -1 : Cuser,
-        },
-      });
-      const items = Array.isArray(res.data) ? res.data : [];
-      for (const row of items) {
-        await axios.delete(`${apiUrlinv}/Delete/${row.id_fact}`, {
-          headers: { Authorization: `Bearer ${token}` },
-        });
-      }
-      setSnackbar({ open: true, message: `Invoice #${numFact} deleted`, severity: "success" });
-      await fetchIssuedInvoices();
-    } catch (e: any) {
-      alert(e?.response?.data?.message || "Failed to delete invoice");
-    } finally {
-      setIssuedDeleteLoading(false);
-      setIssuedDeleteConfirm({ open: false, numFact: null });
-    }
-  };
-
-  const handleReissueInvoice = async (numFact: number) => {
-    const token = localStorage.getItem("token");
-    if (!token) return navigate("/");
-    setIssuedReissueLoading(true);
-    try {
-      const res = await axios.get<Invoice[]>(`${apiUrlinv}/Getinvoice`, {
-        headers: { Authorization: `Bearer ${token}` },
-        params: {
-          ps: ps,
-          num_fact: numFact,
-          usr: isAdmin ? -1 : Cuser,
-        },
-      });
-      const items = Array.isArray(res.data) ? res.data : [];
-      if (items.length === 0) return;
-
-      for (const row of items) {
-        const invoiceData = {
-          ...row,
-          id_fact: undefined,
-          num_fact: 0,
-          usr: Cuser,
-          ps: ps,
-        } as any;
-        await axios.post(`${apiUrlinv}/Add`, invoiceData, {
-          headers: { Authorization: `Bearer ${token}` },
-        });
-      }
-
-      await fetchDataINV();
-      setCanPrint(false);
-      setIssuedInvoicesOpen(false);
-      setSnackbar({ open: true, message: `Invoice #${numFact} reissued to cart`, severity: "success" });
-    } catch (e: any) {
-      alert(e?.response?.data?.message || "Failed to reissue invoice");
-    } finally {
-      setIssuedReissueLoading(false);
-      setIssuedReissueConfirm({ open: false, numFact: null });
-    }
-  };
-
   const fetchDataINV = async () => {
     const token = localStorage.getItem("token");
     if (!token) return navigate("/");
@@ -1671,8 +1427,7 @@ const DNew_I = () => {
       const lossPct = Number(subtotal * (LossExpesenes || 0) / 100);
       const profitPct = Number(subtotal * (profitMargin || 0) / 100);
       const salesUsd = subtotal + lossPct + profitPct;
-      const fx = effectiveUsdToLyd || (lastUsdRate || 1);
-      const sales = Number(salesUsd * fx);
+      const sales = Number(salesUsd * (lastUsdRate || 1));
       if (!Number.isFinite(sales)) return null;
       return sales;
     } catch (e) {
@@ -1681,107 +1436,101 @@ const DNew_I = () => {
   };
 
   const [editInvoice, setEditInvoice] = useState<Invoice>(initialInvoiceState);
-
   const handleSave = async (item?: InventoryItem) => {
     if (!item) return;
-    // Use already-fetched rates; do not block on external APIs here
+    // ensure we have latest USD rate before computing prices
+    try {
+      await fetchLastUsdRate();
+      try { await fetchGoldSpot(); } catch { }
+    } catch { }
     setAddToCartLoading((prev: { [id: number]: boolean }) => ({
       ...prev,
       [item.id_fact]: true,
     }));
     const token = localStorage.getItem("token");
     try {
+      // Use item if provided, else use editInvoice
       let prix_vente = 0;
-      let price_per_gram: number | null = null;
-      let price_per_piece: number | null = null;
-      const type = item.Fournisseur?.TYPE_SUPPLIER?.toLowerCase() || "";
-
-      if (type.includes("diamond")) {
-        let diamond: any = undefined;
-        let dp: any = item.DistributionPurchase;
-        if (Array.isArray(dp) && dp.length > 0 && typeof dp[0] === "object") {
-          diamond = dp[0]?.OriginalAchatDiamond;
-        } else if (dp && typeof dp === "object") {
-          diamond = dp?.OriginalAchatDiamond;
-        }
-        if (diamond) {
-          if (typeof diamond.sale_price === "number")
-            prix_vente = diamond.sale_price;
-          else if (typeof diamond.SellingPrice === "number")
-            prix_vente = diamond.SellingPrice;
-          editInvoice.picint = diamond.id_achat;
-        }
-      } else if (type.includes("watch")) {
-        let watch: any = undefined;
-        let dp: any = item.DistributionPurchase;
-        if (Array.isArray(dp) && dp.length > 0 && typeof dp[0] === "object") {
-          watch = dp[0]?.OriginalAchatWatch;
-        } else if (dp && typeof dp === "object") {
-          watch = dp?.OriginalAchatWatch;
-        }
-        if (watch) {
-          if (typeof watch.sale_price === "number")
-            prix_vente = watch.sale_price;
-          else if (typeof watch.SellingPrice === "number")
-            prix_vente = watch.SellingPrice;
-          editInvoice.picint = watch.id_achat;
-        }
-      } else if (type.includes("gold")) {
-        const salesPrice = computeGoldSalesPrice(item);
-        if (salesPrice !== null) {
-          prix_vente = salesPrice;
+      if (item) {
+        const type = item.Fournisseur?.TYPE_SUPPLIER?.toLowerCase() || "";
+        if (type.includes("diamond")) {
+          let diamond: any = undefined;
+          let dp: any = item.DistributionPurchase;
+          if (Array.isArray(dp) && dp.length > 0 && typeof dp[0] === "object") {
+            diamond = dp[0]?.OriginalAchatDiamond;
+          } else if (dp && typeof dp === "object") {
+            diamond = dp?.OriginalAchatDiamond;
+          }
+          if (diamond) {
+            if (typeof diamond.sale_price === "number")
+              prix_vente = diamond.sale_price;
+            else if (typeof diamond.SellingPrice === "number")
+              prix_vente = diamond.SellingPrice; // fallback
+            else prix_vente = 0;
+            editInvoice.picint = diamond.id_achat;
+          }
+        } else if (type.includes("watch")) {
+          let watch: any = undefined;
+          let dp: any = item.DistributionPurchase;
+          if (Array.isArray(dp) && dp.length > 0 && typeof dp[0] === "object") {
+            watch = dp[0]?.OriginalAchatWatch;
+          } else if (dp && typeof dp === "object") {
+            watch = dp?.OriginalAchatWatch;
+          }
+          if (watch) {
+            if (typeof watch.sale_price === "number")
+              prix_vente = watch.sale_price;
+            else if (typeof watch.SellingPrice === "number")
+              prix_vente = watch.SellingPrice; // fallback
+            else prix_vente = 0;
+            editInvoice.picint = watch.id_achat;
+          }
+        } else if (type.includes("gold")) {
+          // Prefer the detailed sales price calculation used in the UI
+          const salesPrice = computeGoldSalesPrice(item);
+          if (salesPrice !== null) {
+            prix_vente = salesPrice;
+          } else {
+            const gpg = goldPrice?.usdPerGram ?? 0;
+            const factor = parsePurityFactorFromType(item.Fournisseur?.TYPE_SUPPLIER) ?? 1;
+            const basePerGramUSD = gpg * factor;
+            const margin = (item.Fournisseur?.Price_G_Gold_Sales || 0) / 100;
+            prix_vente = (basePerGramUSD * (1 + margin)) * (usdToLyd + 2) * item.qty;
+          }
+          editInvoice.picint = item.id_fact;
         } else {
-          const gpg = goldPrice?.usdPerGram ?? 0;
-          const factor = parsePurityFactorFromType(item.Fournisseur?.TYPE_SUPPLIER) ?? 1;
-          const basePerGramUSD = gpg * factor;
-          const margin = (item.Fournisseur?.Price_G_Gold_Sales || 0) / 100;
-          prix_vente = (basePerGramUSD * (1 + margin)) * (effectiveUsdToLyd || 1) * item.qty;
+          prix_vente = item.Selling_Price_Currency || 0;
         }
-
-        // Explicitly store per-gram and per-piece prices for printing.
-        // - per-piece: total selling price (LYD)
-        // - per-gram: per-piece / weight
-        const w = Number(item.qty || 0);
-        price_per_piece = Number(prix_vente) || 0;
-        price_per_gram = w > 0 ? (Number(prix_vente) || 0) / w : 0;
-        editInvoice.picint = item.id_fact;
-      } else {
-        prix_vente = item.Selling_Price_Currency || 0;
       }
 
-      const existingComment = String(editInvoice?.COMMENT ?? "");
-      const meta = {
-        price_per_gram,
-        price_per_piece,
-      };
-      const metaTag = `__META__${JSON.stringify(meta)}`;
-      const commentWithMeta = existingComment.includes("__META__")
-        ? existingComment.replace(/__META__\{[\s\S]*\}$/, metaTag)
-        : (existingComment ? `${existingComment} | ${metaTag}` : metaTag);
+      const invoiceData = item
+        ? {
+          ...editInvoice,
+          id_art: item?.id_fact,
+          qty: item.qty,
+          prix_vente,
+          prix_vente_remise: prix_vente,
+          total_remise: prix_vente,
+          client: 0,
+          Design_art: item.Design_art,
+          usr: Cuser,
+          ps: ps,
+          // Add more fields as needed
+        }
+        : editInvoice;
+      await axios
+        .post(`${apiUrlinv}/Add`, invoiceData, {
+          headers: { Authorization: `Bearer ${token}` },
+        })
+        .catch((error) => {
 
-      const invoiceData = {
-        ...editInvoice,
-        id_art: item.id_fact,
-        qty: item.qty,
-        prix_vente,
-        prix_vente_remise: prix_vente,
-        total_remise: prix_vente,
-        price_per_gram,
-        price_per_piece,
-        COMMENT: commentWithMeta,
-        client: 0,
-        Design_art: item.Design_art,
-        usr: Cuser,
-        ps: ps,
-      };
+        });
+      //showNotification('Invoice added successfully', 'success');
 
-      await axios.post(`${apiUrlinv}/Add`, invoiceData, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-
-      // Refresh only the cart; inventory list is large and static
-      await fetchDataINV();
+      fetchDataINV();
+      fetchData();
     } catch (error: any) {
+      // Use alert as fallback for error notification
       alert(error.response?.data?.message || "Save failed");
     } finally {
       setAddToCartLoading((prev: { [id: number]: boolean }) => ({
@@ -1794,37 +1543,6 @@ const DNew_I = () => {
   type GoldSpot = { usdPerOz?: number; usdPerGram?: number; updatedAt?: Date; source?: string; error?: string };
   const [goldPrice, setGoldPrice] = useState<GoldSpot | null>(null);
   const [usdToLyd, setUsdToLyd] = useState<number | 0>(0);
-  const [blackMarketUsdToLyd, setBlackMarketUsdToLyd] = useState<number | null>(null);
-
-  const effectiveUsdToLyd = React.useMemo(() => {
-    // Prefer black market rate when available; otherwise fall back to existing USD->LYD + 2 heuristic.
-    if (blackMarketUsdToLyd != null && Number.isFinite(Number(blackMarketUsdToLyd)) && Number(blackMarketUsdToLyd) > 0) {
-      return Number(blackMarketUsdToLyd);
-    }
-    const v = Number(usdToLyd);
-    if (Number.isFinite(v) && v > 0) return v + 2;
-    return 0;
-  }, [blackMarketUsdToLyd, usdToLyd]);
-
-  const handleToggleCartGift = async (item: Invoice, checked: boolean) => {
-    try {
-      const token = localStorage.getItem("token");
-      await axios.put(
-        `${apiUrlinv}/update/${item.id_fact}`,
-        {
-          total_remise: item.total_remise ?? item.prix_vente_remise ?? item.prix_vente ?? 0,
-          prix_vente_remise: item.prix_vente_remise ?? item.prix_vente ?? 0,
-          IS_GIFT: checked,
-        },
-        {
-          headers: { Authorization: `Bearer ${token}` },
-        }
-      );
-      await fetchDataINV();
-    } catch (e: any) {
-      alert(e?.response?.data?.message || "Failed to update gift status");
-    }
-  };
 
   // Compute price-per-gram for each purity/type (like GInventory)
   const purityPriceList = React.useMemo(() => {
@@ -1839,13 +1557,13 @@ const DNew_I = () => {
         if (seen.has(key)) continue;
         seen.add(key);
         const usd = gpg * f;
-        const lyd = usd * (effectiveUsdToLyd || 1);
+        const lyd = usd * (usdToLyd + 2);
         list.push({ type: t, factor: f, usdPerGram: usd, lydPerGram: lyd });
       }
     }
     list.sort((a, b) => b.factor - a.factor);
     return list;
-  }, [distinctGoldTypes, goldPrice, effectiveUsdToLyd]);
+  }, [distinctGoldTypes, goldPrice, usdToLyd]);
 
   // Common gold purities per-gram (fixed set: 18K, 21K, 24K)
   const commonPurityPrices = React.useMemo(() => {
@@ -1855,14 +1573,14 @@ const DNew_I = () => {
     return karats.map((k) => {
       const f = k / 24;
       const usd = gpg * f;
-      const lyd = usd * (effectiveUsdToLyd || 1);
+      const lyd = usd * (usdToLyd + 2);
       return { k, usdPerGram: usd, lydPerGram: lyd };
     });
-  }, [goldPrice, effectiveUsdToLyd]);
+  }, [goldPrice, usdToLyd]);
 
   useEffect(() => {
     // Fetch live gold spot (USD/oz and USD/g) via backend proxy and public fallbacks
-    const fetchGoldSpotOnce = async () => {
+    const fetchGoldSpot = async () => {
       try {
         let success = false;
         let lastErr: any = null;
@@ -1962,7 +1680,7 @@ const DNew_I = () => {
         setGoldPrice({ error: e?.message || "Failed to fetch gold price" });
       }
     };
-    fetchGoldSpotOnce();
+    fetchGoldSpot();
 
     // Fetch USD to LYD exchange rate from alternative free API (open.er-api.com)
     const fetchUsdToLyd = async () => {
@@ -1981,29 +1699,6 @@ const DNew_I = () => {
       }
     };
     fetchUsdToLyd();
-
-    // Fetch USD->LYD black market rate (Fulus) from backend proxy
-    const fetchBlackMarketUsdToLyd = async () => {
-      try {
-        const token = localStorage.getItem("token");
-        if (!token) {
-          setBlackMarketUsdToLyd(null);
-          return;
-        }
-        const res = await axios.get("/fx/blackmarket/usd-lyd", {
-          headers: { Authorization: `Bearer ${token}` },
-        });
-        const rate = Number(res?.data?.rate);
-        if (Number.isFinite(rate) && rate > 0) {
-          setBlackMarketUsdToLyd(rate);
-        } else {
-          setBlackMarketUsdToLyd(null);
-        }
-      } catch {
-        setBlackMarketUsdToLyd(null);
-      }
-    };
-    fetchBlackMarketUsdToLyd();
   }, []);
 
   // 1. Fix useEffect infinite loop issues (example pattern):
@@ -2026,9 +1721,6 @@ const DNew_I = () => {
     [id: number]: boolean;
   }>({});
   const [deleteLoading, setDeleteLoading] = useState(false);
-  // Approval context for totals dialog (same approach as EditTotalRN)
-  const [minPer, setMinPer] = useState<number | null>(null);
-  const [totalPrixVente, setTotalPrixVente] = useState<number | null>(null);
   const [totalsDialog, setTotalsDialog] = useState({
     open: false,
     total_remise_final: 0,
@@ -2042,7 +1734,6 @@ const DNew_I = () => {
     remise_per: 0,
   });
   const [isSaving, setIsSaving] = useState(false);
-
   const [snackbar, setSnackbar] = useState({
     open: false,
     message: "",
@@ -2056,19 +1747,25 @@ const DNew_I = () => {
 
   const printRef = useRef<HTMLDivElement>(null);
 
+  // Add a stub for handleEditCartItem to avoid errors
+  // Handler for edit button
+  const handleEditCartItem2 = (item: Invoice) => {
+    setEditDialogItem(item);
+    setEditDialogRemise(item.total_remise ?? 0);
+    setEditDialogOpen(true);
+  };
+
   const handleOpenTotalsDialog = () => {
     // Calculate totals from datainv
-    const nonGift = (datainv || []).filter((i: any) => !i?.IS_GIFT);
-
-    const goldItems = nonGift.filter((i) =>
+    const goldItems = datainv.filter((i) =>
       i.ACHATs?.[0]?.Fournisseur?.TYPE_SUPPLIER?.toLowerCase().includes("gold")
     );
-    const diamondItems = nonGift.filter((i) =>
+    const diamondItems = datainv.filter((i) =>
       i.ACHATs?.[0]?.Fournisseur?.TYPE_SUPPLIER?.toLowerCase().includes(
         "diamond"
       )
     );
-    const watchItems = nonGift.filter((i) =>
+    const watchItems = datainv.filter((i) =>
       i.ACHATs?.[0]?.Fournisseur?.TYPE_SUPPLIER?.toLowerCase().includes("watch")
     );
 
@@ -2076,6 +1773,13 @@ const DNew_I = () => {
     let goldTotal = 0,
       diamondTotal = 0,
       watchTotal = 0;
+    let remise,
+      remise_per,
+      amount_currency = 0,
+      amount_lyd = 0,
+      amount_EUR = 0,
+      amount_currency_LYD = 0,
+      amount_EUR_LYD = 0;
 
     if (goldItems.length > 0) {
       const goldWithRemise = goldItems.filter(
@@ -2120,75 +1824,43 @@ const DNew_I = () => {
           );
     }
 
-    // Calculate minPer (minimum allowed discount %) across all items, same as CartScreen
-    let computedMinPer: number | null = null;
-    if (datainv && datainv.length > 0) {
-      computedMinPer = datainv.reduce((min: number | null, item: any) => {
-        const achat = item?.ACHATs?.[0];
-        const per = achat?.Fournisseur?.Percentage_Diamond;
-        if (typeof per === "number") {
-          if (min === null) return per;
-          return Math.min(min, per);
-        }
-        return min;
-      }, null as number | null);
-    }
-
-    // Calculate totalPrixVente (sum of prix_vente), same as CartScreen
-    const computedTotalPrixVente = datainv
-      ? datainv.reduce(
-          (sum, item) =>
-            sum +
-            (!item?.IS_GIFT && typeof item.prix_vente === "number" ? item.prix_vente : 0),
-          0
-        )
-      : 0;
-
-    setMinPer(computedMinPer);
-    setTotalPrixVente(computedTotalPrixVente || null);
-
-    const totalRemiseFinalLydSum = nonGift.reduce(
+    const total_remise_final_lyd = datainv.reduce(
       (sum, i) =>
-        sum +
-        (typeof i.total_remise_final_lyd === "number"
+        typeof i.total_remise_final_lyd === "number"
           ? i.total_remise_final_lyd
-          : 0),
+          : 0,
       0
     );
 
     // Sum up all relevant fields for dialog
-    const amountCurrencySum = nonGift.reduce(
+    amount_currency = datainv.reduce(
       (sum, i) =>
         typeof i.amount_currency === "number" ? i.amount_currency : 0,
       0
     );
-    const amountLydSum = nonGift.reduce(
+    amount_lyd = datainv.reduce(
       (sum, i) => (typeof i.amount_lyd === "number" ? i.amount_lyd : 0),
       0
     );
-    const amountEurSum = nonGift.reduce(
-      (sum, i) =>
-        typeof i.amount_EUR === "number" ? i.amount_EUR : 0,
+    amount_EUR = datainv.reduce(
+      (sum, i) => (typeof i.amount_EUR === "number" ? i.amount_EUR : 0),
       0
     );
-    const amountCurrencyLydSum = nonGift.reduce(
+    amount_currency_LYD = datainv.reduce(
       (sum, i) =>
-        typeof i.amount_currency_LYD === "number"
-          ? i.amount_currency_LYD
-          : 0,
+        typeof i.amount_currency_LYD === "number" ? i.amount_currency_LYD : 0,
       0
     );
-    const amountEurLydSum = nonGift.reduce(
-      (sum, i) =>
-        typeof i.amount_EUR_LYD === "number" ? i.amount_EUR_LYD : 0,
+    amount_EUR_LYD = datainv.reduce(
+      (sum, i) => (typeof i.amount_EUR_LYD === "number" ? i.amount_EUR_LYD : 0),
       0
     );
-    const remiseSum = nonGift.reduce(
+    remise = datainv.reduce(
       (sum, i) => (typeof i.remise === "number" ? i.remise : 0),
       0
     );
 
-    const remisePerSum = nonGift.reduce(
+    remise_per = datainv.reduce(
       (sum, i) => (typeof i.remise_per === "number" ? i.remise_per : 0),
       0
     );
@@ -2196,14 +1868,14 @@ const DNew_I = () => {
     setTotalsDialog({
       open: true,
       total_remise_final: goldTotal + diamondTotal + watchTotal,
-      total_remise_final_lyd: totalRemiseFinalLydSum,
-      amount_currency: amountCurrencySum,
-      amount_lyd: amountLydSum,
-      amount_EUR: amountEurSum,
-      amount_currency_LYD: amountCurrencyLydSum,
-      amount_EUR_LYD: amountEurLydSum,
-      remise: remiseSum,
-      remise_per: remisePerSum,
+      total_remise_final_lyd: total_remise_final_lyd,
+      amount_currency,
+      amount_lyd,
+      amount_EUR,
+      amount_currency_LYD,
+      amount_EUR_LYD,
+      remise,
+      remise_per,
     });
   };
 
@@ -2260,16 +1932,19 @@ const DNew_I = () => {
         latestInvoice.num_fact = 0;
       }
 
-      // Option 1 printing hierarchy: do not auto-open print dialog.
-      // After creating a new invoice number, allow printing manually.
-      setCanPrint(true);
+      setPrintDialog({
+        open: true,
+        invoice: latestInvoice || null,
+      });
+
+      setEditInvoice(initialInvoiceState);
     } catch (error) {
 
 
     }
   };
 
-  const [canPrint, setCanPrint] = useState(false);
+  const [shouldOpenPrintDialog, setShouldOpenPrintDialog] = useState(false); // Add flag state
 
   const handleTotalsDialogUpdate = async () => {
     // First, get a new invoice number
@@ -2329,8 +2004,6 @@ const DNew_I = () => {
         //   setSnackbar({ open: true, message: 'Invoice totals updated successfully', severity: 'success' });
         setTotalsDialog((prev) => ({ ...prev, open: false }));
         await fetchDataINV();
-        // After successful checkout update, allow printing (do not auto-open dialog)
-        setCanPrint(true);
       } catch (error) {
 
 
@@ -2351,11 +2024,117 @@ const DNew_I = () => {
   };
 
   useEffect(() => {
-    // Reset print ability when cart becomes empty or invoice state is reset
-    if (!datainv || datainv.length === 0) {
-      setCanPrint(false);
+    if (shouldOpenPrintDialog) {
+      // Find the latest invoice (assuming it's the last one in datainv)
+      const latestInvoice = datainv.find(
+        (inv) =>
+          inv.num_fact === 0 &&
+          inv.ps === Number(ps) &&
+          inv.usr === Number(Cuser)
+      );
+      setPrintDialog({
+        open: true,
+        invoice: latestInvoice || null,
+      });
+      setShouldOpenPrintDialog(false);
     }
-  }, [datainv]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [shouldOpenPrintDialog, totalsDialog.open, datainv]);
+
+  // Add state for edit dialog
+  const [editDialogOpen, setEditDialogOpen] = useState(false);
+  const [editDialogItem, setEditDialogItem] = useState<Invoice | null>(null);
+  const [editDialogRemise, setEditDialogRemise] = useState<number>(0);
+
+  // const [editDialogIS_Gift, setEditDialogIS_Gift] = useState<boolean>(false);
+  // Handler for saving the edited remise
+  const handleEditDialogSave = async () => {
+    if (!editDialogItem) return;
+    try {
+      const token = localStorage.getItem("token");
+      // Await the API call before updating local state
+      await axios.put(
+        `${apiIp}/invoices/UpdateTotal/${editDialogItem.id_fact}`,
+        {
+          total_remise: editDialogRemise,
+          prix_vente_remise: editDialogRemise,
+          IS_GIFT: editDialogItem.IS_GIFT, // <-- Add this line
+        },
+        {
+          headers: { Authorization: `Bearer ${token}` },
+        }
+      );
+      // Update local state after successful API call
+      setDatainv((prev) => {
+        const updated = prev.map((inv) =>
+          inv.id_art === editDialogItem.id_art
+            ? { ...inv, total_remise: editDialogRemise }
+            : inv
+        );
+        // Recalculate totals after update
+        const Total = updated.reduce(
+          (sum, i) =>
+            typeof i.total_remise_final === "number" ? i.total_remise_final : 0,
+          0
+        );
+        const Totallyd = updated.reduce(
+          (sum, i) =>
+            typeof i.total_remise_final === "number" ? i.total_remise_final : 0,
+          0
+        );
+
+        const amount_EUR = updated.reduce(
+          (sum, i) => (typeof i.amount_EUR === "number" ? i.amount_EUR : 0),
+          0
+        );
+        const amount_currency_LYD = updated.reduce(
+          (sum, i) =>
+            typeof i.amount_currency_LYD === "number"
+              ? i.amount_currency_LYD
+              : 0,
+          0
+        );
+        const amount_EUR_LYD = updated.reduce(
+          (sum, i) =>
+            typeof i.amount_EUR_LYD === "number" ? i.amount_EUR_LYD : 0,
+          0
+        );
+        const amount_currency = updated.reduce(
+          (sum, i) =>
+            typeof i.amount_currency === "number" ? i.amount_currency : 0,
+          0
+        );
+        const amount_lyd = updated.reduce(
+          (sum, i) => (typeof i.amount_lyd === "number" ? i.amount_lyd : 0),
+          0
+        );
+        setTotalsDialog((prev) => ({
+          ...prev,
+          total_remise_final: Total,
+          total_remise_final_lyd: Totallyd,
+          amount_currency,
+          amount_lyd,
+          amount_EUR,
+          amount_currency_LYD,
+          amount_EUR_LYD,
+        }));
+        return updated;
+      });
+      setSnackbar({
+        open: true,
+        message: "Discount updated successfully",
+        severity: "success",
+      });
+    } catch (error) {
+      setSnackbar({
+        open: true,
+        message: "Failed to update disscount",
+        severity: "error",
+      });
+    } finally {
+      setEditDialogOpen(false);
+    }
+  };
 
   const [hiddenIds] = useState<number[]>([]); // Track hidden items
 
@@ -2363,7 +2142,6 @@ const DNew_I = () => {
   function getFinalTotal(items: any[], currencyType: string) {
     const filtered = items.filter((i: any) => {
       const achat = i.ACHATs?.[0];
-      if (i?.IS_GIFT) return false;
       return achat?.Fournisseur?.TYPE_SUPPLIER?.toLowerCase().includes(
         currencyType
       );
@@ -2381,23 +2159,17 @@ const DNew_I = () => {
         const latest = withRemise.reduce((a: any, b: any) =>
           a.id_fact > b.id_fact ? a : b
         );
+        total = latest.total_remise_final || 0;
         remise = latest.remise || 0;
         remise_per = latest.remise_per || 0;
       } else {
-        // fall through to computed total below
+        total = filtered.reduce(
+          (sum: number, i: any) =>
+            sum +
+            (typeof i.prix_vente_remise === "number" ? i.prix_vente_remise : 0),
+          0
+        );
       }
-
-      // Always compute total from non-gift item prices to ensure gifts don't affect totals
-      total = filtered.reduce(
-        (sum: number, i: any) =>
-          sum +
-          (typeof i.prix_vente_remise === "number"
-            ? i.prix_vente_remise
-            : typeof i.prix_vente === "number"
-              ? i.prix_vente
-              : 0),
-        0
-      );
     }
     // Apply discount
     let finalTotal = total;
@@ -2414,11 +2186,7 @@ const DNew_I = () => {
       {/* Image Dialog */}
       <Dialog
         open={imageDialogOpen}
-        onClose={() => {
-          setImageDialogOpen(false);
-          setDialogItem(null);
-          setDialogZoom(1);
-        }}
+        onClose={() => setImageDialogOpen(false)}
         maxWidth="md"
         fullWidth
       >
@@ -2436,7 +2204,7 @@ const DNew_I = () => {
           >
             {dialogImageList.length > 0 ? (
               <>
-                <Box sx={{ display: "flex", alignItems: "center", gap: 1, width: "100%", justifyContent: "center" }}>
+                <Box sx={{ display: "flex", alignItems: "center", gap: 2 }}>
                   <Button
                     onClick={() =>
                       setDialogImageIndex(
@@ -2449,28 +2217,12 @@ const DNew_I = () => {
                   >
                     {"<"}
                   </Button>
-
-                  <IconButton
-                    size="small"
-                    onClick={() => setDialogZoom((z) => Math.max(1, Number((z - 0.25).toFixed(2))))}
-                    disabled={dialogZoom <= 1}
-                  >
-                    <RemoveOutlinedIcon />
-                  </IconButton>
-                  <Typography sx={{ fontWeight: 800, color: "text.secondary" }}>{Math.round(dialogZoom * 100)}%</Typography>
-                  <IconButton
-                    size="small"
-                    onClick={() => setDialogZoom((z) => Math.min(3, Number((z + 0.25).toFixed(2))))}
-                  >
-                    <AddOutlinedIcon />
-                  </IconButton>
-
                   <img
                     src={(() => {
                       let url = dialogImageList[dialogImageIndex];
                       if (!url) return "";
                       const token = localStorage.getItem("token");
-                      if (token && url && !url.includes("token=")) {
+                      if (token && !url.includes("token=")) {
                         url +=
                           (url.includes("?") ? "&" : "?") +
                           "token=" +
@@ -2478,14 +2230,14 @@ const DNew_I = () => {
                       }
                       return url;
                     })()}
-                    alt="Selected"
+                    alt={`Product ${dialogImageIndex + 1}`}
                     style={{
-                      maxWidth: "100%",
-                      maxHeight: "400px",
+                      maxWidth: "80%",
+                      maxHeight: "80vh",
                       objectFit: "contain",
-                      transform: `scale(${dialogZoom})`,
-                      transformOrigin: "center center",
-                      transition: "transform 120ms ease",
+                      borderRadius: 8,
+                      border: "1px solid #ccc",
+                      background: "#f9f9f9",
                     }}
                   />
                   <Button
@@ -2499,61 +2251,12 @@ const DNew_I = () => {
                     {">"}
                   </Button>
                 </Box>
-                {dialogItem && (
-                  <Box sx={{ mt: 2, width: "100%" }}>
-                    <Box sx={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 1, flexWrap: "wrap" }}>
-                      <Box sx={{ display: "flex", flexDirection: "column", gap: 0.25 }}>
-                        <Typography sx={{ fontWeight: 900 }}>
-                          ID: {String(dialogItem.id_fact)}{dialogItem.Design_art ? ` - ${dialogItem.Design_art}` : ""}
-                        </Typography>
-                        {dialogItem.Fournisseur?.client_name ? (
-                          <Typography sx={{ color: "text.secondary", fontWeight: 700 }}>
-                            {dialogItem.Fournisseur?.client_name}
-                          </Typography>
-                        ) : null}
-                        {dialogItem.Fournisseur?.TYPE_SUPPLIER ? (
-                          <Typography sx={{ color: "text.secondary", fontWeight: 700 }}>
-                            {dialogItem.Fournisseur?.TYPE_SUPPLIER}
-                          </Typography>
-                        ) : null}
-                        {(dialogItem.Fournisseur?.TYPE_SUPPLIER || "").toLowerCase().includes("gold") && (
-                          <Typography sx={{ color: "text.secondary", fontWeight: 800 }}>
-                            Weight: {dialogItem.qty} g
-                          </Typography>
-                        )}
-                      </Box>
-
-                      {(() => {
-                        const isGold = (dialogItem.Fournisseur?.TYPE_SUPPLIER || "").toLowerCase().includes("gold");
-                        const sales = isGold ? computeGoldSalesPrice(dialogItem) : null;
-                        if (isGold) {
-                          const v = typeof sales === "number" ? sales : null;
-                          return v !== null ? (
-                            <Chip
-                              variant="outlined"
-                              color="warning"
-                              label={`${v.toLocaleString("en-LY", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} LYD`}
-                              sx={{ fontWeight: 900 }}
-                            />
-                          ) : null;
-                        }
-                        // for diamond/watch just show whatever salePriceUsd logic would show (fallback to Selling_Price_Currency)
-                        const usd = Number((dialogItem as any)?.Selling_Price_Currency || 0);
-                        return usd ? (
-                          <Chip
-                            variant="outlined"
-                            color="info"
-                            label={`${usd.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USD`}
-                            sx={{ fontWeight: 900 }}
-                          />
-                        ) : null;
-                      })()}
-                    </Box>
-                  </Box>
-                )}
+                <Typography variant="caption" sx={{ mt: 1 }}>
+                  {dialogImageIndex + 1} / {dialogImageList.length}
+                </Typography>
               </>
             ) : (
-              <Typography>No Image Available</Typography>
+              <Typography>No image available</Typography>
             )}
           </Box>
         </DialogContent>
@@ -2583,18 +2286,14 @@ const DNew_I = () => {
 
             }}
           >
+
+
+
+
+
             <Typography variant="h6" sx={{ color: "text.secondary", fontWeight: 700 }}>
-              Filter Images By
+              Filter by Type
             </Typography>
-            <Button
-              size="small"
-              variant="outlined"
-              color="inherit"
-              onClick={() => setFiltersExpanded((v) => !v)}
-              sx={{ textTransform: "none", borderRadius: 2, fontWeight: 800 }}
-            >
-              {filtersExpanded ? "Hide" : "Show"}
-            </Button>
           </Box>
           <Box
             sx={{ color: "text.secondary", display: "flex", flexDirection: "column", gap: 1.2, mb: 1 }}
@@ -2692,8 +2391,6 @@ const DNew_I = () => {
                 Watch
               </Button>
             </Box>
-
-            <Collapse in={filtersExpanded}>
             {/* Cost Range Filter */}
             <Box
               sx={(theme) => ({
@@ -2975,79 +2672,56 @@ const DNew_I = () => {
               </Box>
             )}
 
-            {typeFilter === "diamond" && (
-              <Box
-                sx={(theme) => ({
-                  display: "flex",
-                  flexDirection: "column",
-                  gap: 0.5,
-                  bgcolor: theme.palette.mode === "dark" ? "#222" : "#f5f5f5",
-                  borderRadius: 1,
-                  p: 1,
-                  boxShadow:
-                    theme.palette.mode === "dark"
-                      ? "0 1px 8px rgba(0,0,0,0.18)"
-                      : "0 1px 8px rgba(0,0,0,0.07)",
-                })}
+            <Box
+              sx={(theme) => ({
+                display: "flex",
+                flexDirection: "column",
+                gap: 0.5,
+                bgcolor: theme.palette.mode === "dark" ? "#222" : "#f5f5f5",
+                borderRadius: 1,
+                p: 1,
+                boxShadow:
+                  theme.palette.mode === "dark"
+                    ? "0 1px 8px rgba(0,0,0,0.18)"
+                    : "0 1px 8px rgba(0,0,0,0.07)",
+              })}
+            >
+              <Typography
+                variant="body2"
+                sx={{ fontWeight: 600, mb: 0.5, fontSize: 13 }}
               >
-                <Typography
-                  variant="body2"
-                  sx={{ fontWeight: 600, mb: 0.5, fontSize: 13 }}
-                >
-                  Filter by ID / Group
-                </Typography>
+                Filter by Group
+              </Typography>
 
-                {/* Diamond ID filter */}
-                <TextField
-                  label="ID"
-                  type="number"
-                  value={diamondIdFilter}
-                  onChange={(e) => setDiamondIdFilter(e.target.value)}
-                  variant="outlined"
-                  size="small"
-                  sx={{
-                    width: "100%",
-                    bgcolor: "inherit",
-                    borderRadius: 1,
-                    fontSize: 12,
-                    mb: 0.75,
-                  }}
-                />
-
-                {/* Diamond groups filter (by General_Comment / Unite) */}
-                <TextField
-                  select
-                  label="Groups"
-                  value={generalCommentFilter}
-                  onChange={(e) => setGeneralCommentFilter(e.target.value)}
-                  variant="outlined"
-                  size="small"
-                  sx={{
-                    width: "100%",
-                    bgcolor: "inherit",
-                    borderRadius: 1,
-                    fontSize: 12,
-                  }}
-                  SelectProps={{ native: false }}
-                >
-                  <MenuItem value="" sx={{ fontSize: 12 }}>
-                    All
-                  </MenuItem>
-                  <MenuItem value="الكل" sx={{ fontSize: 12 }}>
-                    الكل
-                  </MenuItem>
-                  <MenuItem value="توينز" sx={{ fontSize: 12 }}>
-                    توينز
-                  </MenuItem>
-                  <MenuItem value="سيت" sx={{ fontSize: 12 }}>
-                    سيت
-                  </MenuItem>
-                  <MenuItem value="طاقم" sx={{ fontSize: 12 }}>
-                    طاقم
-                  </MenuItem>
-                </TextField>
-              </Box>
-            )}
+              <TextField
+                select
+                label="Groups"
+                value={generalCommentFilter}
+                onChange={(e) => setGeneralCommentFilter(e.target.value)}
+                variant="outlined"
+                size="small"
+                sx={{
+                  width: "100%",
+                  bgcolor: "inherit",
+                  borderRadius: 1,
+                  fontSize: 12,
+                }}
+                SelectProps={{ native: false }}
+              >
+                <MenuItem value="الكل" sx={{ fontSize: 12 }}>
+                  الكل
+                </MenuItem>
+                <MenuItem value="توينز" sx={{ fontSize: 12 }}>
+                  توينز
+                </MenuItem>
+                <MenuItem value="سيت" sx={{ fontSize: 12 }}>
+                  سيت
+                </MenuItem>
+                <MenuItem value="طاقم" sx={{ fontSize: 12 }}>
+                  طاقم
+                </MenuItem>
+              </TextField>
+            </Box>
             {/* Reset Filter Button */}
             <Button
               variant="contained"
@@ -3069,7 +2743,6 @@ const DNew_I = () => {
                 setSearch("");
                 setBrandFilter("");
                 setGeneralCommentFilter("");
-                setDiamondIdFilter("");
                 setGoldWeightMin("");
                 setGoldWeightMax("");
                 setGoldIdMin("");
@@ -3083,8 +2756,6 @@ const DNew_I = () => {
             >
               Reset Filter
             </Button>
-
-            </Collapse>
           </Box>
         </Box>
         <Box sx={{ flex: 1, mr: 2 }}>
@@ -3158,7 +2829,6 @@ const DNew_I = () => {
                 ))}
               </Box>
             )}
-
           </Box>
           {/* Selected Filters Chips */}
           <Box sx={{  color:"text.secondary" ,mb: 1, display: 'flex', alignItems: 'center', gap: 0.75, flexWrap: 'wrap' }}>
@@ -3206,102 +2876,10 @@ const DNew_I = () => {
           <Box
             sx={{
               display: "grid",
-              gridTemplateColumns:
-                gridView === "icons"
-                  ? "repeat(4, minmax(0, 1fr))"
-                  : gridView === "8"
-                    ? "repeat(8, minmax(0, 1fr))"
-                    : gridView === "6"
-                      ? "repeat(6, minmax(0, 1fr))"
-                      : gridView === "5"
-                        ? "repeat(5, minmax(0, 1fr))"
-                        : gridView === "4"
-                          ? "repeat(4, minmax(0, 1fr))"
-                          : "repeat(3, minmax(0, 1fr))",
+              gridTemplateColumns: typeFilter === 'gold' ? "1fr 1fr" : "1fr",
               gap: 2,
             }}
           >
-            <Box
-              sx={{
-                gridColumn: "1 / -1",
-                display: "flex",
-                justifyContent: "flex-end",
-                gap: 1,
-                mb: 1,
-              }}
-            >
-              <Button
-                size="small"
-                variant="outlined"
-                startIcon={<ViewModuleOutlinedIcon />}
-                onClick={(e) => setViewAnchorEl(e.currentTarget)}
-                sx={{ fontWeight: 900, borderRadius: 2, textTransform: "none" }}
-              >
-                View
-              </Button>
-              <Menu
-                anchorEl={viewAnchorEl}
-                open={Boolean(viewAnchorEl)}
-                onClose={() => setViewAnchorEl(null)}
-                anchorOrigin={{ vertical: "bottom", horizontal: "right" }}
-                transformOrigin={{ vertical: "top", horizontal: "right" }}
-              >
-                <MenuItem
-                  selected={gridView === "3"}
-                  onClick={() => {
-                    setGridView("3");
-                    setViewAnchorEl(null);
-                  }}
-                >
-                  3 Columns
-                </MenuItem>
-                <MenuItem
-                  selected={gridView === "4"}
-                  onClick={() => {
-                    setGridView("4");
-                    setViewAnchorEl(null);
-                  }}
-                >
-                  4 Columns
-                </MenuItem>
-                <MenuItem
-                  selected={gridView === "5"}
-                  onClick={() => {
-                    setGridView("5");
-                    setViewAnchorEl(null);
-                  }}
-                >
-                  5 Columns
-                </MenuItem>
-                <MenuItem
-                  selected={gridView === "6"}
-                  onClick={() => {
-                    setGridView("6");
-                    setViewAnchorEl(null);
-                  }}
-                >
-                  6 Columns
-                </MenuItem>
-                <MenuItem
-                  selected={gridView === "8"}
-                  onClick={() => {
-                    setGridView("8");
-                    setViewAnchorEl(null);
-                  }}
-                >
-                  8 Columns
-                </MenuItem>
-                <MenuItem
-                  selected={gridView === "icons"}
-                  onClick={() => {
-                    setGridView("icons");
-                    setViewAnchorEl(null);
-                  }}
-                >
-                  Icons Only
-                </MenuItem>
-              </Menu>
-            </Box>
             {loading ? (
               <Box sx={{ gridColumn: "1/-1", textAlign: "center", py: 6 }}>
                 <Typography
@@ -3328,7 +2906,7 @@ const DNew_I = () => {
                 {paginatedData
                   .filter((row) => !hiddenIds.includes(row.id_fact))
                   .map((row) => {
-                    // compute display price for top-right badge (gold)
+                    // compute display price for top-right badge
                     const goldObj = Array.isArray(row.DistributionPurchase)
                       ? (row.DistributionPurchase as DistributionPurchase[]).find(
                         (dp: DistributionPurchase) => !!dp.GoldOriginalAchat
@@ -3345,10 +2923,6 @@ const DNew_I = () => {
                     // compute sales price (same formula used previously)
                     let displayMainNum: number | null = null;
                     let displaySubNum: number | null = null;
-                    // generic sale price (USD) for diamond/watch, shown near ID
-                    let salePriceUsd: number | null = null;
-                    // header identifier: for diamonds show Ref. Code (CODE_EXTERNAL) if present, else id_fact
-                    let headerIdLabel: string | number = row.id_fact;
                     try {
                       const typeStr = (row.Fournisseur?.TYPE_SUPPLIER || '').toLowerCase();
                       if (typeStr.includes('gold')) {
@@ -3380,8 +2954,9 @@ const DNew_I = () => {
 
                           //sales = (subtotal + lossPct + indirectCostPct + profitPct) * (lastUsdRate || 1);
                         }
+
                       } else {
-                        // diamond or watch: prefer sale_price, else SellingPrice
+                        // diamond or watch
                         const dp: any = row.DistributionPurchase;
                         let diamond: any = undefined;
                         let watch: any = undefined;
@@ -3393,25 +2968,6 @@ const DNew_I = () => {
                           watch = dp?.OriginalAchatWatch;
                         }
 
-                        if (diamond) {
-                          const code = diamond.CODE_EXTERNAL;
-                          if (code !== undefined && code !== null && String(code).trim() !== "") {
-                            headerIdLabel = String(code);
-                          } else {
-                            headerIdLabel = row.id_fact;
-                          }
-                          if ("sale_price" in diamond && diamond.sale_price != null) {
-                            salePriceUsd = Number(diamond.sale_price);
-                          } else if ("SellingPrice" in diamond && diamond.SellingPrice != null) {
-                            salePriceUsd = Number(diamond.SellingPrice);
-                          }
-                        } else if (watch) {
-                          if ("sale_price" in watch && watch.sale_price != null) {
-                            salePriceUsd = Number(watch.sale_price);
-                          } else if ("SellingPrice" in watch && watch.SellingPrice != null) {
-                            salePriceUsd = Number(watch.SellingPrice);
-                          }
-                        }
                       }
                     } catch (e) {
                       displayMainNum = null;
@@ -3424,203 +2980,6 @@ const DNew_I = () => {
                     const displaySub = (displaySubNum !== null && !isNaN(displaySubNum))
                       ? displaySubNum.toLocaleString('en-LY', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
                       : '';
-                    const salePriceDisplay = (salePriceUsd !== null && !isNaN(salePriceUsd))
-                      ? salePriceUsd.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
-                      : '';
-
-                    const isIconsOnly = gridView === "icons";
-                    const isGoldItem = (row.Fournisseur?.TYPE_SUPPLIER || '').toLowerCase().includes('gold');
-                    const goldLabel = (() => {
-                      const typeStr = String(row.Fournisseur?.TYPE_SUPPLIER || "");
-                      const m = typeStr.match(/\b(18|21|24)\b/);
-                      if (m) return `Gold${m[1]}`;
-                      // common format: "Gold18" already
-                      const m2 = typeStr.match(/gold\s*(18|21|24)/i);
-                      if (m2) return `Gold${m2[1]}`;
-                      return "Gold";
-                    })();
-
-                    if (isIconsOnly) {
-                      const priceText = (() => {
-                        if (isGoldItem) {
-                          if (displayMain) return `${displayMain} LYD`;
-                          return "";
-                        }
-                        if (salePriceDisplay) return `${salePriceDisplay} USD`;
-                        return "";
-                      })();
-
-                      return (
-                        <Box
-                          key={row.id_fact}
-                          sx={{
-                            borderRadius: 2,
-                            border: "1px solid #e0e0e0",
-                            overflow: "hidden",
-                            bgcolor: "background.paper",
-                            display: "flex",
-                            flexDirection: "column",
-                            transition: "transform 160ms ease, box-shadow 160ms ease, border-color 160ms ease",
-                            '&:hover': {
-                              transform: 'scale(1.03)',
-                              boxShadow: '0 10px 24px rgba(0,0,0,0.12)',
-                              borderColor: 'rgba(0,0,0,0.18)'
-                            },
-                          }}
-                        >
-                          <Box
-                            sx={{
-                              width: '100%',
-                              aspectRatio: '1 / 1',
-                              display: 'flex',
-                              alignItems: 'center',
-                              justifyContent: 'center',
-                              bgcolor: 'rgba(0,0,0,0.02)',
-                            }}
-                          >
-                            {(() => {
-                              const typeSupplierLower = row.Fournisseur?.TYPE_SUPPLIER?.toLowerCase() || "";
-                              const token = localStorage.getItem("token");
-
-                              let kind: "gold" | "diamond" | "watch" | undefined = undefined;
-                              let imageKey: any = (row as any).picint || row.id_fact;
-
-                              const dp: any = row.DistributionPurchase;
-                              let diamond: any = undefined;
-                              let watch: any = undefined;
-                              if (Array.isArray(dp) && dp.length > 0 && typeof dp[0] === "object") {
-                                diamond = dp[0]?.OriginalAchatDiamond;
-                                watch = dp[0]?.OriginalAchatWatch;
-                              } else if (dp && typeof dp === "object") {
-                                diamond = dp?.OriginalAchatDiamond;
-                                watch = dp?.OriginalAchatWatch;
-                              }
-
-                              if (diamond?.id_achat) {
-                                kind = "diamond";
-                                imageKey = diamond.id_achat;
-                              } else if (watch?.id_achat) {
-                                kind = "watch";
-                                imageKey = watch.id_achat;
-                              } else if (typeSupplierLower.includes("gold")) {
-                                kind = "gold";
-                              }
-
-                              if (!kind) {
-                                return (
-                                  <Box
-                                    component="img"
-                                    src={'/default-image.png'}
-                                    alt="Product"
-                                    loading="lazy"
-                                    sx={{ width: '100%', height: '100%', objectFit: 'contain', opacity: 0.9 }}
-                                  />
-                                );
-                              }
-
-                              const keyStr = getImageKey(kind, imageKey);
-                              const urls = imageUrls?.[keyStr] || [];
-                              if (!urls.length) {
-                                return (
-                                  <Box
-                                    component="img"
-                                    src={'/default-image.png'}
-                                    alt="Product"
-                                    loading="lazy"
-                                    sx={{ width: '100%', height: '100%', objectFit: 'contain', opacity: 0.9 }}
-                                  />
-                                );
-                              }
-
-                              const idx = pickPreferredImageIndex(urls);
-                              let url = urls[idx] || "";
-                              if (token && url && !url.includes('token=')) {
-                                url += (url.includes('?') ? '&' : '?') + 'token=' + encodeURIComponent(token);
-                              }
-
-                              return (
-                                <Box
-                                  component="img"
-                                  src={url}
-                                  alt="Product"
-                                  loading="lazy"
-                                  sx={{ width: '100%', height: '100%', objectFit: 'contain', cursor: 'zoom-in' }}
-                                  onClick={() => {
-                                    setDialogImageList(urls);
-                                    setDialogImageIndex(idx);
-                                    setDialogItem(row);
-                                    setImageDialogOpen(true);
-                                  }}
-                                  onError={(e) => {
-                                    const img = e.currentTarget as HTMLImageElement;
-                                    img.onerror = null;
-                                    img.src = '/default-image.png';
-                                  }}
-                                />
-                              );
-                            })()}
-                          </Box>
-                          <Box sx={{ p: 1, display: 'flex', flexDirection: 'column', gap: 0.25 }}>
-                            <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 1 }}>
-                              <Typography sx={{ fontWeight: 900, fontSize: 12, lineHeight: 1.2, flex: 1, minWidth: 0 }}>
-                                {`ID: ${String(headerIdLabel)}`}{row.Design_art ? ` - ${row.Design_art}` : ""}
-                              </Typography>
-                              {priceText && (
-                                <Chip
-                                  size="small"
-                                  variant="outlined"
-                                  color={isGoldItem ? "warning" : "info"}
-                                  label={priceText}
-                                  sx={{ fontWeight: 900, height: 22 }}
-                                />
-                              )}
-                            </Box>
-                            {isGoldItem && (
-                              <Typography sx={{ fontWeight: 800, fontSize: 12, lineHeight: 1.1, color: 'text.secondary' }}>
-                                Weight: {row.qty}
-                                <Box component="span" sx={{ ml: 0.5 }}>
-                                  g
-                                </Box>
-                              </Typography>
-                            )}
-                            {isGoldItem && (
-                              <Typography sx={{ fontWeight: 900, fontSize: 12, lineHeight: 1.1, color: 'warning.main' }}>
-                                {goldLabel}
-                              </Typography>
-                            )}
-                            {isGoldItem && displaySub && (
-                              <Typography sx={{ fontWeight: 900, fontSize: 11, lineHeight: 1.1, color: 'text.secondary' }}>
-                                {displaySub} LYD/g
-                              </Typography>
-                            )}
-                            {row.Fournisseur?.client_name && (
-                              <Typography sx={{ fontWeight: 800, fontSize: 12, lineHeight: 1.1, color: 'text.secondary' }}>
-                                {row.Fournisseur?.client_name}
-                              </Typography>
-                            )}
-                          </Box>
-                          <Box sx={{ p: 1, pt: 0 }}>
-                            <Button
-                              variant="contained"
-                              color="warning"
-                              size="small"
-                              sx={{ fontWeight: 800, borderRadius: 2, width: '100%' }}
-                              onClick={() => handleSave(row)}
-                              disabled={
-                                addToCartLoading[row.id_fact] ||
-                                datainv.some((item) => item.id_art === row.id_fact)
-                              }
-                            >
-                              {addToCartLoading[row.id_fact]
-                                ? "Adding..."
-                                : datainv.some((item) => item.id_art === row.id_fact)
-                                  ? "In Cart"
-                                  : "Add to cart"}
-                            </Button>
-                          </Box>
-                        </Box>
-                      );
-                    }
 
                     return (
                       <Box
@@ -3628,28 +2987,20 @@ const DNew_I = () => {
                         sx={{
                           position: 'relative',
                           borderRadius: 2,
-                          
+                           
                           display: "flex",
-                          flexDirection: "column",
+                          flexDirection: "row",
+                         
                           border: "1px solid #e0e0e0",
-                          alignItems: "stretch",
+                          alignItems: "center",
                           justifyContent: "flex-start",
-                          gap: gridView === "3" ? 0.5 : 0.75,
-                          mb: 0.75,
-                          bgcolor: "background.paper",
-                          overflow: "hidden",
-                          cursor: "default",
-                          transition: "box-shadow 160ms ease, transform 160ms ease, border-color 160ms ease",
-                          '&:hover': {
-                            boxShadow: '0 10px 24px rgba(0,0,0,0.10)',
-                            transform: 'translateY(-1px)',
-                            borderColor: 'rgba(0,0,0,0.18)'
-                          },
+                          gap: 1,
+                          mb: 1,
                           ...(row.Fournisseur?.TYPE_SUPPLIER?.toLowerCase().includes('gold') && {
-                            flexDirection: 'column',
-                            alignItems: 'stretch',
+                            flexDirection: 'row',
+                            alignItems: 'center',
                             justifyContent: 'flex-start',
-                            padding: 0,
+                            padding: '18px 10px',
                             // background: '#fffbe7',
                             boxShadow: '0 2px 8px 0 rgba(255, 215, 0, 0.07)',
                           }),
@@ -3697,7 +3048,7 @@ const DNew_I = () => {
                                    >
                                 {displayMain}
                                 <Box component="sup" sx={{ ml: 0.5, fontWeight: 800, fontSize: 10, color: '#333' }}>
-                                  LYD
+                                  LYD1
                                 </Box>
                               </Box>
                               {displaySub && (
@@ -3733,18 +3084,15 @@ const DNew_I = () => {
                         )}
                         <Box
                           sx={{
-                            width: '100%',
-                            height:
-                              gridView === "3"
-                                ? 135
-                                : 150,
+                            width: row.Fournisseur?.TYPE_SUPPLIER?.toLowerCase().includes('gold') ? 180 : 300,
+                            height: row.Fournisseur?.TYPE_SUPPLIER?.toLowerCase().includes('gold') ? 180 : 220,
                             display: "flex",
                             alignItems: "center",
                             justifyContent: "center",
                             borderRadius: 2,
                             overflow: "hidden",
                             position: "relative",
-                            bgcolor: 'rgba(0,0,0,0.02)',
+                            mr: row.Fournisseur?.TYPE_SUPPLIER?.toLowerCase().includes('gold') ? 2 : 1,
 
                           }}
                         >
@@ -3781,9 +3129,9 @@ const DNew_I = () => {
                                     loading="lazy"
                                     sx={{
 
-                                      maxHeight: gridView === "3" ? 120 : 140,
-                                      height: gridView === "3" ? 120 : 140,
-                                      maxWidth: gridView === "3" ? 120 : 140,
+                                      maxHeight: 180,
+                                      height: 180,
+                                      maxWidth: 180,
                                       borderRadius: 8,
                                       border: "1px solid #ccc",
                                       width: "100%",
@@ -3862,9 +3210,9 @@ const DNew_I = () => {
                                     alt={`Image ${idx + 1}`}
                                     loading="lazy"
                                     sx={{
-                                      maxHeight: gridView === "3" ? 120 : 140,
-                                      height: gridView === "3" ? 120 : 140,
-                                      maxWidth: gridView === "3" ? 120 : 140,
+                                      maxHeight: 180,
+                                      height: 180,
+                                      maxWidth: 180,
                                       borderRadius: 8,
                                       border: "1px solid #ccc",
                                       width: "100%",
@@ -3873,9 +3221,8 @@ const DNew_I = () => {
                                       cursor: "pointer",
                                     }}
                                     onClick={() => {
-                                      // Open dialog with ALL images for this diamond (no marketing/invoice filtering)
-                                      setDialogImageList(urls);
-                                      setDialogImageIndex(idx);
+                                      setDialogImageList([urls[idx]]);
+                                      setDialogImageIndex(0);
                                       setImageDialogOpen(true);
                                     }}
                                     onError={(e) => {
@@ -3935,9 +3282,9 @@ const DNew_I = () => {
                                         alt={`Image ${idx + 1}`}
                                         loading="lazy"
                                         sx={{
-                                          maxHeight: gridView === "3" ? 120 : 140,
-                                          height: gridView === "3" ? 120 : 140,
-                                          maxWidth: gridView === "3" ? 120 : 140,
+                                          maxHeight: 180,
+                                          height: 180,
+                                          maxWidth: 180,
                                           borderRadius: 8,
                                           border: "1px solid #ccc",
                                           width: "100%",
@@ -3947,22 +3294,8 @@ const DNew_I = () => {
                                         }}
 
                                         onClick={() => {
-                                          // Open dialog with ALL watch images for this product (no marketing/invoice filtering)
-                                          const token2 = localStorage.getItem("token");
-                                          const urlsForDialog = urls.map((u) => {
-                                            if (!u) return u;
-                                            if (token2 && !u.includes("token=")) {
-                                              return (
-                                                u +
-                                                (u.includes("?") ? "&" : "?") +
-                                                "token=" +
-                                                encodeURIComponent(token2)
-                                              );
-                                            }
-                                            return u;
-                                          });
-                                          setDialogImageList(urlsForDialog);
-                                          setDialogImageIndex(idx);
+                                          setDialogImageList([withToken(chain[0])]);
+                                          setDialogImageIndex(0);
                                           setImageDialogOpen(true);
                                         }}
                                         onError={(e) => {
@@ -4010,85 +3343,32 @@ const DNew_I = () => {
                             flex: 1,
                             display: "flex",
                             flexDirection: "column",
-                            gap: 0.75,
-                            justifyContent: "flex-start",
+                            gap: 1,
+                            justifyContent: "center",
                             alignItems: "flex-start",
                             textAlign: "left",
-                            px: 1,
-                            pb: 1,
                           }}
                         >
                           <Box
-                            sx={{ display: "flex", flexDirection: "column", gap: 0.5, mt: 1, width: '100%' }}
+                            sx={{ display: "flex", alignItems: "center", gap: 1, mt: 3, flexWrap: 'wrap' }}
                           >
                             <Typography
-                              component="div"
+                              component="span"
                               sx={{
-                                color: "text.primary",
-                                fontWeight: 800,
-                                fontSize: gridView === "3" ? 13 : 14,
-                                lineHeight: 1.2,
-                                display: "-webkit-box",
-                                WebkitLineClamp: 2,
-                                WebkitBoxOrient: "vertical",
-                                overflow: "hidden",
-                                wordBreak: 'break-word',
+                                color: "warning.main",
+                                fontWeight: "bold",
+                                fontSize: 15,
+                                display: "inline-flex",
+                                alignItems: "center",
+                                gap: 1,
+                                pt:2
                               }}
                             >
-                              {`ID: ${String(headerIdLabel)}`}{row.Design_art ? ` - ${row.Design_art}` : ""}
+
+                              {row.id_fact}
+                             
+
                             </Typography>
-
-                            {row.Fournisseur?.TYPE_SUPPLIER?.toLowerCase().includes('gold') && (
-                              <Typography
-                                variant="body2"
-                                sx={{ color: 'text.secondary', fontWeight: 800, fontSize: 12 }}
-                              >
-                                Weight: {row.qty}
-                                <Box component="span" sx={{ ml: 0.5, fontSize: 12 }}>
-                                  g
-                                </Box>
-                              </Typography>
-                            )}
-
-                            {row.Fournisseur?.TYPE_SUPPLIER && (
-                              <Typography
-                                variant="body2"
-                                sx={{
-                                  color: 'warning.main',
-                                  fontWeight: 900,
-                                  fontSize: 12,
-                                  lineHeight: 1.1,
-                                }}
-                              >
-                                {row.Fournisseur?.TYPE_SUPPLIER}
-                              </Typography>
-                            )}
-
-                            {row.Fournisseur?.client_name && (
-                              <Typography variant="body2" sx={{ color: 'text.secondary', fontWeight: 600 }}>
-                                {row.Fournisseur?.client_name}
-                              </Typography>
-                            )}
-                            {salePriceDisplay && (
-                              <Typography
-                                component="span"
-                                sx={{
-                                  color: "text.secondary",
-                                  fontWeight: 900,
-                                  fontSize: 18,
-                                  display: "inline-flex",
-                                  alignItems: "center",
-                                  gap: 0.5,
-                                  pt: 0,
-                                  
-                                }}
-                              >
-                                {salePriceDisplay}
-                                <Box component="sup" sx={{ fontSize: 11, ml: 0.25 }}>
-                                  USD
-                                </Box>
-                              </Typography>
-                            )}
                             {/* Gold Charges Row: show only Sales Price inline; admin can open details */}
                             {row.Fournisseur?.TYPE_SUPPLIER?.toLowerCase().includes('gold') && (() => {
                               const goldObj = Array.isArray(row.DistributionPurchase)
@@ -4144,8 +3424,17 @@ const DNew_I = () => {
                                 sales = null;
                               }
 
-                              // Do not show weight here; weight is already in the header for gold.
-                              return null;
+                              return (
+                                <>
+
+                                <span style={{ color: row.Color_Gold || 'goldenrod', fontWeight: 900, fontSize: 16 }}>
+                                  {row.qty}
+                                  <sup style={{ fontSize: 12 }}> g</sup>
+                                </span>
+
+
+                                </>
+                              );
                             })()}
                             {typeof row.Unite === "string" &&
                               row.Unite.startsWith("{") &&
@@ -4248,10 +3537,18 @@ const DNew_I = () => {
                               fontSize: 13,
                               color: "text.secondary",
                               "& b": { color: "text.secondary", fontWeight: 700 },
-                              width: '100%',
                             }}
                           >
                             <ul style={{ margin: 0, paddingLeft: 18 }}>
+                              <li>
+                                 {row.Fournisseur?.TYPE_SUPPLIER}
+                              </li>
+                              <li>
+                                <b>Product Name:</b> {row.Design_art}
+                              </li>
+                              <li>
+                                <b>Brand:</b> {row.Fournisseur?.client_name}
+                              </li>
                               {row.Fournisseur?.TYPE_SUPPLIER &&
                                 row.Fournisseur.TYPE_SUPPLIER.toLowerCase().includes("gold") && (
                                   <>
@@ -4281,7 +3578,12 @@ const DNew_I = () => {
                               if (!diamond) return null;
                               return (
                                 <>
-                                 
+                                  {diamond.Design_art && (
+                                    <>
+                                      {` | `}
+                                      <b>Product Name:</b> {diamond.Design_art}
+                                    </>
+                                  )}
                                   {diamond.carat && (
                                     <>
                                       {` | `}
@@ -4404,6 +3706,41 @@ const DNew_I = () => {
                                       <b>Ref. Code:</b> {diamond.CODE_EXTERNAL || row.id_fact}
                                     </>
                                   )}
+                                  {/* Show diamond sale price: prefer sale_price, else SellingPrice (both may be 0) */}
+                                  {(() => {
+                                    let show = false;
+                                    let val: any = null;
+                                    if ("sale_price" in diamond) {
+                                      show = true;
+                                      val = diamond.sale_price;
+                                    } else if ("SellingPrice" in diamond) {
+                                      show = true;
+                                      val = diamond.SellingPrice;
+                                    }
+                                    if (!show) return null;
+                                    return (
+                                      <div
+                                        style={{
+                                          color: "text.secondary",
+                                          fontWeight: 900,
+                                          marginTop: 2,
+                                          fontSize: 18,
+                                        }}
+                                      >
+                                        {val !== undefined && val !== null
+                                          ? Number(val).toLocaleString("en-US", {
+                                            minimumFractionDigits: 2,
+                                            maximumFractionDigits: 2,
+                                          })
+                                          : "-"}
+                                        <sup
+                                          style={{ fontSize: 12, marginLeft: 2 }}
+                                        >
+                                          USD
+                                        </sup>
+                                      </div>
+                                    );
+                                  })()}
                                 </>
                               );
                             })()}
@@ -4521,6 +3858,41 @@ const DNew_I = () => {
                                       | <b>Warranty:</b> {watch.warranty}
                                     </>
                                   ) : null}
+                                  {/* Watch sale price: prefer sale_price, else SellingPrice */}
+                                  {(() => {
+                                    let show = false;
+                                    let val: any = null;
+                                    if ("sale_price" in watch) {
+                                      show = true;
+                                      val = watch.sale_price;
+                                    } else if ("SellingPrice" in watch) {
+                                      show = true;
+                                      val = watch.SellingPrice;
+                                    }
+                                    if (!show) return null;
+                                    return (
+                                      <div
+                                        style={{
+                                          color: "text.secondary",
+                                          fontWeight: 900,
+                                          marginTop: 2,
+                                          fontSize: 18,
+                                        }}
+                                      >
+                                        {val !== undefined && val !== null
+                                          ? Number(val).toLocaleString("en-US", {
+                                            minimumFractionDigits: 2,
+                                            maximumFractionDigits: 2,
+                                          })
+                                          : "-"}
+                                        <sup
+                                          style={{ fontSize: 12, marginLeft: 2 }}
+                                        >
+                                          USD
+                                        </sup>
+                                      </div>
+                                    );
+                                  })()}
                                 </>
                               );
                             })()}
@@ -4530,12 +3902,10 @@ const DNew_I = () => {
                             color="warning"
                             size="small"
                             sx={{
-                              mt: 1,
+                              mt: 2,
                               fontWeight: 700,
                               borderRadius: 2,
-                              alignSelf: "stretch",
-                              width: '100%',
-                              py: 1,
+                              alignSelf: "flex-end",
                             }}
                             onClick={() => handleSave(row)}
                             disabled={
@@ -4593,7 +3963,7 @@ const DNew_I = () => {
                       color: "text.secondary",
                     })}
                   >
-                    Product Count: {filteredData.length}
+                    Total rows: {filteredData.length}
                   </Typography>
                   <Box
                     sx={{
@@ -4635,22 +4005,17 @@ const DNew_I = () => {
                           transition: "border 0.2s",
                         }}
                       >
-                        {gridView === 'icons' ? (
-                          <>
-                            <option value={24}>24</option>
-                          </>
-                        ) : gridView === '3' || gridView === '4' || gridView === '5' || gridView === '6' || gridView === '8' ? (
-                          <>
-                            <option value={12}>12</option>
-                            <option value={24}>24</option>
-                            <option value={48}>48</option>
-                            <option value={96}>96</option>
-                          </>
-                        ) : (
+                        {typeFilter === 'gold' ? (
                           <>
                             <option value={10}>10</option>
                             <option value={20}>20</option>
                             <option value={30}>30</option>
+                          </>
+                        ) : (
+                          <>
+                            <option value={6}>6</option>
+                            <option value={10}>10</option>
+                            <option value={20}>20</option>
                           </>
                         )}
                       </select>
@@ -4849,28 +4214,27 @@ const DNew_I = () => {
                 // Extract display fields from ACHATs[0] if available
                 const achat = item.ACHATs?.[0];
 
-                const itemName =
-                  (achat as any)?.Design_art || (item as any)?.Design_art || "";
-
                 const typeSupplier =
                   achat?.Fournisseur?.TYPE_SUPPLIER || "Unknown Type";
                 return (
-                  <React.Fragment key={item.id_art}>
-                    <Box
-                      sx={{
-                        mb: 0,
-                        border: "none",
-                        borderRadius: 0,
-                        display: "flex",
-                        alignItems: "center",
-                        position: "relative",
-                        bgcolor: "transparent",
-                        ...(item.IS_GIFT && {
-                          bgcolor: "rgba(255, 68, 0, 0.08)",
-                          color: "warning.main",
-                        }),
-                      }}
-                    >
+                  <Box
+                    key={item.id_art}
+                    sx={{
+                      mb: 2,
+
+                      border: "1px solid #e0e0e0",
+                      borderRadius: 2,
+                      display: "flex",
+                      alignItems: "center",
+                      position: "relative",
+                      ...(item.IS_GIFT && {
+                        bgcolor: "rgba(255, 68, 0, 0.38)",
+                        color: "warning.main",
+                        border: "2px solid",
+                        borderColor: "warning.main",
+                      }),
+                    }}
+                  >
                     {/* Show image if available */}
                     <Box
                       sx={{
@@ -5008,11 +4372,11 @@ const DNew_I = () => {
                       })()}
                     </Box>
                     <Box sx={{ flex: 1 }}>
-                      <Typography variant="body2" sx={{ fontWeight: 800 }}>
-                        ID: {item.id_art}
-                        {itemName ? ` — ${itemName}` : ""}
+                      <Typography variant="body2">ID: {item.id_art}</Typography>
+                      <Typography variant="body2" sx={{ fontWeight: 600 }}>
+                        {item.ACHATs?.[0]?.Design_art}
                       </Typography>
-
+                   
                       {typeSupplier.toLowerCase().includes("gold") && (
                         <Typography
                           variant="body2"
@@ -5041,21 +4405,13 @@ const DNew_I = () => {
                         </Typography>
                         <Typography variant="body2">
                           {item.IS_GIFT ? (
-                            <Box
-                              component="span"
-                              sx={{
-                                display: "inline-flex",
-                                alignItems: "center",
-                                gap: 0.5,
-                                color: "orangered",
-                                fontWeight: 900,
-                              }}
+                            <span
+                              style={{ color: "orangered", fontWeight: "bold" }}
                             >
-                              <CardGiftcardOutlinedIcon sx={{ fontSize: 18 }} />
-                              Marked as Gift
-                            </Box>
+                              &#127873; Is Gift
+                            </span>
                           ) : (
-                            ""
+                            "No"
                           )}
                         </Typography>
                       </Box>
@@ -5071,29 +4427,25 @@ const DNew_I = () => {
                           letterSpacing: 0.5,
                         }}
                       >
-                        {(() => {
-                          const isGold = typeSupplier.toLowerCase().includes("gold");
-                          const value =
-                            typeof item.prix_vente_remise === "number"
-                              ? item.prix_vente_remise
-                              : typeof item.prix_vente === "number"
-                              ? item.prix_vente
-                              : null;
-
-                          if (value === null) return "-";
-
-                          return (
+                        {item.total_remise ? (
+                          typeSupplier.toLowerCase().includes("gold") ? (
                             <>
-                              {value.toLocaleString(isGold ? "en-LY" : "en-US", {
-                                minimumFractionDigits: 2,
-                                maximumFractionDigits: 2,
-                              })}
+                              {item.total_remise.toLocaleString("en-LY", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                               <Box component="sup" sx={{ fontSize: 12, ml: 0.6, lineHeight: 1 }}>
-                                {isGold ? "LYD" : "USD"}
+                                LYD
                               </Box>
                             </>
-                          );
-                        })()}
+                          ) : (
+                            <>
+                              {item.total_remise.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                              <Box component="sup" sx={{ fontSize: 12, ml: 0.6, lineHeight: 1 }}>
+                                USD
+                              </Box>
+                            </>
+                          )
+                        ) : (
+                          "-"
+                        )}
                       </Typography>
                     </Box>
                     {/* Delete icon */}
@@ -5107,20 +4459,6 @@ const DNew_I = () => {
                         right: 4,
                       }}
                     >
-                      <Box sx={{ display: "flex", alignItems: "center", gap: 0.25 }}>
-                        <Switch
-                          checked={!!item.IS_GIFT}
-                          onChange={(e) => handleToggleCartGift(item, e.target.checked)}
-                          color="warning"
-                          size="small"
-                        />
-                        <CardGiftcardOutlinedIcon
-                          sx={{
-                            fontSize: 18,
-                            color: item.IS_GIFT ? "warning.main" : "text.disabled",
-                          }}
-                        />
-                      </Box>
                       <Button
                         onClick={() => {
                           setDeleteTargetId(item.id_fact);
@@ -5130,12 +4468,22 @@ const DNew_I = () => {
                         sx={{ minWidth: 0, p: 0.5 }}
                         color="error"
                       >
-                        <DeleteOutlineIcon />
+                        <span role="img" aria-label="delete">
+                          🗑️
+                        </span>
+                      </Button>
+                      <Button
+                        size="small"
+                        sx={{ minWidth: 0, p: 0.5 }}
+                        color="error"
+                        onClick={() => handleEditCartItem2(item)}
+                      >
+                        <span role="img" aria-label="edit">
+                          ✏️
+                        </span>
                       </Button>
                     </Box>
-                    </Box>
-                    {idx < datainv.length - 1 && <Divider sx={{ my: 0.75 }} />}
-                  </React.Fragment>
+                  </Box>
                 );
               })}
               {/* Total Amounts by Currency */}
@@ -5158,59 +4506,49 @@ const DNew_I = () => {
                     alignItems: "center",
                   }}
                 >
-                  Total
+                  Total Amounts
                 </Typography>
+              </Box>
+              <Box sx={{ mb: 1, p: 1, borderTop: "1px solid #eee" }}>
+                {/* Gold (LYD) */}
                 {(() => {
                   const goldTotal = getFinalTotal(datainv, "gold");
-                  const diamondTotal = getFinalTotal(datainv, "diamond");
-                  const watchTotal = getFinalTotal(datainv, "watch");
-
-                  if (goldTotal > 0) {
-                    return (
+                  return goldTotal > 0 ? (
+                    <Box
+                      sx={{
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "space-between",
+                      }}
+                    >
                       <Typography
-                        variant="subtitle2"
-                        sx={{ color: "goldenrod", fontWeight: 800 }}
+                        variant="body2"
+                        sx={{ color: "goldenrod", fontWeight: 700 }}
                       >
+                        Gold:{" "}
                         {goldTotal.toLocaleString("en-LY", {
                           minimumFractionDigits: 2,
                           maximumFractionDigits: 2,
                         })}{" "}
                         LYD
                       </Typography>
-                    );
-                  }
-                  if (diamondTotal > 0) {
-                    return (
-                      <Typography
-                        variant="subtitle2"
-                        sx={{ color: "deepskyblue", fontWeight: 800 }}
-                      >
-                        {diamondTotal.toLocaleString("en-US", {
-                          minimumFractionDigits: 2,
-                          maximumFractionDigits: 2,
-                        })}{" "}
-                        USD
-                      </Typography>
-                    );
-                  }
-                  if (watchTotal > 0) {
-                    return (
-                      <Typography
-                        variant="subtitle2"
-                        sx={{ color: "orange", fontWeight: 800 }}
-                      >
-                        {watchTotal.toLocaleString("en-US", {
-                          minimumFractionDigits: 2,
-                          maximumFractionDigits: 2,
-                        })}{" "}
-                        USD
-                      </Typography>
-                    );
-                  }
-                  return null;
+                      <Button
+                        variant="text"
+                        color="primary"
+                        size="small"
+                        startIcon={
+                          <span role="img" aria-label="edit">
+                            ✏️
+                          </span>
+                        }
+                        sx={{ minWidth: 32, p: 0.5, ml: 1, borderRadius: 1 }}
+                        onClick={handleOpenTotalsDialog}
+                        disabled={datainv.length === 0}
+                      ></Button>
+                    </Box>
+                  ) : null;
                 })()}
-              </Box>
-              <Box sx={{ mb: 1, p: 1, borderTop: "1px solid #eee" }}>
+
                 {/* Diamond (USD) */}
                 {(() => {
                   const diamondTotal = getFinalTotal(datainv, "diamond");
@@ -5275,192 +4613,29 @@ const DNew_I = () => {
                   ) : null;
                 })()}
               </Box>
-              {!canPrint ? (
-                <Button
-                  variant="outlined"
-                  color="primary"
-                  size="small"
-                  sx={{ mt: 1, fontWeight: 700, borderRadius: 2, width: "100%" }}
-                  onClick={handleOpenTotalsDialog}
-                  disabled={datainv.length === 0}
-                >
-                  Checkout
-                </Button>
-              ) : (
-                <Button
-                  variant="contained"
-                  color="primary"
-                  size="small"
-                  sx={{ mt: 1, fontWeight: 900, borderRadius: 2, width: "100%" }}
-                  onClick={() => {
-                    const latestInvoice = datainv.find(
-                      (inv) =>
-                        inv.num_fact === 0 &&
-                        inv.ps === Number(ps) &&
-                        inv.usr === Number(Cuser)
-                    );
-                    setPrintDialog({ open: true, invoice: latestInvoice || null });
-                  }}
-                  disabled={datainv.length === 0}
-                >
-                  Proceed to Invoice
-                </Button>
-              )}
-{/* 
               <Button
-                variant="text"
+                variant="outlined"
                 color="primary"
                 size="small"
-                sx={{ mt: 0.5, fontWeight: 700, borderRadius: 2, width: "100%" }}
-                onClick={handleOpenIssuedInvoices}
+                sx={{ mt: 1, fontWeight: 700, borderRadius: 2, width: "100%" }}
+                onClick={handleOpenTotalsDialog}
+                disabled={datainv.length === 0}
               >
-                View Issued Invoices
-              </Button> */}
-
-              <Dialog
-                open={issuedInvoicesOpen}
-                onClose={() => setIssuedInvoicesOpen(false)}
-                fullWidth
-                maxWidth="sm"
+                Complete Invoice Details
+              </Button>
+              <Button
+                variant="outlined"
+                color="success"
+                size="small"
+                sx={{ mt: 1, fontWeight: 700, borderRadius: 2, width: "100%" }}
+                onClick={() => {
+                  // Find the latest invoice (assuming it's the last one in datainv)
+                  handleAddNew();
+                }}
+                disabled={datainv.length === 0}
               >
-                <DialogTitle>Issued Invoices</DialogTitle>
-                <DialogContent dividers>
-                  {issuedInvoicesLoading ? (
-                    <Box sx={{ display: "flex", justifyContent: "center", p: 2 }}>
-                      <CircularProgress size={28} />
-                    </Box>
-                  ) : issuedInvoiceSummaries.length === 0 ? (
-                    <Typography variant="body2" sx={{ color: "text.secondary" }}>
-                      No issued invoices found.
-                    </Typography>
-                  ) : (
-                    <Box sx={{ display: "flex", flexDirection: "column", gap: 1 }}>
-                      {issuedInvoiceSummaries.map((inv, idx) => (
-                        <React.Fragment key={inv.num_fact}>
-                          <Box
-                            sx={{
-                              display: "flex",
-                              flexDirection: "row",
-                              gap: 1,
-                              alignItems: "stretch",
-                            }}
-                          >
-                            <Button
-                              variant="outlined"
-                              onClick={() => handleLoadIssuedInvoice(inv.num_fact)}
-                              sx={{
-                                flex: 1,
-                                justifyContent: "space-between",
-                                textTransform: "none",
-                                borderRadius: 2,
-                              }}
-                            >
-                              <Box sx={{ display: "flex", flexDirection: "column", alignItems: "flex-start" }}>
-                                <Typography sx={{ fontWeight: 900 }}>#{inv.num_fact}</Typography>
-                                <Typography variant="caption" sx={{ color: "text.secondary" }}>
-                                  {inv.client_name || ""}{inv.date_fact ? ` — ${inv.date_fact}` : ""}
-                                </Typography>
-                              </Box>
-                              <Chip label={`${inv.itemCount} items`} size="small" />
-                            </Button>
-                            <Button
-                              variant="outlined"
-                              color="warning"
-                              onClick={() => setIssuedReissueConfirm({ open: true, numFact: inv.num_fact })}
-                              sx={{ minWidth: 90, borderRadius: 2, fontWeight: 800 }}
-                            >
-                              Reissue
-                            </Button>
-                            <Button
-                              variant="outlined"
-                              color="error"
-                              onClick={() => setIssuedDeleteConfirm({ open: true, numFact: inv.num_fact })}
-                              sx={{ minWidth: 90, borderRadius: 2, fontWeight: 800 }}
-                            >
-                              Delete
-                            </Button>
-                          </Box>
-                          {idx < issuedInvoiceSummaries.length - 1 ? (
-                            <Divider sx={{ my: 0.5 }} />
-                          ) : null}
-                        </React.Fragment>
-                      ))}
-                    </Box>
-                  )}
-                </DialogContent>
-                <DialogActions>
-                  <Button onClick={() => setIssuedInvoicesOpen(false)}>Close</Button>
-                </DialogActions>
-              </Dialog>
-
-              <Dialog
-                open={issuedDeleteConfirm.open}
-                onClose={() => setIssuedDeleteConfirm({ open: false, numFact: null })}
-                fullWidth
-                maxWidth="xs"
-              >
-                <DialogTitle>Delete Issued Invoice</DialogTitle>
-                <DialogContent dividers>
-                  <Typography>
-                    Delete invoice #{issuedDeleteConfirm.numFact}? This will remove all items.
-                  </Typography>
-                </DialogContent>
-                <DialogActions>
-                  <Button
-                    onClick={() => setIssuedDeleteConfirm({ open: false, numFact: null })}
-                    disabled={issuedDeleteLoading}
-                  >
-                    Cancel
-                  </Button>
-                  <Button
-                    color="error"
-                    variant="contained"
-                    disabled={issuedDeleteLoading || !issuedDeleteConfirm.numFact}
-                    onClick={() => {
-                      if (!issuedDeleteConfirm.numFact) return;
-                      handleDeleteIssuedInvoice(issuedDeleteConfirm.numFact);
-                    }}
-                  >
-                    {issuedDeleteLoading ? <CircularProgress size={18} color="inherit" sx={{ mr: 1 }} /> : null}
-                    Delete
-                  </Button>
-                </DialogActions>
-              </Dialog>
-
-              <Dialog
-                open={issuedReissueConfirm.open}
-                onClose={() => setIssuedReissueConfirm({ open: false, numFact: null })}
-                fullWidth
-                maxWidth="xs"
-              >
-                <DialogTitle>Reissue Invoice</DialogTitle>
-                <DialogContent dividers>
-                  <Typography>
-                    Reissue invoice #{issuedReissueConfirm.numFact} into your current cart (draft invoice)?
-                  </Typography>
-                </DialogContent>
-                <DialogActions>
-                  <Button
-                    onClick={() => setIssuedReissueConfirm({ open: false, numFact: null })}
-                    disabled={issuedReissueLoading}
-                  >
-                    Cancel
-                  </Button>
-                  <Button
-                    color="warning"
-                    variant="contained"
-                    disabled={issuedReissueLoading || !issuedReissueConfirm.numFact}
-                    onClick={() => {
-                      if (!issuedReissueConfirm.numFact) return;
-                      handleReissueInvoice(issuedReissueConfirm.numFact);
-                    }}
-                  >
-                    {issuedReissueLoading ? <CircularProgress size={18} color="inherit" sx={{ mr: 1 }} /> : null}
-                    Reissue
-                  </Button>
-                </DialogActions>
-              </Dialog>
-
+                Print Invoice
+              </Button>
               <InvoiceTotalsDialog
                 Type_Supplier={
                   datainv[0]?.ACHATs?.[0]?.Fournisseur?.TYPE_SUPPLIER || ""
@@ -5478,9 +4653,6 @@ const DNew_I = () => {
                 editInvoice={editInvoice}
                 setEditInvoice={setEditInvoice}
                 errors={{ client: "" }} // You may want to handle errors statefully
-                minPer={minPer ?? undefined}
-                totalPrixVente={totalPrixVente ?? undefined}
-                referenceId={datainv[0]?.id_fact ?? 0}
               />
               <Snackbar
                 open={snackbar.open}
@@ -5510,14 +4682,11 @@ const DNew_I = () => {
                   customer: customers.find(
                     (c) => c.id_client === editInvoice.client
                   ),
-                  totalAmountLYD: totalsDialog.total_remise_final_lyd,
-                  totalAmountUSD: totalsDialog.total_remise_final,
+                  totalAmountLYD: totalsDialog.amount_lyd,
+                  totalAmountUSD: totalsDialog.amount_currency,
                   totalAmountEur: totalsDialog.amount_EUR,
                   totalWeight: 0, // Add your calculation if needed
                   itemCount: datainv.length,
-                  amount_lyd: totalsDialog.amount_lyd,
-                  amount_currency: totalsDialog.amount_currency,
-                  amount_EUR: totalsDialog.amount_EUR,
                   amount_currency_LYD: totalsDialog.amount_currency_LYD,
                   amount_EUR_LYD: totalsDialog.amount_EUR_LYD,
                   Original_Invoice:
@@ -5668,6 +4837,51 @@ const DNew_I = () => {
           </Box>
         </Box>
       </Snackbar>
+      <Dialog open={editDialogOpen} onClose={() => setEditDialogOpen(false)}>
+        <DialogTitle>Edit Discount</DialogTitle>
+        <DialogContent>
+          <TextField
+            label="Discount Amount"
+            type="number"
+            value={editDialogRemise}
+            onChange={(e) => setEditDialogRemise(Number(e.target.value))}
+            fullWidth
+            margin="normal"
+            size="small"
+          />
+          <Box sx={{ display: "flex", alignItems: "center", mt: 2 }}>
+            <input
+              type="checkbox"
+              checked={editDialogItem?.IS_GIFT}
+              onChange={(e) =>
+                setEditDialogItem((item) =>
+                  item ? { ...item, IS_GIFT: e.target.checked } : item
+                )
+              }
+              id="is-gift-checkbox"
+            />
+            <label htmlFor="is-gift-checkbox" style={{ marginLeft: 8 }}>
+              Is Gift
+            </label>
+          </Box>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setEditDialogOpen(false)} color="inherit">
+            Cancel
+          </Button>
+          <Button
+            onClick={async () => {
+              await handleEditDialogSave();
+              await fetchDataINV(); // Refresh cart list after save
+              setEditDialogOpen(false);
+            }}
+            color="primary"
+            variant="contained"
+          >
+            Save
+          </Button>
+        </DialogActions>
+      </Dialog>
     </Box>
   );
 };

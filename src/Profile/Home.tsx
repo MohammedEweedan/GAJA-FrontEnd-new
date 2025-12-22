@@ -29,10 +29,10 @@ import {
   DialogActions,
   TextField,
   Autocomplete,
-  Typography,
 } from "@mui/material";
 import { useTranslation } from "react-i18next";
 import { useNavigate, useLocation } from "react-router-dom";
+import AttachMoneyIcon from "@mui/icons-material/AttachMoney";
 
 import DashboardIcon from "@mui/icons-material/Dashboard";
 import SettingsIcon from "@mui/icons-material/Settings";
@@ -50,7 +50,6 @@ import TrendingFlatIcon from "@mui/icons-material/TrendingFlat";
 import GradeIcon from "@mui/icons-material/Grade";
 import AssignmentTurnedInIcon from "@mui/icons-material/AssignmentTurnedIn";
 import DevicesOtherIcon from "@mui/icons-material/DevicesOther";
-import LocalOfferIcon from "@mui/icons-material/LocalOffer";
 import CompareArrowsIcon from "@mui/icons-material/CompareArrows";
 import ShoppingCartIcon from "@mui/icons-material/ShoppingCart";
 import EmojiEventsIcon from "@mui/icons-material/EmojiEvents";
@@ -59,43 +58,45 @@ import WatchIcon from "@mui/icons-material/Watch";
 import {
   CurrencyExchange,
   GifBox,
-  GridGoldenratio,
   History,
   Inventory2,
   Logout,
   Paid,
   PaidTwoTone,
-  Person2Outlined,
   Sell,
   TransitEnterexit,
 } from "@mui/icons-material";
 import Brightness4Icon from "@mui/icons-material/Brightness4";
 import Brightness7Icon from "@mui/icons-material/Brightness7";
-import ChatIcon from "@mui/icons-material/Chat";
 
 import Logo from "../ui-component/Logo2";
 import LanguageSwitcher from "../components/LanguageSwitcher";
-import ChatbotWidget from "../components/ChatbotWidget";
 import { hasRole } from "../Setup/getUserInfo";
 import { useAuth } from "../contexts/AuthContext";
 import axios from "../api";
 
+// ✅ ADDED: use the same persistence logic as your second file
+import { useThemeContext } from "../theme/ThemeProvider";
+import { useLanguage } from "../contexts/LanguageContext";
+
 import Dashboard from "./Dashboard/Dashboard";
 import P404 from "./Dashboard/P404";
 import GeneralSettings from "../Setup/GS/GeneralSettings";
+import RateTbList from "../Setup/RateTbList";
+import RateTbForm from "../Setup/RateTbForm";
 import HRSettings from "../Setup/HR/HRSettings";
 import FinanceSettings from "../Setup/Finance/FinanceSettings";
 import SCSSettings from "../Setup/SCS/SCSSettings";
 import GPurchase from "../Purchase/Types/GPurchase";
-import OPurchase from "../Purchase/OriginalAchat/OPurchase";
+import OPurchase from "../Purchase/OriginalAchat/OPurchase/index";
 import Dpage from "../Purchase/OriginalAchat/DOPurchase/Dpage";
 import Wpage from "../Purchase/OriginalAchat/WOPurchase/Wpage";
 import GInventory from "../Inventory/GInventory";
 import DInventory from "../Inventory/DInventory";
 import WInventory from "../Inventory/WInventory";
+import InventoryReports from "../Inventory/InventoryReports";
 import VacationsPage from "../HR/Compensation/VacationsPage";
 import TimeSheetsPage from "../HR/Compensation/TimeSheetsPage";
-import PayrollPage from "../HR/Compensation/PayrollPage";
 import BInventory from "../Inventory/BInventory";
 import GNew_I from "../Invoices/ListCardInvoice/Gold Invoices/GNew_I";
 import InvoiceTypeSelector from "../Invoices/InvoiceTypeSelector";
@@ -110,9 +111,17 @@ import CashBookReports from "../Finance/CashBookReports";
 import createCache from "@emotion/cache";
 import { CacheProvider } from "@emotion/react";
 
-import { DYNAMIC_PREFIXES, decodeEmployeeToken, decodeClientToken, decodeSellerToken } from "../utils/routeCrypto";
+import {
+  DYNAMIC_PREFIXES,
+  decodeEmployeeToken,
+  decodeClientToken,
+  decodeSellerToken,
+} from "../utils/routeCrypto";
 import SellerReports from "../Invoices/SellerReports";
 import EmployeeProfile from "../HR/Setting/EmployeeProfile";
+import UsersDialog from "./components/UsersDialog";
+import { se } from "date-fns/locale";
+import PayrollPage from "../HR/Compensation/PayrollPage";
 import CommissionsPage from "../HR/Setting/CommissionsPage";
 
 // Resolve-focused CustomerProfile wrapper for static route
@@ -125,7 +134,10 @@ function CustomerProfileRoute() {
       try {
         let id: number | null = null;
         try {
-          const raw = typeof window !== "undefined" ? localStorage.getItem("customerFocusId") : null;
+          const raw =
+            typeof window !== "undefined"
+              ? localStorage.getItem("customerFocusId")
+              : null;
           if (raw !== null && raw !== "") id = Number(raw);
         } catch {}
         if (!id || Number.isNaN(id)) {
@@ -137,14 +149,28 @@ function CustomerProfileRoute() {
             hintPhone = localStorage.getItem("customerFocusPhone") || "";
           } catch {}
           if (hintName || hintPhone) {
-            const token = typeof window !== "undefined" ? localStorage.getItem("token") : null;
+            const token =
+              typeof window !== "undefined"
+                ? localStorage.getItem("token")
+                : null;
             try {
               const res = await axios.get(`/customers/all`, {
-                headers: { Authorization: token ? `Bearer ${token}` : undefined },
+                headers: {
+                  Authorization: token ? `Bearer ${token}` : undefined,
+                },
               });
               const list = Array.isArray(res.data) ? res.data : [];
-              const byTel = hintPhone ? list.find((c: any) => String(c.tel_client) === String(hintPhone)) : null;
-              const byName = !byTel && hintName ? list.find((c: any) => String(c.client_name) === String(hintName)) : null;
+              const byTel = hintPhone
+                ? list.find(
+                    (c: any) => String(c.tel_client) === String(hintPhone)
+                  )
+                : null;
+              const byName =
+                !byTel && hintName
+                  ? list.find(
+                      (c: any) => String(c.client_name) === String(hintName)
+                    )
+                  : null;
               const found = byTel || byName || null;
               if (found) {
                 id = Number(found.id_client || found.Id_client || found.id);
@@ -264,7 +290,7 @@ function ChangePos(_props: ChangePosProps) {
         typeof window !== "undefined" ? localStorage.getItem("user") : null;
       if (!raw) return null;
       const obj = JSON.parse(raw);
-      return obj?.Cuser ?? obj?.id ?? obj?.id_user ?? obj?.Id_user ?? null;
+      return obj?.Cuser;
     } catch {
       return null;
     }
@@ -273,9 +299,7 @@ function ChangePos(_props: ChangePosProps) {
   const [selectedId, setSelectedId] = React.useState<number>(() => {
     try {
       const saved =
-        typeof window !== "undefined"
-          ? localStorage.getItem("selectedPs")
-          : null;
+        typeof window !== "undefined" ? localStorage.getItem("selectedPs") : null;
       if (saved !== null && saved !== "") return Number(saved);
     } catch {}
     return -1;
@@ -296,7 +320,6 @@ function ChangePos(_props: ChangePosProps) {
 
   const handleSavePs = () => {
     try {
-      // persist selected POS id (use '' for All / -1)
       const rawValue = selectedId !== undefined ? selectedId : psValue || "";
       const valueToSave = Number(rawValue) === -1 ? "" : rawValue;
 
@@ -304,7 +327,6 @@ function ChangePos(_props: ChangePosProps) {
         (auth as any).updatePs(valueToSave);
       }
 
-      // update or create localStorage.user.ps
       try {
         const u = localStorage.getItem("user");
         if (u) {
@@ -314,8 +336,7 @@ function ChangePos(_props: ChangePosProps) {
         } else {
           localStorage.setItem("user", JSON.stringify({ ps: valueToSave }));
         }
-      } catch (e) {
-        // fallback: set minimal user object
+      } catch {
         try {
           localStorage.setItem("user", JSON.stringify({ ps: valueToSave }));
         } catch {}
@@ -330,7 +351,6 @@ function ChangePos(_props: ChangePosProps) {
     }
     handleClosePs();
 
-    // Refresh the page so dashboards pick up the new PS immediately
     try {
       if (typeof window !== "undefined") {
         setTimeout(() => window.location.reload(), 120);
@@ -353,9 +373,7 @@ function ChangePos(_props: ChangePosProps) {
         if (mounted && Array.isArray(res?.data)) {
           setPosOptions(res.data);
         }
-      } catch (e) {
-        // ignore
-      }
+      } catch {}
     };
     fetchPOS();
     return () => {
@@ -363,13 +381,13 @@ function ChangePos(_props: ChangePosProps) {
     };
   }, []);
 
-  // Real-time subscription for privilege changes (kept from original ChangePos)
+  // Real-time subscription for privilege changes
   React.useEffect(() => {
     const sseUrl = process.env.REACT_APP_USERS_SSE_URL || null;
     const wsUrl = process.env.REACT_APP_USERS_WS_URL || null;
     const apiIp = process.env.REACT_APP_API_IP || "";
 
-    const inferredSse = !sseUrl && apiIp ? `${apiIp}/events/users` : sseUrl;
+    const inferredSse = !sseUrl && apiIp ? `${apiIp}events/users` : sseUrl;
     const endpoint = inferredSse || wsUrl;
     if (!endpoint) return undefined;
 
@@ -416,7 +434,6 @@ function ChangePos(_props: ChangePosProps) {
               (auth as any).setPrivilege(remotePrv);
             } catch {}
           } else if (typeof window !== "undefined") {
-            // fallback: write and refresh
             try {
               const raw = localStorage.getItem("user");
               const obj = raw ? JSON.parse(raw) : {};
@@ -429,9 +446,7 @@ function ChangePos(_props: ChangePosProps) {
             } catch {}
           }
         }
-      } catch {
-        // ignore malformed messages
-      }
+      } catch {}
     };
 
     if (inferredSse) {
@@ -440,24 +455,16 @@ function ChangePos(_props: ChangePosProps) {
         es.onmessage = (evt) => {
           if (!closed) handlePayload(evt.data);
         };
-        es.onerror = () => {
-          // no-op
-        };
-      } catch (e) {
-        // ignore
-      }
+        es.onerror = () => {};
+      } catch {}
     } else if (wsUrl) {
       try {
         ws = new WebSocket(wsUrl);
         ws.onmessage = (evt) => {
           if (!closed) handlePayload(evt.data);
         };
-        ws.onerror = () => {
-          // ignore
-        };
-      } catch (e) {
-        // ignore
-      }
+        ws.onerror = () => {};
+      } catch {}
     }
 
     return () => {
@@ -471,23 +478,39 @@ function ChangePos(_props: ChangePosProps) {
     };
   }, [auth]);
 
-  // Determine if user is ROLE_ADMIN
-  let isAdmin = false;
-  try {
-    const u = localStorage.getItem("user");
-    if (u) {
-      const obj = JSON.parse(u);
-      const roles =
-        obj?.Prvilege || obj?.roles || obj?.Roles || obj?.role || "";
-      if (Array.isArray(roles)) {
-        isAdmin = roles.some((r: any) =>
-          String(r).toUpperCase().includes("ROLE_ADMIN")
-        );
-      } else if (typeof roles === "string") {
-        isAdmin = roles.toUpperCase().includes("ROLE_ADMIN");
-      }
-    }
-  } catch {}
+  // Determine if user can "Change POS" based on Roles coming from /me API (DB)
+  const [canChangePos, setCanChangePos] = React.useState(false);
+
+  React.useEffect(() => {
+    let cancelled = false;
+
+    const loadRoles = async () => {
+      try {
+        const res = await axios.get(`/me`);
+        const payload = res?.data;
+        const u = (payload as any) || {};
+        const roles = u?.Action_user;
+
+        let next = false;
+        if (Array.isArray(roles)) {
+          next = roles.some((r: any) =>
+            String(r).toLowerCase().includes("change pos")
+          );
+        } else if (typeof roles === "string") {
+          next = roles.toLowerCase().includes("change pos");
+        }
+
+        if (!cancelled) setCanChangePos(next);
+      } catch {}
+    };
+
+    loadRoles();
+    const id = setInterval(loadRoles, 10000);
+    return () => {
+      cancelled = true;
+      clearInterval(id as unknown as number);
+    };
+  }, []);
 
   return (
     <>
@@ -513,16 +536,9 @@ function ChangePos(_props: ChangePosProps) {
             "100%": { transform: "rotate(360deg) scale(1)" },
           },
         }}
-        startIcon={
-          <Box
-            component="span"
-            sx={{ display: "inline-flex" }}
-          >
-            {/* <Inventory2 /> */}
-          </Box>
-        }
+        startIcon={<Box component="span" sx={{ display: "inline-flex" }} />}
         aria-label={t("Change POS") || "Change POS"}
-        disabled={!(isAdmin || String(currentStoredUserId) === "68")}
+        disabled={!(canChangePos || String(currentStoredUserId) === "68")}
       >
         {`${t("Change POS") || "Change POS"} (${currentPosName})`}
       </Button>
@@ -592,8 +608,6 @@ const realRoutes = [
   "/invoice/salesReports",
   "/invoice/otherReports",
   "/invoice/customersReports",
-  "/invoice/sellerReports",
-  "/invoice/commissions",
   "/inventory/diamondinventory",
   "/inventory/watchesinventory",
   "/inventory/boxesinventory",
@@ -607,6 +621,7 @@ const realRoutes = [
   "/invoice/customerProfile",
   "/humanResources/regulationscompensations/timesheets",
   "/humanResources/regulationscompensations/payroll",
+  "/humanResources/regulationscompensations/commissions",
 ];
 
 let routeToEncrypted: Record<string, string> = {};
@@ -646,22 +661,18 @@ function useDemoRouter(initialPath: string): Router {
     if (typeof window !== "undefined" && window.location?.pathname) {
       const current = window.location.pathname;
 
-      // Keep dynamic prefixes AS-IS
       if (DYNAMIC_PREFIXES.some((p) => current.startsWith(p))) {
         return current;
       }
 
-      // If current is a real route, rewrite to encrypted
       if (routeToEncrypted[current]) {
         const crypted = routeToEncrypted[current];
         window.history.replaceState({}, "", crypted);
         return crypted;
       }
 
-      // If current already looks encrypted, keep it
       if (encryptedToRoute[current]) return current;
 
-      // Otherwise, keep whatever was there (404 handler will catch)
       return current;
     }
     return initialPath;
@@ -680,7 +691,6 @@ function useDemoRouter(initialPath: string): Router {
       navigate: (path: string | URL) => {
         let newPath = String(path);
 
-        // SKIP encryption for dynamic prefixes like /p/
         const isDynamic = DYNAMIC_PREFIXES.some((p) => newPath.startsWith(p));
         if (!isDynamic && routeToEncrypted[newPath]) {
           newPath = routeToEncrypted[newPath];
@@ -721,10 +731,11 @@ const BInventoryWrapper = ({ type }: { type: string }) => (
   <BInventory key={type} Type={type} />
 );
 
+const InventoryReportsWrapper = () => <InventoryReports />;
+
 const ProfileWithId = EmployeeProfile as unknown as _ProfileWithId;
 
 function getPageComponent(pathname: string) {
-  // 1) Handle dynamic /p/<token> FIRST
   if (pathname.startsWith("/p/")) {
     const token = pathname.slice(3);
     const id = decodeEmployeeToken(token);
@@ -732,11 +743,9 @@ function getPageComponent(pathname: string) {
     return <ProfileWithId id={id} />;
   }
 
-  // 1b) Handle dynamic /c/<token> for client (customer) profile redirect (Timesheets-like)
   if (pathname.startsWith("/c/")) {
     const token = pathname.slice(3);
     const id = decodeClientToken(token);
-    // Stash focused id for any nested pages to read and render a profile shell
     try {
       if (id && typeof window !== "undefined") {
         localStorage.setItem("customerFocusId", String(id));
@@ -746,15 +755,9 @@ function getPageComponent(pathname: string) {
     return <CustomerProfile id={id} />;
   }
 
-  // 1c) Handle dynamic /s/<token> for seller reports redirect
   if (pathname.startsWith("/s/")) {
     const token = pathname.slice(3);
-    const id = decodeSellerToken(token);
-    try {
-      if (id && typeof window !== "undefined") {
-        localStorage.setItem("sellerFocusId", String(id));
-      }
-    } catch {}
+    decodeSellerToken(token);
     return <SellerReports />;
   }
 
@@ -762,8 +765,13 @@ function getPageComponent(pathname: string) {
   switch (realPath) {
     case "/setting/generals":
       return <GeneralSettings />;
+    case "/setting/generals/users":
+      return (
+        <Box sx={{ p: 2 }}>
+          <UsersDialog />
+        </Box>
+      );
     case "/dashboard":
-      return <DashboardPage />;
     case "/home":
       return <DashboardPage />;
     case "/setting/hrSetting":
@@ -790,8 +798,6 @@ function getPageComponent(pathname: string) {
       return <CustomersReports />;
     case "/invoice/sellerReports":
       return <SellerReports />;
-    case "/humanResources/regulationscompensations/commissions":
-      return <CommissionsPage />;
     case "/inventory/goldinventory":
       return <GInventoryWrapper type="gold" />;
     case "/inventory/diamondinventory":
@@ -800,6 +806,8 @@ function getPageComponent(pathname: string) {
       return <WInventoryWrapper type="watches" />;
     case "/inventory/boxesinventory":
       return <BInventoryWrapper type="boxes" />;
+    case "/inventory/inventoryReports":
+      return <InventoryReportsWrapper />;
     case "/purchaseProducts/OPurchase":
       return <OPurchase />;
     case "/purchaseProducts/DOPurchase":
@@ -812,12 +820,14 @@ function getPageComponent(pathname: string) {
       return <Expenses />;
     case "/cashBook/cashbookReports":
       return <CashBookReports />;
-    case "/humanResources/regulationscompensations/vacations":
-      return <VacationsPage />;
-    case "/humanResources/regulationscompensations/timesheets":
-      return <TimeSheetsPage />;
-    case "/humanResources/regulationscompensations/payroll":
+    case "/humanResources/payroll":  
       return <PayrollPage />;
+    case "/humanResources/vacations":
+      return <VacationsPage />;
+    case "/humanResources/timesheets":
+      return <TimeSheetsPage />;
+    case "/humanResources/commissions":  
+      return <CommissionsPage />;
     case "/invoice/customerProfile":
       return <CustomerProfileRoute />;
     default:
@@ -841,11 +851,7 @@ function buildNavigation(
     showSales: boolean;
   }
 ): Navigation {
-  const iconSx = {
-    sx: {
-      color: accent,
-    },
-  } as const;
+  const iconSx = { sx: { color: accent } } as const;
 
   return [
     { kind: "header", title: t("nav.headers.main") },
@@ -950,7 +956,7 @@ function buildNavigation(
               {
                 segment: "goldInvoice",
                 title: t("nav.invoice.createNew"),
-                icon: <GridGoldenratio {...iconSx} />,
+                icon: <History {...iconSx} />,
               },
               {
                 segment: "salesReports",
@@ -960,17 +966,12 @@ function buildNavigation(
               {
                 segment: "otherReports",
                 title: t("nav.invoice.otherReports"),
-                icon: <LocalOfferIcon {...iconSx} />,
+                icon: <History {...iconSx} />,
               },
               {
                 segment: "customersReports",
                 title: t("nav.invoice.customersReports"),
-                icon: <Person2Outlined {...iconSx} />,
-              },
-              {
-                segment: "sellerReports",
-                title: t("nav.invoice.sellerReports"),
-                icon: <TrendingUpIcon {...iconSx} />,
+                icon: <History {...iconSx} />,
               },
             ],
           },
@@ -1002,6 +1003,11 @@ function buildNavigation(
                 segment: "boxesinventory",
                 title: t("nav.inventory.boxes"),
                 icon: <GifBox {...iconSx} />,
+              },
+              {
+                segment: "inventoryReports",
+                title: t("nav.inventory.reports"),
+                icon: <History {...iconSx} />,
               },
             ],
           },
@@ -1051,71 +1057,64 @@ function buildNavigation(
             icon: <Diversity3Icon {...iconSx} />,
             children: [
               {
-                segment: "regulationscompensations",
-                title: t("nav.hr.compensations.root"),
-                icon: <CategoryIcon {...iconSx} />,
-                children: [
-                  {
-                    segment: "payroll",
-                    title: t("nav.hr.compensations.payroll"),
-                    icon: <PaidTwoTone {...iconSx} />,
-                  },
-                  {
-                    segment: "vacations",
-                    title: t("nav.hr.compensations.vacations"),
-                    icon: <FlightTakeoffIcon {...iconSx} />,
-                  },
-                  {
-                    segment: "timesheets",
-                    title: t("nav.hr.compensations.timesheets"),
-                    icon: <AccessTimeIcon {...iconSx} />,
-                  },
-                  {
-                    segment: "commissions",
-                    title: t("nav.invoice.commissions") || "Commissions",
-                    icon: <GradeIcon {...iconSx} />,
-                  },
-                  {
-                    segment: "promotions",
-                    title: t("nav.hr.compensations.promotions"),
-                    icon: <TrendingUpIcon {...iconSx} />,
-                  },
-                  {
-                    segment: "wletter",
-                    title: t("nav.hr.compensations.warningLetter"),
-                    icon: <ReportProblemIcon {...iconSx} />,
-                  },
-                  {
-                    segment: "productivity",
-                    title: t("nav.hr.compensations.productivity"),
-                    icon: <TrendingFlatIcon {...iconSx} />,
-                  },
-                  {
-                    segment: "transfer",
-                    title: t("nav.hr.compensations.transfer"),
-                    icon: <CompareArrowsIcon {...iconSx} />,
-                  },
-                  {
-                    segment: "evaluation",
-                    title: t("nav.hr.compensations.evaluation"),
-                    icon: <GradeIcon {...iconSx} />,
-                  },
-                  {
-                    segment: "missions",
-                    title: t("nav.hr.compensations.missions"),
-                    icon: <AssignmentTurnedInIcon {...iconSx} />,
-                  },
-                  {
-                    segment: "lequipement",
-                    title: t("nav.hr.compensations.loanEquipment"),
-                    icon: <DevicesOtherIcon {...iconSx} />,
-                  },
-                  {
-                    segment: "delegation",
-                    title: t("nav.hr.compensations.delegation"),
-                    icon: <PeopleAltIcon {...iconSx} />,
-                  },
-                ],
+                segment: "payroll",
+                title: t("nav.hr.compensations.payroll"),
+                icon: <AttachMoneyIcon {...iconSx} />,
+              },
+              {
+                segment: "vacations",
+                title: t("nav.hr.compensations.vacations"),
+                icon: <FlightTakeoffIcon {...iconSx} />,
+              },
+              {
+                segment: "timesheets",
+                title: t("nav.hr.compensations.timesheets"),
+                icon: <AccessTimeIcon {...iconSx} />,
+              },
+              {
+                segment: "commissions",
+                title: t("nav.invoice.commissions"),
+                icon: <MonetizationOnIcon {...iconSx} />,
+              },
+              {
+                segment: "promotions",
+                title: t("nav.hr.compensations.promotions"),
+                icon: <TrendingUpIcon {...iconSx} />,
+              },
+              {
+                segment: "wletter",
+                title: t("nav.hr.compensations.warningLetter"),
+                icon: <ReportProblemIcon {...iconSx} />,
+              },
+              {
+                segment: "productivity",
+                title: t("nav.hr.compensations.productivity"),
+                icon: <TrendingFlatIcon {...iconSx} />,
+              },
+              {
+                segment: "transfer",
+                title: t("nav.hr.compensations.transfer"),
+                icon: <CompareArrowsIcon {...iconSx} />,
+              },
+              {
+                segment: "evaluation",
+                title: t("nav.hr.compensations.evaluation"),
+                icon: <GradeIcon {...iconSx} />,
+              },
+              {
+                segment: "missions",
+                title: t("nav.hr.compensations.missions"),
+                icon: <AssignmentTurnedInIcon {...iconSx} />,
+              },
+              {
+                segment: "lequipement",
+                title: t("nav.hr.compensations.loanEquipment"),
+                icon: <DevicesOtherIcon {...iconSx} />,
+              },
+              {
+                segment: "delegation",
+                title: t("nav.hr.compensations.delegation"),
+                icon: <PeopleAltIcon {...iconSx} />,
               },
             ],
           },
@@ -1126,37 +1125,28 @@ function buildNavigation(
 
 // ---------- LTR cache creator ----------
 function createEmotionCacheLTR() {
-  return createCache({
-    key: "mui-ltr",
-    prepend: true,
-  });
+  return createCache({ key: "mui-ltr", prepend: true });
 }
 
 // ---------- Component ----------
 export default function Home(props: any) {
+  // State for RateTb dialogs
+  const [rateModalOpen, setRateModalOpen] = React.useState(false);
+  const [rateListOpen, setRateListOpen] = React.useState(false);
+  const [editData, setEditData] = React.useState<any>(null);
   const { t } = useTranslation();
 
-  // Lock to LTR
-  const dir: "ltr" = "ltr";
+  // ✅ NEW: get persisted theme + language from your contexts (same as 2nd file)
+  const { mode, toggleColorMode } = useThemeContext();
+  const { direction } = useLanguage();
 
-  const [mode, setMode] = React.useState<"light" | "dark">(() => {
-    try {
-      const saved =
-        typeof window !== "undefined"
-          ? (localStorage.getItem("themeMode") as "light" | "dark" | null)
-          : null;
-      if (saved === "light" || saved === "dark") return saved;
-    } catch {}
-    return "light";
-  });
-
-  // Build theme with **fixed LTR** direction
+  // Build theme using global mode + language direction
   const appTheme: Theme = React.useMemo(() => {
     const tokens = getDesignTokens(mode) as any;
-    const base = createTheme({ direction: dir, ...tokens }) as any;
+    const base = createTheme({ direction, ...tokens }) as any;
     base.palette.gaja = tokens.palette?.gaja;
     return base as Theme;
-  }, [mode]);
+  }, [mode, direction]);
 
   const { window } = props;
   const [initialPath] = React.useState(() =>
@@ -1169,7 +1159,6 @@ export default function Home(props: any) {
   const demoWindow = typeof window !== "undefined" ? window : undefined;
 
   const [snackbarOpen, setSnackbarOpen] = React.useState(false);
-  const [aiOpen, setAiOpen] = React.useState(false);
 
   // Sync Toolpad router with BrowserRouter so navigating to /p/<token> opens profile instantly
   React.useEffect(() => {
@@ -1180,76 +1169,47 @@ export default function Home(props: any) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [location.pathname]);
 
-  const colorMode = React.useMemo(
-    () => ({
-      toggleColorMode: () => {
-        setMode((prev) => {
-          const next = prev === "light" ? "dark" : "light";
-          if (typeof window !== "undefined")
-            localStorage.setItem("themeMode", next);
-          setSnackbarOpen(true);
-          return next;
-        });
-      },
-    }),
-    []
-  );
+  // ✅ NEW: theme toggle uses context (and context handles localStorage)
+  const onToggleTheme = () => {
+    toggleColorMode();
+    setSnackbarOpen(true);
+  };
 
-  // Set document dir to LTR once
+  // ✅ NEW: keep document dir synced with language direction
   React.useEffect(() => {
-    document.documentElement.setAttribute("dir", dir);
-  }, []);
-
-  // USD→LYD rates storage helpers
-  const formatNow = React.useCallback(() => {
-    const d = new Date();
-    const pad = (n: number) => String(n).padStart(2, "0");
-    return `${pad(d.getDate())}/${pad(d.getMonth() + 1)}/${d.getFullYear()} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
-  }, []);
-  const parseTs = React.useCallback((s: string) => {
-    // Expect DD/MM/YYYY HH:MM:SS
-    const m = s.match(/^(\d{2})\/(\d{2})\/(\d{4})\s+(\d{2}):(\d{2}):(\d{2})$/);
-    if (!m) return new Date();
-    const [, dd, mm, yyyy, HH, MM, SS] = m;
-    return new Date(Number(yyyy), Number(mm) - 1, Number(dd), Number(HH), Number(MM), Number(SS));
-  }, []);
-  const [rateOpen, setRateOpen] = React.useState(false);
-  const [rateInput, setRateInput] = React.useState<string>("");
-  const [tsInput, setTsInput] = React.useState<string>(() => formatNow());
-  const [recentRates, setRecentRates] = React.useState<Array<{ rate: number; ts: string; tsText?: string }>>([]);
-  const latestRate = React.useMemo(() => (recentRates.length ? recentRates[0] : null), [recentRates]);
-  const loadRates = React.useCallback(() => {
     try {
-      const raw = localStorage.getItem("usd_lyd_rates_v1");
-      const arr = raw ? JSON.parse(raw) : [];
-      if (Array.isArray(arr)) {
-        const sorted = [...arr].sort((a, b) => new Date(b.ts).getTime() - new Date(a.ts).getTime());
-        setRecentRates(sorted);
-      } else setRecentRates([]);
-    } catch {
-      setRecentRates([]);
-    }
-  }, []);
-  React.useEffect(() => {
-    loadRates();
-    const onStorage = (e: StorageEvent) => {
-      if (e && e.key === "usd_lyd_rates_v1") loadRates();
-    };
-    const w: any = (typeof globalThis !== "undefined" && (globalThis as any).window) ? (globalThis as any).window : undefined;
-    if (w && typeof w.addEventListener === "function") {
-      w.addEventListener("storage", onStorage);
-      return () => {
-        try { w.removeEventListener("storage", onStorage); } catch {}
-      };
-    }
-    return () => {};
-  }, [loadRates]);
+      document.documentElement.setAttribute("dir", direction);
+    } catch {}
+  }, [direction]);
 
   const navigate = useNavigate();
   const handleLogout = () => {
     localStorage.clear();
     navigate("/", { replace: true });
   };
+
+  // Poll backend every 10s to verify current user's `actived` flag.
+  React.useEffect(() => {
+    const checkActived = async () => {
+      try {
+        const raw = localStorage.getItem("user");
+        if (!raw) {
+          handleLogout();
+          return;
+        }
+        const res = await axios.get(`/me`);
+        const payload = res?.data;
+        const u = payload?.user ?? payload;
+        const isActive = Boolean(u?.actived);
+        if (isActive === false) handleLogout();
+      } catch {}
+    };
+
+    checkActived();
+    const id = setInterval(checkActived, 10000);
+    return () => clearInterval(id as unknown as number);
+  }, []);
+
   const handleCloseSnackbar = (
     _e?: React.SyntheticEvent | Event,
     reason?: string
@@ -1297,7 +1257,7 @@ export default function Home(props: any) {
     document.title = title;
   }, [router.pathname, NAV, t]);
 
-  // Role label
+  // Role label (unchanged)
   const roleLabel = React.useMemo(() => {
     const normalizeRoles = (input: any): string[] => {
       if (!input) return [];
@@ -1366,7 +1326,6 @@ export default function Home(props: any) {
     }
   }, []);
 
-  // Emotion cache per direction
   const cache = React.useMemo(() => createEmotionCacheLTR(), []);
 
   return (
@@ -1436,10 +1395,8 @@ export default function Home(props: any) {
                       width: "100%",
                     }}
                   >
-                    {/* LEFT: spacer to push everything to the right */}
                     <Box sx={{ flex: 1 }} />
 
-                    {/* RIGHT cluster — EXACT ORDER: Role → ChangePOS → Logout → Theme → Lang → AI */}
                     {roleLabel && (
                       <>
                         <Chip
@@ -1448,48 +1405,41 @@ export default function Home(props: any) {
                           size="small"
                           sx={{ fontWeight: 800, letterSpacing: 0.3 }}
                         />
-
-                        {/* PS selection dropdown button */}
                         <ChangePos />
+                        {roleLabel === "Admin" && (
+                          <Button
+                            variant="outlined"
+                            color="primary"
+                            size="small"
+                            onClick={() => setRateListOpen(true)}
+                            sx={{ ml: 1 }}
+                          >
+                            Rates List
+                          </Button>
+                        )}
                       </>
                     )}
 
-                    <Tooltip
-                      title={
-                        mode === "dark"
-                          ? t("tooltip.lightMode")
-                          : t("tooltip.darkMode")
-                      }
-                    >
-                      <IconButton
-                        onClick={colorMode.toggleColorMode}
-                        aria-label={t("aria.toggleTheme")}
-                        sx={{
-                          color: accent,
-                          "&:hover": { backgroundColor: "action.hover" },
-                        }}
-                      >
-                        {mode === "dark" ? (
-                          <Brightness7Icon />
-                        ) : (
-                          <Brightness4Icon />
-                        )}
-                      </IconButton>
-                    </Tooltip>
+                    <RateTbList
+                      open={rateListOpen}
+                      onClose={() => setRateListOpen(false)}
+                      onEdit={(rate) => {
+                        setEditData(rate);
+                        setRateModalOpen(true);
+                        setRateListOpen(false);
+                      }}
+                      onAdd={() => {
+                        setEditData(null);
+                        setRateModalOpen(true);
+                      }}
+                    />
+                    <RateTbForm
+                      visible={rateModalOpen}
+                      onClose={() => setRateModalOpen(false)}
+                      editData={editData}
+                      onSuccess={() => setRateListOpen(true)}
+                    />
 
-                    <LanguageSwitcher />
-                    
-                    <Button size="small" variant="outlined" onClick={() => { setRateInput(""); setTsInput(formatNow()); setRateOpen(true); }}>
-                      Add Rate
-                    </Button>
-                    {(
-                      <Chip
-                        label={`USD→LYD: ${latestRate?.rate ? Number(latestRate.rate).toFixed(3) : "-"}`}
-                        size="small"
-                        sx={{ fontWeight: 700 }}
-                      />
-                    )}
-                    
                     <Tooltip title={t("tooltip.logout")}>
                       <IconButton
                         onClick={handleLogout}
@@ -1499,18 +1449,35 @@ export default function Home(props: any) {
                         <Logout />
                       </IconButton>
                     </Tooltip>
+
+                    <Tooltip
+                      title={
+                        mode === "dark"
+                          ? t("tooltip.lightMode")
+                          : t("tooltip.darkMode")
+                      }
+                    >
+                      <IconButton
+                        onClick={onToggleTheme}
+                        aria-label={t("aria.toggleTheme")}
+                        sx={{
+                          color: accent,
+                          "&:hover": { backgroundColor: "action.hover" },
+                        }}
+                      >
+                        {mode === "dark" ? <Brightness7Icon /> : <Brightness4Icon />}
+                      </IconButton>
+                    </Tooltip>
+
+                    <LanguageSwitcher />
                   </Box>
                 ),
               }}
             >
-              {/* content wrapper to give side padding for inner pages */}
-              <Box sx={{ px: 3, py: 1, width: '100%' }}>
+              <Box sx={{ px: 3, py: 1, width: "100%" }}>
                 {getPageComponent(router.pathname)}
               </Box>
             </DashboardLayout>
-
-            {/* ChatGPT-style dialog (imported) */}
-            <ChatbotWidget open={aiOpen} onClose={() => setAiOpen(false)} />
 
             <Snackbar
               open={snackbarOpen}
@@ -1518,7 +1485,7 @@ export default function Home(props: any) {
               onClose={handleCloseSnackbar}
               anchorOrigin={{
                 vertical: "bottom",
-                horizontal: dir === "ltr" ? "left" : "right",
+                horizontal: direction === "ltr" ? "left" : "right",
               }}
             >
               <Alert
@@ -1532,61 +1499,6 @@ export default function Home(props: any) {
                 {mode === "dark" ? t("toast.darkMode") : t("toast.lightMode")}
               </Alert>
             </Snackbar>
-
-            {/* USD→LYD Rates Dialog */}
-            <Dialog open={rateOpen} onClose={() => setRateOpen(false)} maxWidth="xs" fullWidth>
-              <DialogTitle>USD→LYD Rate</DialogTitle>
-              <DialogContent>
-                <Box sx={{ display: "flex", flexDirection: "column", gap: 1, mt: 1 }}>
-                  <TextField
-                    label="Rate (USD→LYD)"
-                    type="number"
-                    value={rateInput}
-                    onChange={(e) => setRateInput(e.target.value)}
-                    size="small"
-                    inputProps={{ step: "0.0001" }}
-                  />
-                  <TextField
-                    label="Timestamp (DD/MM/YYYY HH:MM:SS)"
-                    value={tsInput}
-                    onChange={(e) => setTsInput(e.target.value)}
-                    size="small"
-                  />
-                  {recentRates.length > 0 && (
-                    <Box sx={{ mt: 1 }}>
-                      <Typography variant="caption" sx={{ fontWeight: 700 }}>Recent</Typography>
-                      <Box sx={{ display: "flex", gap: 0.5, flexWrap: "wrap", mt: 0.5 }}>
-                        {recentRates.slice(0, 5).map((r, idx) => (
-                          <Chip key={idx} size="small" label={`${(r.tsText || new Date(r.ts).toLocaleString())}: ${Number(r.rate).toFixed(3)}`} />
-                        ))}
-                      </Box>
-                    </Box>
-                  )}
-                </Box>
-              </DialogContent>
-              <DialogActions>
-                <Button onClick={() => setRateOpen(false)}>Close</Button>
-                <Button
-                  onClick={() => {
-                    const rate = Number(rateInput);
-                    if (!rate || Number.isNaN(rate) || rate <= 0) return;
-                    const tsDate = parseTs(tsInput);
-                    const entry = { rate, ts: tsDate.toISOString(), tsText: tsInput };
-                    try {
-                      const raw = localStorage.getItem("usd_lyd_rates_v1");
-                      const arr = raw ? JSON.parse(raw) : [];
-                      const next = Array.isArray(arr) ? [...arr, entry] : [entry];
-                      localStorage.setItem("usd_lyd_rates_v1", JSON.stringify(next));
-                    } catch {}
-                    loadRates();
-                    setRateOpen(false);
-                  }}
-                  variant="contained"
-                >
-                  Save
-                </Button>
-              </DialogActions>
-            </Dialog>
           </AppProvider>
         </ThemeProvider>
       </StyledEngineProvider>

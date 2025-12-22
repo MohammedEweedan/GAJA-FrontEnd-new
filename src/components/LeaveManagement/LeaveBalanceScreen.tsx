@@ -36,15 +36,21 @@ import {
 } from "@mui/material";
 import CloseIcon from "@mui/icons-material/Close";
 import NotificationsIcon from "@mui/icons-material/Notifications";
+import { listPsPoints } from "../../api/attendance";
 import {
   getLeaveBalance,
   getLeaveRequests,
   getHolidays,
   getLeaveTypes,
+  createLeaveRequest,
 } from "../../services/leaveService";
 import { format } from "date-fns";
 import { TablePagination, LinearProgress } from "@mui/material";
-import { differenceInBusinessDays } from "date-fns";
+import { LocalizationProvider } from "@mui/x-date-pickers/LocalizationProvider";
+import { AdapterDateFns } from "@mui/x-date-pickers/AdapterDateFns";
+import { DateCalendar } from "@mui/x-date-pickers/DateCalendar";
+import { PickersDay, PickersDayProps } from "@mui/x-date-pickers/PickersDay";
+import { enGB } from "date-fns/locale";
 
 // Reusable title with top-right X
 const DialogTitleWithClose: React.FC<{ onClose: () => void; children: React.ReactNode }> = ({ onClose, children }) => (
@@ -68,6 +74,8 @@ type HistoryRow = {
   date_depart?: string;
   date_end?: string;
   nbr_jour?: number;
+  effectiveDays?: number;
+  excluded?: any;
   state?: string;
   startDate?: string;
   endDate?: string;
@@ -79,6 +87,10 @@ interface LeaveBalanceResponse {
   entitlement: number;
   used: number;
   remaining: number;
+  accruedToDate?: number;
+  carryForward?: number;
+  currentYearAccrued?: number;
+  monthlyRate?: number;
   leaveHistory: HistoryRow[];
 }
 
@@ -103,6 +115,8 @@ const LeaveBalanceScreen: React.FC<{ employeeId?: number | string }> = ({
   const [contractStartDate, setContractStartDate] = useState<Date | null>(null);
   const [employeeInfo, setEmployeeInfo] = useState<any | null>(null);
 
+  const [psNameById, setPsNameById] = useState<Record<number, string>>({});
+
   const [pdfRangeOpen, setPdfRangeOpen] = useState(false);
   const [pdfFrom, setPdfFrom] = useState<string>("");
   const [pdfTo, setPdfTo] = useState<string>("");
@@ -112,6 +126,9 @@ const LeaveBalanceScreen: React.FC<{ employeeId?: number | string }> = ({
   >({});
   const [holidaySetState, setHolidaySetState] = useState<Set<string>>(
     new Set()
+  );
+  const [holidayNameMap, setHolidayNameMap] = useState<Record<string, string>>(
+    {}
   );
 
   // monthly ledger
@@ -200,12 +217,39 @@ const LeaveBalanceScreen: React.FC<{ employeeId?: number | string }> = ({
 
         try {
           const requests = await getLeaveRequests(empId);
-          const existing = Array.isArray(data.leaveHistory)
+          const existingRaw = Array.isArray(data.leaveHistory)
             ? data.leaveHistory
             : [];
+
+          // Normalize balance-ledger rows so UI can classify them by type and status
+          // (ledger rows are authoritative for effectiveDays/excluded)
+          const existing = existingRaw.map((row: any) => {
+            const out = { ...row };
+            if (out.leaveTypeId != null && out.id_can == null) out.id_can = out.leaveTypeId;
+            if (out.leaveTypeId != null && out.idCan == null) out.idCan = out.leaveTypeId;
+            if (!out.state && !out.status) out.state = "approved";
+            return out;
+          });
+
           const byId: Record<string, any> = {};
-          [...existing, ...requests].forEach((row: any) => {
-            byId[String(row.int_con ?? row.id)] = row;
+          const isLedgerRow = (x: any) =>
+            x && (x.deducted != null || x.runningTotal != null || x.leaveTypeId != null);
+          const better = (a: any, b: any) => {
+            const aHas = a && (a.effectiveDays != null || a.excluded != null || a.deducted != null);
+            const bHas = b && (b.effectiveDays != null || b.excluded != null || b.deducted != null);
+            if (aHas && !bHas) return a;
+            if (!aHas && bHas) return b;
+            // If both have day info, prefer ledger (authoritative) over requests
+            const aLed = isLedgerRow(a);
+            const bLed = isLedgerRow(b);
+            if (aLed && !bLed) return a;
+            if (!aLed && bLed) return b;
+            return a ?? b;
+          };
+
+          [...existing, ...(Array.isArray(requests) ? requests : [])].forEach((row: any) => {
+            const k = String(row.int_con ?? row.id);
+            byId[k] = better(byId[k], row);
           });
           data = { ...data, leaveHistory: Object.values(byId) } as any;
         } catch {}
@@ -219,6 +263,23 @@ const LeaveBalanceScreen: React.FC<{ employeeId?: number | string }> = ({
     };
     fetchLeaveBalanceData();
   }, [t, employeeId]);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const rows = await listPsPoints();
+        const mp: Record<number, string> = {};
+        (Array.isArray(rows) ? rows : []).forEach((r: any) => {
+          const id = Number(r?.Id_point ?? r?.id_point ?? r?.ID_POINT ?? NaN);
+          const name = String(r?.name_point ?? r?.NAME_POINT ?? "").trim();
+          if (Number.isFinite(id) && name) mp[id] = name;
+        });
+        setPsNameById(mp);
+      } catch {
+        setPsNameById({});
+      }
+    })();
+  }, []);
 
   useEffect(() => {
     (async () => {
@@ -281,7 +342,8 @@ const LeaveBalanceScreen: React.FC<{ employeeId?: number | string }> = ({
                     typeLabel,
                     startDate: r.startDate ?? r.DATE_START ?? r.date_depart,
                     endDate: r.endDate ?? r.DATE_END ?? r.date_end,
-                    days: r.days ?? r.NUM_DAYS ?? r.nbr_jour,
+                    // Prefer effectiveDays (working days excluding Fridays/holidays) over nbr_jour
+                    days: r.effectiveDays ?? r.days ?? r.NUM_DAYS ?? r.nbr_jour,
                     raw: r,
                   });
                 }
@@ -306,7 +368,10 @@ const LeaveBalanceScreen: React.FC<{ employeeId?: number | string }> = ({
     type: String(r.type ?? r.code ?? r.id_can ?? ""),
     startDate: r.startDate ?? r.DATE_START ?? r.date_depart ?? "",
     endDate: r.endDate ?? r.DATE_END ?? r.date_end ?? "",
-    days: r.days ?? r.NUM_DAYS ?? r.nbr_jour ?? 0,
+    // Prefer effectiveDays (working days excluding Fridays/holidays) over nbr_jour
+    days: r.effectiveDays ?? r.deducted ?? r.days ?? r.NUM_DAYS ?? r.nbr_jour ?? 0,
+    effectiveDays: r.effectiveDays ?? r.deducted ?? r.days ?? r.NUM_DAYS ?? r.nbr_jour ?? 0,
+    excluded: r.excluded ?? null,
     status: String(r.status ?? r.STATUS ?? r.state ?? "").toLowerCase(),
   });
 
@@ -329,6 +394,167 @@ const LeaveBalanceScreen: React.FC<{ employeeId?: number | string }> = ({
   const [reqStart, setReqStart] = useState<string>("");
   const [reqEnd, setReqEnd] = useState<string>("");
   const [reqSaving, setReqSaving] = useState(false);
+
+  const reqActiveType = useMemo(() => {
+    const found = Object.values(leaveTypeMap).find((m) => m.code === reqType);
+    return found || null;
+  }, [leaveTypeMap, reqType]);
+
+  const reqIsSickLike = useMemo(() => {
+    const code = String(reqType || "").toUpperCase();
+    const name = String(reqActiveType?.name || "").toUpperCase();
+    return code === "SL" || name.includes("SICK");
+  }, [reqType, reqActiveType]);
+
+  const reqParse = (iso: string) => {
+    if (!iso) return null;
+    const parts = iso.split("-");
+    if (parts.length < 3) return null;
+    const y = Number(parts[0]);
+    const m = Number(parts[1]);
+    const da = Number(parts[2]);
+    if (!Number.isFinite(y) || !Number.isFinite(m) || !Number.isFinite(da))
+      return null;
+    const d = new Date(y, (m || 1) - 1, da || 1, 0, 0, 0, 0);
+    return isNaN(d.getTime()) ? null : d;
+  };
+
+  const reqFmt = (d: Date) =>
+    `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(
+      d.getDate()
+    ).padStart(2, "0")}`;
+
+  const reqInfo = useMemo(() => {
+    const st = reqStart ? reqParse(reqStart) : null;
+    const en = reqEnd ? reqParse(reqEnd) : null;
+    if (!st || !en) {
+      return {
+        st: null as Date | null,
+        en: null as Date | null,
+        valid: false,
+        startNonWorking: false,
+        endNonWorking: false,
+        effectiveDays: 0,
+        excluded: [] as Array<{ iso: string; kind: "holiday" | "friday" }>,
+      };
+    }
+    st.setHours(0, 0, 0, 0);
+    en.setHours(0, 0, 0, 0);
+    if (en < st) {
+      return {
+        st,
+        en,
+        valid: false,
+        startNonWorking: false,
+        endNonWorking: false,
+        effectiveDays: 0,
+        excluded: [] as Array<{ iso: string; kind: "holiday" | "friday" }>,
+      };
+    }
+
+    if (reqIsSickLike) {
+      const startUtc = Date.UTC(st.getFullYear(), st.getMonth(), st.getDate());
+      const endUtc = Date.UTC(en.getFullYear(), en.getMonth(), en.getDate());
+      const cal =
+        endUtc < startUtc ? 0 : Math.floor((endUtc - startUtc) / 86400000) + 1;
+      return {
+        st,
+        en,
+        valid: true,
+        startNonWorking: false,
+        endNonWorking: false,
+        effectiveDays: cal,
+        excluded: [] as Array<{ iso: string; kind: "holiday" | "friday" }>,
+      };
+    }
+
+    const isFri = (d: Date) => d.getDay() === 5;
+    const isHol = (d: Date) => holidaySetState.has(reqFmt(d));
+
+    const excluded: Array<{ iso: string; kind: "holiday" | "friday" }> = [];
+    let eff = 0;
+    const d = new Date(st);
+    while (d <= en) {
+      const iso = reqFmt(d);
+      if (isFri(d)) excluded.push({ iso, kind: "friday" });
+      else if (isHol(d)) excluded.push({ iso, kind: "holiday" });
+      else eff++;
+      d.setDate(d.getDate() + 1);
+      if (excluded.length + eff > 400) break;
+    }
+
+    return {
+      st,
+      en,
+      valid: true,
+      startNonWorking: isFri(st) || isHol(st),
+      endNonWorking: isFri(en) || isHol(en),
+      effectiveDays: eff,
+      excluded,
+    };
+  }, [reqStart, reqEnd, holidaySetState, reqIsSickLike]);
+
+  const reqStartDep = reqStart;
+  const reqEndDep = reqEnd;
+
+  const ReqCustomDay = useMemo(() => {
+    return function ReqDay(props: PickersDayProps) {
+      const { day } = props;
+      const dayDate: Date = new Date(day as any);
+      const s0 = reqStartDep
+        ? new Date(reqParse(reqStartDep)?.setHours(0, 0, 0, 0) ?? NaN)
+        : null;
+      const e0 = reqEndDep
+        ? new Date(reqParse(reqEndDep)?.setHours(0, 0, 0, 0) ?? NaN)
+        : null;
+
+      const inRange =
+        !!s0 && !!e0 && !isNaN(s0.getTime()) && !isNaN(e0.getTime())
+          ? dayDate >= s0 && dayDate <= e0
+          : false;
+
+      const iso = reqFmt(dayDate);
+      const isHol = holidaySetState.has(iso);
+      const isFri = dayDate.getDay() === 5;
+      const nonWorking = (isFri || isHol) && !reqIsSickLike;
+      const disable = nonWorking;
+      const markNonWorkingInRange = inRange && nonWorking;
+
+      const outOfRangeNonWorkingBg =
+        !inRange && disable ? "rgba(158,158,158,0.18)" : undefined;
+      const inRangeBg = markNonWorkingInRange
+        ? "rgba(244,67,54,0.18)"
+        : inRange
+          ? "rgba(33,150,243,0.18)"
+          : undefined;
+      const inRangeBorder = inRange
+        ? markNonWorkingInRange
+          ? "1px solid #f44336"
+          : "1px solid #b7a27d"
+        : undefined;
+
+      return (
+        <PickersDay
+          {...props}
+          disabled={disable}
+          sx={{
+            bgcolor: inRangeBg ?? outOfRangeNonWorkingBg,
+            border: inRangeBorder,
+            borderRadius: 1.2,
+            opacity: !inRange && nonWorking ? 0.6 : 1,
+            color: !inRange && isHol ? "text.disabled" : undefined,
+
+            "&.Mui-disabled": {
+              opacity: !inRange && nonWorking ? 0.6 : 1,
+              color: !inRange && isHol ? "rgba(0,0,0,0.38)" : undefined,
+              backgroundColor: inRangeBg ?? outOfRangeNonWorkingBg,
+              border: inRangeBorder,
+            },
+          }}
+        />
+      );
+    };
+  }, [reqStartDep, reqEndDep, holidaySetState, reqIsSickLike]);
 
   const ymd = (d: Date) =>
     `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
@@ -355,10 +581,29 @@ const LeaveBalanceScreen: React.FC<{ employeeId?: number | string }> = ({
     return c;
   };
 
-    const handleExportPDF = async (p0?: { from: string; to: string; }) => {
+  const handleExportPDF = async (p0?: { from: string; to: string }) => {
     try {
       const { jsPDF } = await loadJsPDF();
-      const doc = new jsPDF("p", "pt", "a4");
+      const doc = new jsPDF({ orientation: "p", unit: "pt", format: "a4", compress: true });
+
+      const iso10 = (v: any): string => {
+        if (!v) return "";
+        if (v instanceof Date && !isNaN(v.getTime())) return v.toISOString().slice(0, 10);
+        const s = String(v).trim();
+        if (!s) return "";
+        if (/^\d{4}-\d{2}-\d{2}/.test(s)) return s.slice(0, 10);
+        const d = new Date(s);
+        if (!isNaN(d.getTime())) return d.toISOString().slice(0, 10);
+        return s.slice(0, 10);
+      };
+
+      const dateFromISO10 = (ymd: string): Date | null => {
+        const s = String(ymd || "").slice(0, 10);
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return null;
+        // Use local midnight consistently with the rest of the UI
+        const d = new Date(`${s}T00:00:00`);
+        return isNaN(d.getTime()) ? null : d;
+      };
 
       // ---------- BASIC PDF HELPERS ----------
       const pageWidth = doc.internal.pageSize.getWidth();
@@ -526,15 +771,33 @@ const LeaveBalanceScreen: React.FC<{ employeeId?: number | string }> = ({
         return canvas.toDataURL("image/png");
       };
 
-      await ensureArabicFont();
+      // Only embed Arabic font if we will actually render Arabic glyphs.
+      // This font file is large and is the main reason PDFs become ~8MB.
+      // (When employee name/job is Arabic, we still embed it to avoid missing glyphs.)
+      const nameForFontCheck = String(
+        employeeInfo?.NAME ||
+          employeeInfo?.FULL_NAME ||
+          employeeInfo?.NOM_PRENOM ||
+          `${employeeInfo?.FIRST_NAME ?? ""} ${employeeInfo?.LAST_NAME ?? ""}` ||
+          ""
+      ).trim();
+      const jobForFontCheck = String(
+        employeeInfo?.TITLE ||
+          employeeInfo?.JOB_TITLE ||
+          employeeInfo?.FONCTION ||
+          employeeInfo?.POSTE ||
+          ""
+      ).trim();
+      if (hasArabic(nameForFontCheck) || hasArabic(jobForFontCheck)) {
+        await ensureArabicFont();
+      }
 
-      // ---------- DATASET: APPROVED LEAVES IN WORKING YEAR ----------
-      // Use calendar-year window for data (Jan 1 -> Dec 31), but header can still show up to today
-      const win = getWorkingYearWindow();
+      // ---------- DATASET: APPROVED LEAVES IN SELECTED RANGE ----------
       const today = new Date();
-
-      const windowStart = win.start;
-      const windowEnd = win.end; // do NOT clip to today; keep full working year for leave periods
+      const fromISO = iso10(p0?.from);
+      const toISO = iso10(p0?.to);
+      const windowStart = (fromISO ? dateFromISO10(fromISO) : null) || new Date(today.getFullYear(), 0, 1);
+      const windowEnd = (toISO ? dateFromISO10(toISO) : null) || today;
 
       type RowNorm = ReturnType<typeof mapRow>;
 
@@ -550,18 +813,40 @@ const LeaveBalanceScreen: React.FC<{ employeeId?: number | string }> = ({
       const approvedRowsForWindow: ApprovedRow[] = allHist
         .filter((h) => {
           if (!h.startDate || !h.endDate) return false;
-          if (!isApprovedLike(h.status || "")) return false;
-          const st = new Date(h.startDate);
-          const en = new Date(h.endDate);
+          // Balance-derived rows can omit status; treat them as approved; also honor state
+          const stRaw = (h as any).status ?? (h as any).state ?? "approved";
+          if (!isApprovedLike(String(stRaw))) return false;
+          const stISO = iso10(h.startDate);
+          const enISO = iso10(h.endDate);
+          const st = stISO ? dateFromISO10(stISO) : null;
+          const en = enISO ? dateFromISO10(enISO) : null;
+          if (!st || !en) return false;
           return !(en < windowStart || st > windowEnd);
         })
         .map((h) => {
-          const st = new Date(h.startDate!);
-          const en = new Date(h.endDate!);
+          const stISO = iso10(h.startDate);
+          const enISO = iso10(h.endDate);
+          const st = stISO ? dateFromISO10(stISO) : null;
+          const en = enISO ? dateFromISO10(enISO) : null;
+          if (!st || !en) {
+            const meta0 = getTypeMeta(h);
+            const label0 = meta0.code
+              ? meta0.name
+                ? `${meta0.code} — ${meta0.name}`
+                : meta0.code
+              : meta0.name || (h as any).type || "-";
+            return { ...h, effDays: 0, clipStart: windowStart, clipEnd: windowStart, label: label0 };
+          }
           const a = st < windowStart ? windowStart : st;
           const b = en > windowEnd ? windowEnd : en;
-          const eff = countWorkingDaysStrict(a, b);
+
+          // Use the same backend-driven effectiveDays logic as the rest of the UI
           const meta = getTypeMeta(h);
+          const codeU = String(meta.code || h.typeCode || h.type || "").toUpperCase();
+          const nameL = String(meta.name || h.typeName || "").toLowerCase();
+          const isSickLike = codeU === "SL" || /sick|مرض|malad/i.test(nameL);
+          const eff = effectiveDaysForClip(h as any, a, b, { isSick: isSickLike });
+
           const label = meta.code
             ? meta.name
               ? `${meta.code} — ${meta.name}`
@@ -586,7 +871,7 @@ const LeaveBalanceScreen: React.FC<{ employeeId?: number | string }> = ({
           month: "short",
           year: "numeric",
         });
-      const periodStr = `Working year: ${fmtHdr(windowStart)} TO ${fmtHdr(today)}`;
+      const periodStr = `Period: ${fmtHdr(windowStart)} TO ${fmtHdr(windowEnd)}`;
       const printedAt = format(new Date(), "yyyy-MM-dd HH:mm:ss");
 
       try {
@@ -638,14 +923,21 @@ const LeaveBalanceScreen: React.FC<{ employeeId?: number | string }> = ({
           employeeInfo?.POSTE ??
           ""
       ).trim();
-      const ps = formatPS(
-        String(
-          employeeInfo?.PS ??
-            employeeInfo?.PERSONNEL_SUBAREA ??
-            employeeInfo?.SUBAREA ??
-            ""
-        ).trim()
-      );
+      const psRaw =
+        employeeInfo?.PS ??
+        employeeInfo?.PERSONNEL_SUBAREA ??
+        employeeInfo?.SUBAREA ??
+        "";
+      const ps = (() => {
+        const v = String(psRaw ?? "").trim();
+        const n = Number(v);
+        if (Number.isFinite(n) && psNameById[n]) return psNameById[n];
+        if (/^\d+$/.test(v) && psNameById[Number(v)]) return psNameById[Number(v)];
+        const up = v.toUpperCase();
+        if (/^P\d+$/.test(up) || up === "OG" || up === "HQ") return up;
+        if (/^\d+$/.test(v)) return `P${v}`;
+        return up;
+      })();
 
       const col2 = empCard.padX + (empCard.w - 2 * cardPad) / 2 + 10;
 
@@ -678,107 +970,47 @@ const LeaveBalanceScreen: React.FC<{ employeeId?: number | string }> = ({
 
       y += empCard.h + sectionGap;
 
-      // ---------- SUMMARY (no total working days) ----------
-      newPageIfNeeded(110);
-      const balCard = drawCard(110, {
+      // ---------- SUMMARY WITH CARRY-FORWARD ----------
+      newPageIfNeeded(180);
+      const balCard = drawCard(180, {
         stroke: [200, 200, 200],
         fill: [245, 246, 250],
       });
 
       const entitlementVal = computedEntitlement ?? balance?.entitlement ?? 30;
+      const totalAccrued = balance?.accruedToDate ?? entitlementVal;
+      const carryForward = balance?.carryForward ?? 0;
+      const currentYearAccrued = balance?.currentYearAccrued ?? entitlementVal;
+      const totalUsed = approvedTotalFromRows;
+      const remaining = Math.max(
+        0,
+        Number((remainingDaysEffective ?? balance?.remaining ?? 0).toFixed(2))
+      );
 
       doc.setFont("helvetica", "bold");
       doc.setFontSize(12);
       doc.text(
-        "Balance Summary (Working Year)",
+        "Balance Summary (with Carry-Forward)",
         balCard.padX,
         balCard.padY + 2
       );
 
-      const colW = (balCard.w - 2 * cardPad) / 2;
+      const colW = (balCard.w - 2 * cardPad) / 3;
       const c1 = balCard.padX;
-      const c2 = balCard.padX + colW + 12;
+      const c2 = balCard.padX + colW + 8;
+      const c3 = balCard.padX + 2 * colW + 16;
       let by = balCard.padY + 26;
 
-      doc.setFontSize(10);
-      doc.text("Annual Entitlement", c1, by);
-      doc.text("Approved (working year)", c2, by);
-      by += 18;
-      doc.setFont("helvetica", "normal");
-      doc.text(`${entitlementVal.toFixed(0)} days`, c1, by);
-      doc.text(`${approvedTotalFromRows.toFixed(2)} days`, c2, by);
-      by += 18;
-
       doc.setFont("helvetica", "bold");
-      doc.text("Remaining Balance (YTD)", c1, by);
-      by += 18;
+      doc.setFontSize(9);
+      doc.text("Total Used (period)", c1, by);
+      doc.text("Remaining Balance", c2, by);
+      by += 16;
       doc.setFont("helvetica", "normal");
-      doc.text(`${remainingDaysRounded.toFixed(2)} days`, c1, by);
+      doc.text(`${totalUsed.toFixed(2)} days`, c1, by);
+      doc.text(`${remaining.toFixed(2)} days`, c2, by);
 
       y += balCard.h + sectionGap;
-
-      // ---------- PIE CHARTS (TIED TO THE SAME APPROVED ROWS) ----------
-      const perTypeAgg = new Map<string, number>();
-      approvedRowsForWindow.forEach((r) => {
-        const key = r.label || "-";
-        perTypeAgg.set(key, (perTypeAgg.get(key) || 0) + r.effDays);
-      });
-      const perTypeData = Array.from(perTypeAgg.entries()).map(
-        ([label, value]) => ({ label, value })
-      );
-
-      const usedVsRemainingData = [
-        { label: "Used (working year)", value: approvedTotalFromRows },
-        {
-          label: "Remaining",
-          value: Math.max(0, entitlementVal - approvedTotalFromRows),
-        },
-      ];
-
-      newPageIfNeeded(300);
-      const pieCard = drawCard(300, {
-        stroke: [200, 200, 200],
-        fill: [252, 252, 252],
-      });
-      doc.setFont("helvetica", "bold");
-      doc.setFontSize(12);
-      const distTitle = t(
-        "leave.balance.distributionTitle",
-        "Leave Distribution & Balance (Working Year)"
-      );
-      doc.text(distTitle, pieCard.padX, pieCard.padY + 2);
-
-      const pieYTop = pieCard.padY + 20;
-      const imgWidth = 250;
-      const imgHeight = 250;
-      const imgX1 = pieCard.padX;
-      const imgX2 = pieCard.padX + imgWidth + 30;
-
-      const usedRemChart = await createPieChartImage(
-        "Entitlement: used vs remaining",
-        usedVsRemainingData
-      );
-
-      doc.addImage(
-          usedRemChart,
-          "PNG",
-          imgX1,
-          pieYTop,
-          imgWidth,
-          imgHeight
-        );
-
-      doc.setFont("helvetica", "italic");
-      doc.setFontSize(8);
-      doc.setTextColor(100);
-      doc.text(
-        "Counts exclude Fridays and configured holidays.",
-        pieCard.padX,
-        pieCard.y + pieCard.h - 10
-      );
-      doc.setTextColor(0);
-
-      y += pieCard.h + sectionGap;
 
       // ---------- APPROVED LEAVES TABLE (SAME DATA AS ABOVE) ----------
       {
@@ -805,11 +1037,7 @@ const LeaveBalanceScreen: React.FC<{ employeeId?: number | string }> = ({
           );
           doc.setFont("helvetica", "bold");
           doc.setFontSize(12);
-          doc.text(
-            "Approved Leave Details (Working Year)",
-            M + 10,
-            y + 22
-          );
+          doc.text("Approved Leave Details (Selected Period)", M + 10, y + 22);
           y += headH + 12;
 
           // Table header
@@ -871,19 +1099,15 @@ const LeaveBalanceScreen: React.FC<{ employeeId?: number | string }> = ({
           newPageIfNeeded(22);
           doc.setFont("helvetica", "bold");
           doc.setFontSize(10);
-          doc.text(
-            `Approved total in working year: ${sumEff.toFixed(2)} days`,
-            M,
-            y + 2
-          );
+          doc.text(`Approved total in selected period: ${sumEff.toFixed(2)} days`, M, y + 2);
           y += 18;
         } else {
           newPageIfNeeded(60);
           doc.setFont("helvetica", "italic");
           doc.setFontSize(10);
           const noApproved = t(
-            "leave.balance.noApprovedWorkingYear",
-            "No approved leave found in the working year."
+            "leave.balance.noApprovedPeriod",
+            "No approved leave found in the selected period."
           );
           doc.text(noApproved, M, y);
           y += 16;
@@ -904,17 +1128,16 @@ const LeaveBalanceScreen: React.FC<{ employeeId?: number | string }> = ({
     }
   };
 
-  const formatPS = (raw: string | number) => {
-    const s = String(raw ?? "").trim();
-    const map: Record<string, string> = {
-      "1": "P0",
-      "2": "P1",
-      "3": "P2",
-      "4": "P3",
-      "5": "P4",
-      "6": "OG",
-    };
-    return map[s] || s;
+  const formatPS = (ps: any): string => {
+    const v = String(ps ?? "").trim();
+    if (!v) return "";
+    const n = Number(v);
+    if (Number.isFinite(n) && psNameById[n]) return psNameById[n];
+    if (/^\d+$/.test(v) && psNameById[Number(v)]) return psNameById[Number(v)];
+    const up = v.toUpperCase();
+    if (/^P\d+$/.test(up) || up === "OG" || up === "HQ") return up;
+    if (/^\d+$/.test(v)) return `P${v}`;
+    return up;
   };
 
   const isApprovedLike = (status: string) => {
@@ -935,11 +1158,50 @@ const LeaveBalanceScreen: React.FC<{ employeeId?: number | string }> = ({
     return tokens.some((tk) => s.includes(tk));
   };
 
-  // --- helpers: working-year window (calendar year: Jan 1 -> today) ---
+  // --- helpers: working-year window (contract anniversary -> next anniversary) ---
   const getWorkingYearWindow = () => {
     const now = new Date();
-    const start = new Date(now.getFullYear(), 0, 1); // Jan 1 of current year
-    const end = new Date(now.getFullYear(), 11, 31); // Dec 31 of current year
+    // Fallback: calendar year if we don't know the contract start
+    if (!contractStartDate || isNaN(contractStartDate.getTime())) {
+      return {
+        start: new Date(now.getFullYear(), 0, 1),
+        end: new Date(now.getFullYear(), 11, 31),
+      };
+    }
+
+    const annivThisYear = new Date(
+      now.getFullYear(),
+      contractStartDate.getMonth(),
+      contractStartDate.getDate(),
+      0,
+      0,
+      0,
+      0
+    );
+    const start =
+      annivThisYear <= now
+        ? annivThisYear
+        : new Date(
+            now.getFullYear() - 1,
+            contractStartDate.getMonth(),
+            contractStartDate.getDate(),
+            0,
+            0,
+            0,
+            0
+          );
+    const next = new Date(
+      start.getFullYear() + 1,
+      start.getMonth(),
+      start.getDate(),
+      0,
+      0,
+      0,
+      0
+    );
+    const end = new Date(next);
+    end.setDate(end.getDate() - 1);
+    end.setHours(0, 0, 0, 0);
     return { start, end };
   };
 
@@ -953,6 +1215,28 @@ const LeaveBalanceScreen: React.FC<{ employeeId?: number | string }> = ({
   const isFriday = (d: Date) => d.getDay() === 5;
   const isHoliday = (d: Date) => holidaySetState.has(yyyy_mm_dd(d));
 
+  const getEffectiveBreakdown = useCallback(
+    (a: Date, b: Date) => {
+      const s = new Date(a);
+      s.setHours(0, 0, 0, 0);
+      const e = new Date(b);
+      e.setHours(0, 0, 0, 0);
+      const fridays: string[] = [];
+      const holidays: string[] = [];
+      let eff = 0;
+      const d = new Date(s);
+      while (d <= e) {
+        const iso = yyyy_mm_dd(d);
+        if (isFriday(d)) fridays.push(iso);
+        else if (holidaySetState.has(iso)) holidays.push(iso);
+        else eff++;
+        d.setDate(d.getDate() + 1);
+      }
+      return { eff, fridays, holidays };
+    },
+    [holidaySetState]
+  );
+
   const countWorkingDays = (a: Date, b: Date) => {
     const s = new Date(a);
     s.setHours(0, 0, 0, 0);
@@ -965,6 +1249,73 @@ const LeaveBalanceScreen: React.FC<{ employeeId?: number | string }> = ({
       d.setDate(d.getDate() + 1);
     }
     return c;
+  };
+
+  const normalizeExcludedISOSet = (excluded: any): Set<string> => {
+    const set = new Set<string>();
+    if (!excluded) return set;
+
+    // Backend shape (leaveDayEngine): { fridays: string[], holidays: [{date,name}] }
+    if (!Array.isArray(excluded) && typeof excluded === 'object') {
+      const fr = Array.isArray((excluded as any).fridays) ? (excluded as any).fridays : [];
+      const hol = Array.isArray((excluded as any).holidays) ? (excluded as any).holidays : [];
+      for (const x of fr) {
+        const iso = String(x || '').slice(0, 10);
+        if (iso) set.add(iso);
+      }
+      for (const x of hol) {
+        const iso = String((x as any)?.date ?? (x as any)?.iso ?? x ?? '').slice(0, 10);
+        if (iso) set.add(iso);
+      }
+      return set;
+    }
+
+    // Frontend shape: Array<{iso,kind}> or array<string>
+    const arr = Array.isArray(excluded) ? excluded : [];
+    for (const x of arr) {
+      if (!x) continue;
+      if (typeof x === "string") {
+        set.add(x.slice(0, 10));
+        continue;
+      }
+      const iso = String((x as any).iso ?? (x as any).date ?? (x as any).DATE ?? "").slice(0, 10);
+      if (iso) set.add(iso);
+    }
+    return set;
+  };
+
+  const effectiveDaysForClip = (
+    row: ReturnType<typeof mapRow>,
+    clipStart: Date,
+    clipEnd: Date,
+    opts?: { isSick?: boolean }
+  ) => {
+    const isSick = Boolean(opts?.isSick);
+    const s = new Date(clipStart);
+    s.setHours(0, 0, 0, 0);
+    const e = new Date(clipEnd);
+    e.setHours(0, 0, 0, 0);
+    if (e < s) return 0;
+
+    if (isSick) {
+      const ms = e.getTime() - s.getTime();
+      return ms < 0 ? 0 : Math.floor(ms / (1000 * 60 * 60 * 24)) + 1;
+    }
+
+    const exclSet = normalizeExcludedISOSet((row as any).excluded);
+    if (exclSet.size) {
+      let c = 0;
+      const d = new Date(s);
+      while (d <= e) {
+        const iso = yyyy_mm_dd(d);
+        if (!exclSet.has(iso)) c++;
+        d.setDate(d.getDate() + 1);
+      }
+      return c;
+    }
+
+    // Fallback if backend excluded is missing
+    return countWorkingDays(s, e);
   };
 
   // --- Active leave helpers ---
@@ -1103,7 +1454,17 @@ const LeaveBalanceScreen: React.FC<{ employeeId?: number | string }> = ({
 
       const a = st < winStart ? winStart : st;
       const b = en > winEnd ? winEnd : en;
-      const days = countWorkingDays(a, b);
+      const idKey =
+        h.idCan != null
+          ? String(h.idCan)
+          : h.typeCode != null
+            ? String(h.typeCode)
+            : undefined;
+      const meta = idKey ? leaveTypeMap[idKey] : undefined;
+      const codeU = String(meta?.code || h.typeCode || h.type || "").toUpperCase();
+      const nameL = String(meta?.name || h.typeName || "").toLowerCase();
+      const isSickLike = codeU === "SL" || /sick|مرض|malad/i.test(nameL);
+      const days = effectiveDaysForClip(h, a, b, { isSick: isSickLike });
       if (!days) continue;
 
       const { key, code, name, label } = getTypeMeta(h);
@@ -1129,7 +1490,10 @@ const LeaveBalanceScreen: React.FC<{ employeeId?: number | string }> = ({
         s.includes("denied")
       )
         rec.rejectedDaysYTD += days;
-      rec.totalDaysYTD += days;
+      // Total column in UI is Approved + Pending (not including rejected/cancelled)
+      if (isApprovedLike(s) || s.includes("pending") || s.includes("submitted")) {
+        rec.totalDaysYTD += days;
+      }
     }
 
     return Array.from(bucket.values()).sort(
@@ -1137,12 +1501,63 @@ const LeaveBalanceScreen: React.FC<{ employeeId?: number | string }> = ({
     );
   }, [historyNorm, contractStartDate, holidaySetState, leaveTypeMap]);
 
+  const typeSummaryAllTime = useMemo<TypeSummary[]>(() => {
+    const bucket = new Map<string, TypeSummary>();
+
+    for (const h of historyNorm) {
+      const days = Number(h.days ?? (h as any).effectiveDays ?? 0);
+      if (!Number.isFinite(days) || days <= 0) continue;
+
+      const { key, code, name, label } = getTypeMeta(h);
+      if (!bucket.has(key)) {
+        bucket.set(key, {
+          code,
+          name,
+          label,
+          approvedDaysYTD: 0,
+          pendingDaysYTD: 0,
+          rejectedDaysYTD: 0,
+          totalDaysYTD: 0,
+        });
+      }
+      const rec = bucket.get(key)!;
+      const s = String(h.status || "").toLowerCase();
+      if (isApprovedLike(s)) rec.approvedDaysYTD += days;
+      else if (s.includes("pending") || s.includes("submitted")) rec.pendingDaysYTD += days;
+      else if (s.includes("rejected") || s.includes("refused") || s.includes("denied")) rec.rejectedDaysYTD += days;
+      if (isApprovedLike(s) || s.includes("pending") || s.includes("submitted")) {
+        rec.totalDaysYTD += days;
+      }
+    }
+
+    return Array.from(bucket.values()).sort(
+      (a, b) => b.totalDaysYTD - a.totalDaysYTD || a.code.localeCompare(b.code)
+    );
+  }, [historyNorm, leaveTypeMap]);
+
   /** ---------- Type totals & consistency ---------- */
+  const usedDaysEffective = useMemo(() => {
+    const raw = Number(balance?.used ?? 0);
+    return Number.isFinite(raw) ? raw : 0;
+  }, [balance?.used]);
+
   const approvedSumFromTypes = useMemo(
-    () => typeSummary.reduce((s, r) => s + r.approvedDaysYTD, 0),
-    [typeSummary]
+    () => typeSummaryAllTime.reduce((s, r) => s + r.approvedDaysYTD, 0),
+    [typeSummaryAllTime]
   );
-  const totalsMatch = Math.abs(approvedSumFromTypes - approvedDaysYTD) < 0.01;
+  const totalsMatch = Math.abs(approvedSumFromTypes - usedDaysEffective) < 0.01;
+
+  const remainingDaysEffective = useMemo(() => {
+    const rawRemaining = Number(balance?.remaining ?? 0);
+    const rawUsed = Number(balance?.used ?? 0);
+    const baseRemaining = Number.isFinite(rawRemaining) ? rawRemaining : 0;
+    const baseUsed = Number.isFinite(rawUsed) ? rawUsed : 0;
+
+    // Keep totals consistent with backend total accrued when backend 'used' differs
+    // remainingEffective = backendRemaining + backendUsed - effectiveUsed
+    const adjusted = baseRemaining + baseUsed - usedDaysEffective;
+    return Number.isFinite(adjusted) ? Math.max(0, adjusted) : 0;
+  }, [balance?.remaining, balance?.used, usedDaysEffective]);
 
   /** ---------- Fetch leave types ---------- */
   useEffect(() => {
@@ -1220,7 +1635,27 @@ const LeaveBalanceScreen: React.FC<{ employeeId?: number | string }> = ({
         setComputedEntitlement(entitlement);
 
         const now = new Date();
-        const contractStart = start ? new Date(start) : null;
+
+        const parseLooseDate = (v: any): Date | null => {
+          if (!v) return null;
+          if (v instanceof Date && !isNaN(v.getTime())) return v;
+          const s = String(v).trim();
+          if (!s) return null;
+          if (/^\d{4}-\d{2}-\d{2}/.test(s)) {
+            const d = new Date(s.slice(0, 10));
+            return isNaN(d.getTime()) ? null : d;
+          }
+          const m = s.match(/^(\d{2})\/(\d{2})\/(\d{4})(?:\s+\d{2}:\d{2}:\d{2})?$/);
+          if (m) {
+            const [, dd, mm, yyyy] = m;
+            const d = new Date(Number(yyyy), Number(mm) - 1, Number(dd), 0, 0, 0, 0);
+            return isNaN(d.getTime()) ? null : d;
+          }
+          const d = new Date(s);
+          return isNaN(d.getTime()) ? null : d;
+        };
+
+        const contractStart = start ? parseLooseDate(start) : null;
         setContractStartDate(contractStart);
         const addYears = (d: Date, years: number) =>
           new Date(d.getFullYear() + years, d.getMonth(), d.getDate());
@@ -1231,17 +1666,106 @@ const LeaveBalanceScreen: React.FC<{ employeeId?: number | string }> = ({
         setTurns50On(fiftyOn);
         setExp20On(exp20Date);
 
+        const yyyy_mm_dd_local = (d: Date) => {
+          const y = d.getFullYear();
+          const m = String(d.getMonth() + 1).padStart(2, "0");
+          const da = String(d.getDate()).padStart(2, "0");
+          return `${y}-${m}-${da}`;
+        };
+        const toISO10 = (v: any) => {
+          if (!v) return "";
+          const s = String(v);
+          if (/^\d{4}-\d{2}-\d{2}/.test(s)) return s.slice(0, 10);
+          const d = new Date(s);
+          if (!isNaN(d.getTime())) return yyyy_mm_dd_local(d);
+          return "";
+        };
+        const firstDefined = (...vals: any[]) =>
+          vals.find(
+            (v) =>
+              v !== undefined &&
+              v !== null &&
+              String(v).trim?.() !== ""
+          );
+
+        const win = (() => {
+          const n = new Date();
+          if (!contractStart || isNaN(contractStart.getTime())) {
+            return {
+              start: new Date(n.getFullYear(), 0, 1, 0, 0, 0, 0),
+              end: new Date(n.getFullYear(), 11, 31, 0, 0, 0, 0),
+            };
+          }
+          const annivThisYear = new Date(
+            n.getFullYear(),
+            contractStart.getMonth(),
+            contractStart.getDate(),
+            0,
+            0,
+            0,
+            0
+          );
+          const start =
+            annivThisYear <= n
+              ? annivThisYear
+              : new Date(
+                  n.getFullYear() - 1,
+                  contractStart.getMonth(),
+                  contractStart.getDate(),
+                  0,
+                  0,
+                  0,
+                  0
+                );
+          const next = new Date(
+            start.getFullYear() + 1,
+            start.getMonth(),
+            start.getDate(),
+            0,
+            0,
+            0,
+            0
+          );
+          const end = new Date(next);
+          end.setDate(end.getDate() - 1);
+          end.setHours(0, 0, 0, 0);
+          return { start, end };
+        })();
+
+        let rangeStart = new Date(win.start);
+        let rangeEnd = new Date(win.end);
+        const histRows = (balance?.leaveHistory || []).map(mapRow);
+        for (const h of histRows) {
+          const st = h.startDate ? new Date(h.startDate) : null;
+          const en = h.endDate ? new Date(h.endDate) : null;
+          if (!st || !en) continue;
+          if (!isNaN(st.getTime()) && st < rangeStart) rangeStart = st;
+          if (!isNaN(en.getTime()) && en > rangeEnd) rangeEnd = en;
+        }
+
+        const rangeStartISO = yyyy_mm_dd_local(rangeStart);
+        const rangeEndISO = yyyy_mm_dd_local(rangeEnd);
+
         let holidaySet = new Set<string>();
+        const names: Record<string, string> = {};
         try {
-          const holidaysResp = await getHolidays();
+          const holidaysResp = await getHolidays({
+            startDate: rangeStartISO,
+            endDate: rangeEndISO,
+          });
           const holidaysArr = Array.isArray(holidaysResp)
             ? holidaysResp
             : holidaysResp?.data || [];
           holidaysArr.forEach((h: any) => {
-            const iso = String(
-              h.DATE_H ?? h.date ?? h.holiday_date ?? ""
-            ).slice(0, 10);
-            if (iso) holidaySet.add(iso);
+            const iso = toISO10(firstDefined(h.DATE_H, h.date, h.holiday_date));
+            if (iso) {
+              holidaySet.add(iso);
+              const nm = String(
+                firstDefined(h.HOLIDAY_NAME, h.holiday_name, h.COMMENT_H, h.comment) ||
+                  ""
+              ).trim();
+              if (nm) names[iso] = nm;
+            }
           });
         } catch {}
         try {
@@ -1250,15 +1774,23 @@ const LeaveBalanceScreen: React.FC<{ employeeId?: number | string }> = ({
             const arr = JSON.parse(raw);
             if (Array.isArray(arr)) {
               arr.forEach((h: any) => {
-                const iso = String(
-                  h.DATE_H ?? h.date ?? h.holiday_date ?? ""
-                ).slice(0, 10);
-                if (iso) holidaySet.add(iso);
+                const iso = toISO10(
+                  firstDefined(h.DATE_H, h.date, h.holiday_date)
+                );
+                if (iso) {
+                  holidaySet.add(iso);
+                  const nm = String(
+                    firstDefined(h.HOLIDAY_NAME, h.holiday_name, h.COMMENT_H, h.comment) ||
+                      ""
+                  ).trim();
+                  if (nm) names[iso] = nm;
+                }
               });
             }
           }
         } catch {}
         setHolidaySetState(holidaySet);
+        setHolidayNameMap(names);
 
         const daysBetween = (a: Date, b: Date) => {
           const d1 = new Date(a);
@@ -1424,6 +1956,12 @@ const LeaveBalanceScreen: React.FC<{ employeeId?: number | string }> = ({
         x.setHours(0, 0, 0, 0);
         return x;
       };
+      const daysBetween = (a: Date, b: Date) => {
+        const s = clamp(a);
+        const e = clamp(b);
+        const ms = e.getTime() - s.getTime();
+        return ms < 0 ? 0 : Math.floor(ms / (1000 * 60 * 60 * 24)) + 1;
+      };
       const fmt = (d: Date) => {
         const y = d.getFullYear();
         const m = String(d.getMonth() + 1).padStart(2, "0");
@@ -1453,9 +1991,10 @@ const LeaveBalanceScreen: React.FC<{ employeeId?: number | string }> = ({
         note?: string;
         detailsText?: string;
       }> = [];
-      let running = 0;
+      const carryForward = Number(balance?.carryForward ?? 0) || 0;
+      let running = carryForward;
+
       let cur = startOfMonth(contractStartDate);
-      const annivMonth = contractStartDate.getMonth();
       let first = true;
 
       const MONTH30 = 30 / 12;
@@ -1474,7 +2013,13 @@ const LeaveBalanceScreen: React.FC<{ employeeId?: number | string }> = ({
         const monthStart = cur;
         const monthEnd = endOfMonth(cur);
 
-        const credit = monthlyCreditFor(monthEnd);
+        // Prorate credit in first/last month so ledger doesn't jump by a full month when the working year starts mid-month
+        let credit = monthlyCreditFor(monthEnd);
+        const dim = new Date(monthStart.getFullYear(), monthStart.getMonth() + 1, 0).getDate();
+        const startBoundary = monthStart.getTime() === startOfMonth(contractStartDate).getTime() ? contractStartDate : monthStart;
+        const endBoundary = monthStart.getFullYear() === now.getFullYear() && monthStart.getMonth() === now.getMonth() ? now : monthEnd;
+        const frac = Math.min(1, Math.max(0, daysBetween(startBoundary, endBoundary) / Math.max(1, dim)));
+        credit = Number((credit * frac).toFixed(4));
 
         const monthApproved = normalized.filter((h) => {
           const st = h.startDate ? new Date(h.startDate) : null;
@@ -1492,14 +2037,18 @@ const LeaveBalanceScreen: React.FC<{ employeeId?: number | string }> = ({
           if (!st || !en) return sum;
           const a = st < monthStart ? monthStart : st;
           const b = en > monthEnd ? monthEnd : en;
-          const days = countEffectiveLeaveDays(a, b);
-          const idKey =
+          const typeIdKey =
             h.idCan != null
               ? String(h.idCan)
               : h.typeCode != null
                 ? String(h.typeCode)
                 : undefined;
-          const lt = idKey ? leaveTypeMap[idKey] || undefined : undefined;
+          const meta = typeIdKey ? leaveTypeMap[typeIdKey] : undefined;
+          const codeU = String(meta?.code || h.typeCode || h.type || "").toUpperCase();
+          const nameL = String(meta?.name || h.typeName || "").toLowerCase();
+          const isSickLike = codeU === "SL" || /sick|مرض|malad/i.test(nameL);
+          const days = effectiveDaysForClip(h, a, b, { isSick: isSickLike });
+          const lt = typeIdKey ? leaveTypeMap[typeIdKey] || undefined : undefined;
           const label = lt
             ? `${lt.code}${lt.name ? " — " + lt.name : ""}`
             : h.typeCode || h.typeName
@@ -1514,20 +2063,6 @@ const LeaveBalanceScreen: React.FC<{ employeeId?: number | string }> = ({
           .filter(([, n]) => n > 0)
           .map(([k, n]) => `${k}: ${n}`)
           .join(", ");
-
-        if (!first && monthStart.getMonth() === annivMonth) {
-          rows.push({
-            month: format(monthStart, "yyyy MMM"),
-            credit: 0,
-            debit: 0,
-            balance: 0,
-            note: t(
-              "leave.balance.zeroedDueToYearlyLimit",
-              "<< ZEROED DUE TO YEARLY LIMIT >>"
-            ),
-          });
-          running = 0;
-        }
 
         first = false;
         running += credit - debit;
@@ -1658,19 +2193,24 @@ const LeaveBalanceScreen: React.FC<{ employeeId?: number | string }> = ({
     }
 
     if (exportMode === "custom") {
-      // clamp custom range to [startOf(contractStartMonth), today]
+      // Respect user-selected range; only clamp lower bound to contract-start month
       const minFrom = contractStart
         ? startOfMonth(contractStart)
         : new Date(2020, 0, 1);
-      const maxTo = today;
       const rawFrom = exportFrom ? new Date(exportFrom) : minFrom;
-      const rawTo = exportTo ? new Date(exportTo) : maxTo;
+      const rawTo = exportTo ? new Date(exportTo) : rawFrom;
+
       const fromClamped = rawFrom < minFrom ? minFrom : rawFrom;
-      const toClamped = rawTo > maxTo ? maxTo : rawTo;
-      // ensure from <= to
-      const from =
-        fromClamped > toClamped ? startOfMonth(toClamped) : fromClamped;
-      const to = toClamped;
+      let from = fromClamped;
+      let to = rawTo;
+
+      // ensure from <= to by swapping if necessary
+      if (from > to) {
+        const tmp = from;
+        from = to;
+        to = tmp;
+      }
+
       return { from: safeISO(from), to: safeISO(to) };
     }
 
@@ -1858,12 +2398,15 @@ const LeaveBalanceScreen: React.FC<{ employeeId?: number | string }> = ({
                   {t("leave.balance.ps", "PS")}
                 </Typography>
                 <Typography variant="body1" sx={{ fontWeight: 600 }}>
-                  {formatPS(
-                    employeeInfo?.PS ??
+                  {(() => {
+                    const raw =
+                      employeeInfo?.PS ??
                       employeeInfo?.PERSONNEL_SUBAREA ??
                       employeeInfo?.SUBAREA ??
-                      "—"
-                  )}
+                      "";
+                    const txt = formatPS(raw);
+                    return txt || "—";
+                  })()}
                 </Typography>
               </Box>
             </Box>
@@ -1893,83 +2436,23 @@ const LeaveBalanceScreen: React.FC<{ employeeId?: number | string }> = ({
               }}
             >
               {statCard(
-                t("leave.balance.approvedLeaves", "Approved leaves"),
-                approvedDaysYTD.toFixed(2),
-                navy,
+                t("leave.balance.totalAccrued", "Total Accrued"),
+                (balance?.accruedToDate ?? balance?.entitlement ?? 0).toFixed(2),
+                "#1976d2",
                 "#ffffff"
               )}
               {statCard(
-                t("leave.balance.annualLeave", "Annual leave (per year)"),
-                (computedEntitlement ?? balance?.entitlement ?? 30).toFixed(0),
-                "#121212",
-                gold
+                t("leave.balance.currentYearAccrued", "Current Year Accrued"),
+                (balance?.currentYearAccrued ?? 0).toFixed(2),
+                "#2e7d32",
+                "#ffffff"
               )}
-              {/* Compact breakdown (approved-only, non-zero) */}
-              <Card
-                sx={{
-                  borderRadius: 2,
-                  boxShadow: 3,
-                  border: `1px solid ${gold}33`,
-                  minWidth: 300,
-                  flex: "1 1 360px",
-                }}
-              >
-                <CardContent sx={{ p: 2 }}>
-                  <Typography variant="overline" sx={{ opacity: 0.9 }}>
-                    {t("leave.balance.breakdown", "Breakdown")}
-                  </Typography>
-                  <TableContainer component={Paper} elevation={0}>
-                    <Table size="small" aria-label="approved-by-type-mini">
-                      <TableHead>
-                        <TableRow>
-                          <TableCell sx={{ fontWeight: 700 }}>
-                            {t("leave.balance.type", "Type")}
-                          </TableCell>
-                          <TableCell align="right" sx={{ fontWeight: 700 }}>
-                            {t("leave.balance.approved", "Approved")}
-                          </TableCell>
-                        </TableRow>
-                      </TableHead>
-                      <TableBody>
-                        {(typeSummary
-                          .filter((r) => (r.approvedDaysYTD || 0) > 0)
-                          .sort((a, b) => b.approvedDaysYTD - a.approvedDaysYTD)
-                        ).map((r) => (
-                          <TableRow key={r.label} hover>
-                            <TableCell>
-                              <Typography variant="body2" sx={{ fontWeight: 600 }}>
-                                {r.code || "-"}
-                              </Typography>
-                              {r.name && (
-                                <Typography variant="caption" color="text.secondary">
-                                  {r.name}
-                                </Typography>
-                              )}
-                            </TableCell>
-                            <TableCell align="right">
-                              <Chip
-                                label={r.approvedDaysYTD.toFixed(2)}
-                                size="small"
-                                color="success"
-                                variant="outlined"
-                              />
-                            </TableCell>
-                          </TableRow>
-                        ))}
-                        {typeSummary.filter((r) => (r.approvedDaysYTD || 0) > 0).length === 0 && (
-                          <TableRow>
-                            <TableCell colSpan={2} align="center">
-                              <Typography variant="caption" color="text.secondary">
-                                {t("leave.balance.noUsage", "No leave usage recorded in the working year.")}
-                              </Typography>
-                            </TableCell>
-                          </TableRow>
-                        )}
-                      </TableBody>
-                    </Table>
-                  </TableContainer>
-                </CardContent>
-              </Card>
+              {statCard(
+                t("leave.balance.used", "Total Used"),
+                (usedDaysEffective ?? 0).toFixed(2),
+                navy,
+                "#ffffff"
+              )}
             </Box>
 
             {/* Active leave countdown (if any) */}
@@ -1983,6 +2466,36 @@ const LeaveBalanceScreen: React.FC<{ employeeId?: number | string }> = ({
                 }}
               >
                 <CardContent>
+                  {(() => {
+                    const bd = getEffectiveBreakdown(activeMeta.st, activeMeta.en);
+                    const holidayLabel = (iso: string) =>
+                      holidayNameMap[iso]
+                        ? `${iso} — ${holidayNameMap[iso]}`
+                        : iso;
+                    const reasons: string[] = [];
+                    if (bd.fridays.length)
+                      reasons.push(`Fridays: ${bd.fridays.join(", ")}`);
+                    if (bd.holidays.length)
+                      reasons.push(
+                        `Public holidays: ${bd.holidays
+                          .map(holidayLabel)
+                          .join(", ")}`
+                      );
+                    const tip =
+                      reasons.length > 0
+                        ? reasons.join("\n")
+                        : "No excluded non-working days in range.";
+                    return (
+                      <Tooltip title={<pre style={{ margin: 0 }}>{tip}</pre>} arrow>
+                        <Box sx={{ mb: 1.25 }}>
+                          <Typography variant="caption" color="text.secondary">
+                            Effective days: {bd.eff}
+                            {reasons.length ? " — excluded non-working days" : ""}
+                          </Typography>
+                        </Box>
+                      </Tooltip>
+                    );
+                  })()}
                   <Box
                     display="flex"
                     justifyContent="space-between"
@@ -2079,38 +2592,28 @@ const LeaveBalanceScreen: React.FC<{ employeeId?: number | string }> = ({
             )}
           </Box>
 
-          {/* RIGHT COLUMN: Sticky remaining + EXPORT BUTTONS */}
+          {/* RIGHT COLUMN: Remaining Balance Card with Export Buttons */}
           <Box sx={{ position: { md: "sticky" }, top: { md: 16 } }}>
             <Card
               sx={{
+                bgcolor: "#121212",
+                color: gold,
                 borderRadius: 2,
                 boxShadow: 4,
-                border: `2px solid ${gold}`,
+                border: `1px solid ${gold}33`,
+                height: "100%",
                 mb: 2,
-                background: `linear-gradient(135deg, ${navy} 0%, ${black} 100%)`,
-                color: "#fff",
               }}
             >
               <CardContent>
-                <Typography
-                  variant="overline"
-                  sx={{ opacity: 0.9, color: gold }}
-                >
-                  {t("leave.balance.remainingDays", "Remaining days")}
+                <Typography variant="overline" sx={{ opacity: 0.9 }}>
+                  {t("leave.balance.remaining", "Remaining Balance")}
                 </Typography>
-                <Typography
-                  variant="h2"
-                  sx={{ fontWeight: 800, lineHeight: 1, my: 1 }}
-                >
-                  {remainingDaysRounded.toFixed(2)}
+                <Typography variant="h3" sx={{ fontWeight: 700, lineHeight: 1.1 }}>
+                  {(remainingDaysEffective ?? 0).toFixed(2)}
                 </Typography>
-                <Typography variant="caption" sx={{ opacity: 0.8 }}>
-                  {(() => {
-                    const wy = getWorkingYearWindow();
-                    if (!wy) return "";
-                    const today = new Date();
-                    return `${t("leave.balance.workingYear", "Working Year")}: ${format(wy.start, "MMM d")} → ${format(today, "MMM d, yyyy")}`;
-                  })()}
+                <Typography variant="caption" sx={{ opacity: 0.8, display: "block", mt: 1 }}>
+                  {t("leave.balance.withCarryForward", "With carry-forward from previous years")}
                 </Typography>
 
                 {/* Export to PDF (opens options dialog) */}
@@ -2129,6 +2632,7 @@ const LeaveBalanceScreen: React.FC<{ employeeId?: number | string }> = ({
                       setExportMode("current");
                       setExportOpen(true);
                     }}
+                    sx={{ bgcolor: gold, color: "#000", "&:hover": { bgcolor: "#d4af37" } }}
                   >
                     {t("leave.balance.exportPdf", "Export to PDF")}
                   </Button>
@@ -2197,7 +2701,7 @@ const LeaveBalanceScreen: React.FC<{ employeeId?: number | string }> = ({
               gap={1}
             >
               <Typography variant="h6" sx={{ fontWeight: 700 }}>
-                {t("leave.balance.usageByType", "Leave Usage (Working Year)")}
+                {t("leave.balance.usageByType", "Leave Usage")}
               </Typography>
               <Stack
                 direction="row"
@@ -2214,7 +2718,7 @@ const LeaveBalanceScreen: React.FC<{ employeeId?: number | string }> = ({
                 <Chip
                   size="small"
                   color="warning"
-                  label={`${typeSummary.reduce((s, r) => s + r.pendingDaysYTD, 0).toFixed(2)} ${t("leave.balance.pending", "Pending")}`}
+                  label={`${typeSummaryAllTime.reduce((s, r) => s + r.pendingDaysYTD, 0).toFixed(2)} ${t("leave.balance.pending", "Pending")}`}
                   sx={{ fontWeight: 600 }}
                 />
                 <Chip
@@ -2230,7 +2734,7 @@ const LeaveBalanceScreen: React.FC<{ employeeId?: number | string }> = ({
               </Stack>
             </Box>
 
-            {typeSummary.length === 0 ? (
+            {typeSummaryAllTime.length === 0 ? (
               <Alert severity="info">
                 {t(
                   "leave.balance.noUsage",
@@ -2261,7 +2765,7 @@ const LeaveBalanceScreen: React.FC<{ employeeId?: number | string }> = ({
                       </TableRow>
                     </TableHead>
                     <TableBody>
-                      {typeSummary.map((r) => (
+                      {typeSummaryAllTime.map((r) => (
                         <TableRow key={r.label} hover>
                           <TableCell>
                             <Typography
@@ -2406,46 +2910,71 @@ const LeaveBalanceScreen: React.FC<{ employeeId?: number | string }> = ({
                               ? format(new Date(leave.startDate), "MMM d, yyyy")
                               : "-"}
                           </Typography>
-                          <Typography variant="caption" color="text.secondary">
-                            {leave.endDate
+                          <Typography variant="caption" color="#64a8bf">
+                            Ends on: {leave.endDate
                               ? format(new Date(leave.endDate), "MMM d, yyyy")
                               : "-"}
                           </Typography>
                         </TableCell>
                         <TableCell align="right">
-                          <Typography variant="body2" sx={{ fontWeight: 600 }}>
-                            {(() => {
-                              const st = leave.startDate
-                                ? new Date(leave.startDate)
-                                : null;
-                              const en = leave.endDate
-                                ? new Date(leave.endDate)
-                                : null;
-                              if (!st || !en) return leave.days;
-                              const fmt = (d: Date) => {
-                                const y = d.getFullYear();
-                                const m = String(d.getMonth() + 1).padStart(
-                                  2,
-                                  "0"
+                          {(() => {
+                            const st = leave.startDate ? new Date(leave.startDate) : null;
+                            const en = leave.endDate ? new Date(leave.endDate) : null;
+                            const eff = st && en ? getEffectiveBreakdown(st, en) : null;
+                            const holidayLabel = (iso: string) =>
+                              holidayNameMap[iso]
+                                ? `${iso} — ${holidayNameMap[iso]}`
+                                : iso;
+                            const excl = Array.isArray((leave as any).excluded)
+                              ? (leave as any).excluded
+                              : null;
+                            const reasons: string[] = [];
+                            if (excl && excl.length) {
+                              const fr = excl
+                                .filter((x: any) => String(x?.kind || "").toLowerCase() === "friday")
+                                .map((x: any) => String(x?.iso || x).slice(0, 10));
+                              const hol = excl
+                                .filter((x: any) => String(x?.kind || "").toLowerCase() === "holiday")
+                                .map((x: any) => String(x?.iso || x).slice(0, 10))
+                                .map(holidayLabel);
+                              if (fr.length) reasons.push(`Fridays: ${fr.join(", ")}`);
+                              if (hol.length) reasons.push(`Public holidays: ${hol.join(", ")}`);
+                            } else {
+                              if (eff?.fridays?.length)
+                                reasons.push(`Fridays: ${eff.fridays.join(", ")}`);
+                              if (eff?.holidays?.length)
+                                reasons.push(
+                                  `Public holidays: ${eff.holidays
+                                    .map(holidayLabel)
+                                    .join(", ")}`
                                 );
-                                const da = String(d.getDate()).padStart(2, "0");
-                                return `${y}-${m}-${da}`;
-                              };
-                              const isFriday = (d: Date) => d.getDay() === 5;
-                              const isHoliday = (d: Date) =>
-                                holidaySetState.has(fmt(d));
-                              const d = new Date(st);
-                              d.setHours(0, 0, 0, 0);
-                              const end = new Date(en);
-                              end.setHours(0, 0, 0, 0);
-                              let eff = 0;
-                              while (d <= end) {
-                                if (!isFriday(d) && !isHoliday(d)) eff++;
-                                d.setDate(d.getDate() + 1);
-                              }
-                              return eff;
-                            })()}
-                          </Typography>
+                            }
+                            const tip =
+                              reasons.length > 0
+                                ? reasons.join("\n")
+                                : "No excluded non-working days in range.";
+                            const shown = Number.isFinite(Number(leave.days)) && Number(leave.days) > 0
+                              ? Number(leave.days)
+                              : eff
+                                ? eff.eff
+                                : 0;
+                            return (
+                              <Tooltip title={<pre style={{ margin: 0 }}>{tip}</pre>} arrow>
+                                <Box sx={{ display: "inline-flex", flexDirection: "column", alignItems: "flex-end" }}>
+                                  <Typography variant="body2" sx={{ fontWeight: 600 }}>
+                                    {shown}
+                                  </Typography>
+                                  {((excl && excl.length) || eff?.fridays?.length || eff?.holidays?.length) ? (
+                                    <Typography variant="caption" color="text.secondary">
+                                      -{excl && excl.length
+                                        ? excl.length
+                                        : (eff?.fridays?.length || 0) + (eff?.holidays?.length || 0)} excluded
+                                    </Typography>
+                                  ) : null}
+                                </Box>
+                              </Tooltip>
+                            );
+                          })()}
                         </TableCell>
                         <TableCell>
                           <Chip
@@ -2505,126 +3034,6 @@ const LeaveBalanceScreen: React.FC<{ employeeId?: number | string }> = ({
               }}
               rowsPerPageOptions={[5, 10, 25, 50]}
             />
-          </CardContent>
-        </Card>
-
-        {/* Monthly Ledger (FULL WIDTH) */}
-        <Card
-          sx={{
-            borderRadius: 2,
-            boxShadow: 3,
-            border: `1px solid ${gold}33`,
-            mb: 3,
-          }}
-        >
-          <CardContent>
-            <Typography variant="h6" gutterBottom sx={{ fontWeight: 700 }}>
-              {t("leave.balance.monthlyLedger", "Monthly Leave Ledger")}
-            </Typography>
-
-            {years.length > 0 && (
-              <Box sx={{ borderBottom: 1, borderColor: gold + "33", mb: 2 }}>
-                <Tabs
-                  value={Math.max(0, years.indexOf(selectedYear))}
-                  onChange={(_e, idx) =>
-                    years[idx] != null && setSelectedYear(years[idx])
-                  }
-                  variant="scrollable"
-                  scrollButtons="auto"
-                  aria-label="ledger years"
-                >
-                  {years.map((y) => (
-                    <Tab key={y} label={String(y)} />
-                  ))}
-                </Tabs>
-              </Box>
-            )}
-
-            <TableContainer
-              component={Paper}
-              sx={{ borderRadius: 2, overflow: "hidden" }}
-            >
-              <Table size="small">
-                <TableHead>
-                  <TableRow sx={{ bgcolor: gold + "22" }}>
-                    <TableCell sx={{ fontWeight: 700 }}>
-                      {t("leave.balance.month", "Month")}
-                    </TableCell>
-                    <TableCell align="right" sx={{ fontWeight: 700 }}>
-                      {t("leave.balance.credit", "Credit")}
-                    </TableCell>
-                    <TableCell align="right" sx={{ fontWeight: 700 }}>
-                      {t("leave.balance.debit", "Debit")}
-                    </TableCell>
-                    <TableCell align="right" sx={{ fontWeight: 700 }}>
-                      {t("leave.balance.balance", "Balance")}
-                    </TableCell>
-                    <TableCell sx={{ fontWeight: 700 }}>
-                      {t("leave.balance.details", "Details")}
-                    </TableCell>
-                  </TableRow>
-                </TableHead>
-                <TableBody>
-                  {monthlyLedger.length ? (
-                    monthlyLedger
-                      .filter((row) =>
-                        row.month
-                          ? String(row.month).startsWith(String(selectedYear))
-                          : false
-                      )
-                      .map((row, idx) =>
-                        row.note ? (
-                          <TableRow key={`note-${row.month}-${idx}`}>
-                            <TableCell colSpan={5} align="center">
-                              <Typography
-                                variant="body2"
-                                sx={{
-                                  fontStyle: "italic",
-                                  fontWeight: 700,
-                                  color: "warning.main",
-                                }}
-                              >
-                                {row.note}
-                              </Typography>
-                            </TableCell>
-                          </TableRow>
-                        ) : (
-                          <TableRow key={row.month} hover>
-                            <TableCell sx={{ fontWeight: 600 }}>
-                              {row.month}
-                            </TableCell>
-                            <TableCell align="right">
-                              {row.credit.toFixed(2)}
-                            </TableCell>
-                            <TableCell align="right">
-                              {row.debit.toFixed(2)}
-                            </TableCell>
-                            <TableCell align="right" sx={{ fontWeight: 700 }}>
-                              {row.balance.toFixed(2)}
-                            </TableCell>
-                            <TableCell>
-                              <Typography
-                                variant="caption"
-                                color="text.secondary"
-                              >
-                                {row.detailsText || "—"}
-                              </Typography>
-                            </TableCell>
-                          </TableRow>
-                        )
-                      )
-                  ) : (
-                    <TableRow>
-                      <TableCell colSpan={5} align="center" sx={{ py: 4 }}>
-                        <Typography variant="body2" color="textSecondary">
-                          {t("leave.balance.noLedger", "No ledger to show")}
-                        </Typography>
-                      </TableCell>
-                    </TableRow>
-                  )}
-                </TableBody>
-              </Table>
-            </TableContainer>
           </CardContent>
         </Card>
       </Box>
@@ -2693,6 +3102,63 @@ const LeaveBalanceScreen: React.FC<{ employeeId?: number | string }> = ({
         </DialogTitleWithClose>
         <DialogContent dividers>
           <Stack spacing={2} sx={{ mt: 1 }}>
+            <LocalizationProvider dateAdapter={AdapterDateFns} adapterLocale={enGB}>
+              <DateCalendar
+                value={reqStart ? reqParse(reqStart) : null}
+                onChange={(value) => {
+                  const d = value instanceof Date ? value : new Date(value as any);
+                  if (!(d instanceof Date) || isNaN(d.getTime())) return;
+
+                  const iso = reqFmt(d);
+                  if (!reqStart || (reqStart && reqEnd)) {
+                    setReqStart(iso);
+                    setReqEnd("");
+                    return;
+                  }
+
+                  const st = reqParse(reqStart);
+                  if (!st || isNaN(st.getTime())) {
+                    setReqStart(iso);
+                    setReqEnd("");
+                    return;
+                  }
+                  const st0 = new Date(st);
+                  st0.setHours(0, 0, 0, 0);
+                  const d0 = new Date(d);
+                  d0.setHours(0, 0, 0, 0);
+                  if (d0 < st0) {
+                    setReqEnd(reqFmt(st0));
+                    setReqStart(iso);
+                  } else {
+                    setReqEnd(iso);
+                  }
+                }}
+                disablePast
+                shouldDisableDate={(day) => {
+                  if (reqIsSickLike) return false;
+                  const d = day instanceof Date ? day : new Date(day as any);
+                  if (!(d instanceof Date) || isNaN(d.getTime())) return true;
+                  const iso = reqFmt(d);
+                  const isHol = holidaySetState.has(iso);
+                  const isFri = d.getDay() === 5;
+                  return isFri || isHol;
+                }}
+                slots={{ day: ReqCustomDay }}
+                sx={{
+                  mx: "auto",
+                  "& .MuiPickersDay-root": {
+                    height: 36,
+                    width: 36,
+                    fontSize: 12,
+                  },
+                  "& .MuiDayCalendar-weekDayLabel": {
+                    fontSize: 11,
+                    opacity: 0.7,
+                  },
+                }}
+              />
+            </LocalizationProvider>
+
             <TextField
               label={t("leave.balance.type", "Type")}
               select
@@ -2715,6 +3181,15 @@ const LeaveBalanceScreen: React.FC<{ employeeId?: number | string }> = ({
               value={reqStart}
               onChange={(e) => setReqStart(e.target.value)}
               InputLabelProps={{ shrink: true }}
+              error={!!reqStart && reqInfo.startNonWorking}
+              helperText={
+                !!reqStart && reqInfo.startNonWorking
+                  ? t(
+                      "leave.balance.startNonWorking",
+                      "Start date cannot be a Friday or public holiday."
+                    )
+                  : ""
+              }
               fullWidth
             />
             <TextField
@@ -2723,22 +3198,210 @@ const LeaveBalanceScreen: React.FC<{ employeeId?: number | string }> = ({
               value={reqEnd}
               onChange={(e) => setReqEnd(e.target.value)}
               InputLabelProps={{ shrink: true }}
+              error={!!reqEnd && reqInfo.endNonWorking}
+              helperText={
+                !!reqEnd && reqInfo.endNonWorking
+                  ? t(
+                      "leave.balance.endNonWorking",
+                      "End date cannot be a Friday or public holiday."
+                    )
+                  : ""
+              }
               fullWidth
             />
+
+            {reqInfo.valid && (
+              <Box>
+                <Stack direction="row" spacing={1} flexWrap="wrap">
+                  <Chip
+                    label={t(
+                      "leave.balance.effectiveDays",
+                      `Effective days: ${reqInfo.effectiveDays}`
+                    )}
+                    color="primary"
+                    variant="outlined"
+                  />
+                  <Chip
+                    label={t(
+                      "leave.balance.excludedDays",
+                      `Excluded (Fridays/Holidays): ${reqInfo.excluded.length}`
+                    )}
+                    color={reqInfo.excluded.length ? "error" : "default"}
+                    variant="outlined"
+                  />
+                </Stack>
+
+                {reqInfo.excluded.length > 0 && !reqIsSickLike && (
+                  <Alert severity="warning" sx={{ mt: 1 }}>
+                    <Typography variant="body2" sx={{ fontWeight: 600 }}>
+                      {t(
+                        "leave.balance.nonWorkingInRange",
+                        "Non-working days in the selected range are not counted."
+                      )}
+                    </Typography>
+                    <Stack
+                      direction="row"
+                      spacing={1}
+                      flexWrap="wrap"
+                      sx={{ mt: 1 }}
+                    >
+                      {reqInfo.excluded.map((x) => (
+                        <Chip
+                          key={`${x.kind}-${x.iso}`}
+                          label={
+                            x.kind === "holiday"
+                              ? t(
+                                  "leave.balance.publicHolidayChip",
+                                  `${x.iso} (PH)`
+                                )
+                              : t(
+                                  "leave.balance.fridayChip",
+                                  `${x.iso} (Fri)`
+                                )
+                          }
+                          size="small"
+                          color="error"
+                          variant="outlined"
+                        />
+                      ))}
+                    </Stack>
+                  </Alert>
+                )}
+              </Box>
+            )}
           </Stack>
         </DialogContent>
         <DialogActions sx={{ px: 2, py: 1.5 }}>
           <Button
             variant="contained"
-            disabled={!reqType || !reqStart || !reqEnd || reqSaving}
+            disabled={
+              !reqType ||
+              !reqStart ||
+              !reqEnd ||
+              reqSaving ||
+              !reqInfo.valid ||
+              reqInfo.startNonWorking ||
+              reqInfo.endNonWorking ||
+              reqInfo.effectiveDays <= 0
+            }
             onClick={async () => {
               // your existing submit logic unchanged
               // (uses showToast / validations you already implemented)
               try {
                 setReqSaving(true);
-                // ... submit code ...
-                // on success:
-                // showToast(t("leave.balance.submitted","Leave request submitted."),"success");
+                const empId = String(employeeId ?? "");
+                if (!empId) {
+                  showToast(
+                    t("leave.balance.noEmployee", "Missing employee"),
+                    "error"
+                  );
+                  return;
+                }
+                if (!reqInfo.valid) {
+                  showToast(
+                    t("leave.balance.invalidRange", "Invalid date range"),
+                    "warning"
+                  );
+                  return;
+                }
+                if (reqInfo.startNonWorking || reqInfo.endNonWorking) {
+                  showToast(
+                    t(
+                      "leave.balance.nonWorkingBoundary",
+                      "Start/End cannot be a Friday or public holiday."
+                    ),
+                    "warning"
+                  );
+                  return;
+                }
+                if (reqInfo.effectiveDays <= 0) {
+                  showToast(
+                    t(
+                      "leave.balance.noWorkingDays",
+                      "Selected range has no working days."
+                    ),
+                    "warning"
+                  );
+                  return;
+                }
+
+                const leaveTypeId = Object.keys(leaveTypeMap).find(
+                  (id) => leaveTypeMap[id]?.code === reqType
+                );
+                const leaveCode = leaveTypeId != null ? Number(leaveTypeId) : NaN;
+                if (!Number.isFinite(leaveCode)) {
+                  showToast(
+                    t(
+                      "leave.balance.invalidType",
+                      "Please select a valid leave type."
+                    ),
+                    "warning"
+                  );
+                  return;
+                }
+
+                await createLeaveRequest({
+                  employeeId: empId,
+                  leaveCode,
+                  leaveType: reqType,
+                  startDate: reqStart,
+                  endDate: reqEnd,
+                  reason: "",
+                  contactNumber: "",
+                } as any);
+
+                try {
+                  let data = await getLeaveBalance(empId);
+                  try {
+                    const requests = await getLeaveRequests(empId);
+                    const existingRaw = Array.isArray(data.leaveHistory)
+                      ? data.leaveHistory
+                      : [];
+
+                    const existing = existingRaw.map((row: any) => {
+                      const out = { ...row };
+                      if (out.leaveTypeId != null && out.id_can == null) out.id_can = out.leaveTypeId;
+                      if (out.leaveTypeId != null && out.idCan == null) out.idCan = out.leaveTypeId;
+                      if (!out.state && !out.status) out.state = "approved";
+                      return out;
+                    });
+
+                    const byId: Record<string, any> = {};
+                    const isLedgerRow = (x: any) =>
+                      x && (x.deducted != null || x.runningTotal != null || x.leaveTypeId != null);
+                    const better = (a: any, b: any) => {
+                      const aHas = a && (a.effectiveDays != null || a.excluded != null || a.deducted != null);
+                      const bHas = b && (b.effectiveDays != null || b.excluded != null || b.deducted != null);
+                      if (aHas && !bHas) return a;
+                      if (!aHas && bHas) return b;
+                      // If both have day info, prefer ledger (authoritative) over requests
+                      const aLed = isLedgerRow(a);
+                      const bLed = isLedgerRow(b);
+                      if (aLed && !bLed) return a;
+                      if (!aLed && bLed) return b;
+                      return a ?? b;
+                    };
+
+                    [...existing, ...(Array.isArray(requests) ? requests : [])].forEach((row: any) => {
+                      const k = String(row.int_con ?? row.id);
+                      byId[k] = better(byId[k], row);
+                    });
+                    data = { ...data, leaveHistory: Object.values(byId) } as any;
+                  } catch {}
+                  setBalance(data);
+                } catch {}
+
+                showToast(
+                  t(
+                    "leave.balance.submitted",
+                    "Leave request submitted."
+                  ),
+                  "success"
+                );
+
+                setReqType("");
+                setReqStart("");
+                setReqEnd("");
                 setReqOpen(false);
               } finally {
                 setReqSaving(false);
@@ -2772,7 +3435,7 @@ const LeaveBalanceScreen: React.FC<{ employeeId?: number | string }> = ({
               </Typography>
               <Box display="flex" gap={1} flexWrap="wrap">
                 <Chip
-                  label={t("leave.balance.currentWY", "Current working year")}
+                  label={t("leave.balance.currentYear", "Current year")}
                   color={exportMode === "current" ? "primary" : "default"}
                   onClick={() => setExportMode("current")}
                 />

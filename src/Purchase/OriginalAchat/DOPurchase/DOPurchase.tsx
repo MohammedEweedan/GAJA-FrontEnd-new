@@ -303,15 +303,15 @@ const DOPurchase = () => {
   const [editOPurchase, setEditOPurchase] = useState<DOPuchase | null>(null);
 
   // Keep total_price automatically in sync with carat and price_per_carat
-  // so that Total Price defaults to carat * price_per_carat even on initial load
+  // Ensure null total_price gets set to 0 when computed is 0.
   useEffect(() => {
     setEditOPurchase((prev) => {
       if (!prev) return prev;
       const carat = Number(prev.carat) || 0;
       const ppc = Number(prev.price_per_carat) || 0;
       const computed = carat * ppc;
-      const current = Number(prev.total_price) || 0;
-      if ((carat !== 0 || ppc !== 0) && computed !== current) {
+      const prevTotal = prev.total_price as unknown as number | null | undefined;
+      if (prevTotal == null || prevTotal !== computed) {
         return { ...prev, total_price: computed };
       }
       return prev;
@@ -564,8 +564,7 @@ const DOPurchase = () => {
     //if (!editOPurchase?.laser_inscription) newErrors.laser_inscription = 'Required';
     if (!editOPurchase?.price_per_carat && editOPurchase?.price_per_carat !== 0)
       newErrors.price_per_carat = "Required";
-    if (!editOPurchase?.total_price && editOPurchase?.total_price !== 0)
-      newErrors.total_price = "Required";
+    // total_price is derived from carat * price_per_carat; don't force user input
     //if (!editOPurchase?.origin_country) newErrors.origin_country = 'Required';
     if (!editOPurchase?.Date_Achat) newErrors.Date_Achat = "Required";
     if (!editOPurchase?.supplier) newErrors.supplier = "Required";
@@ -575,7 +574,14 @@ const DOPurchase = () => {
   };
 
   const handleSave = async () => {
-    if (!validateForm() || !editOPurchase) return;
+    console.log("[DOPurchase] Save clicked", {
+      isEditMode,
+      id_achat: editOPurchase?.id_achat,
+    });
+    if (!validateForm() || !editOPurchase) {
+      console.warn("[DOPurchase] Validation failed", { errors, editOPurchase });
+      return;
+    }
     const token = localStorage.getItem("token");
 
     // Format dates
@@ -598,12 +604,34 @@ const DOPurchase = () => {
       Usr: Cuser,
       Date_Achat: formatDate(editOPurchase.Date_Achat),
       Approval_Date: formatDateTime(editOPurchase.Approval_Date),
-    };
+    } as any;
 
     try {
+      const url = isEditMode
+        ? `${apiUrl}/Update/${editOPurchase.id_achat}`
+        : `${apiUrl}/Add`;
+      const method = isEditMode ? "PUT" : "POST";
+      console.log("[DOPurchase] About to send request", {
+        method,
+        url,
+        baseURL: (axios as any)?.defaults?.baseURL,
+        tokenPresent: !!token,
+        payloadPreview: {
+          id_achat: (payload as any)?.id_achat,
+          Brand: (payload as any)?.Brand,
+          vendorsID: (payload as any)?.vendorsID,
+          Usr: (payload as any)?.Usr,
+          Date_Achat: (payload as any)?.Date_Achat,
+          Approval_Date: (payload as any)?.Approval_Date,
+          CODE_EXTERNAL: (payload as any)?.CODE_EXTERNAL,
+          SellingPrice: (payload as any)?.SellingPrice,
+          total_price: (payload as any)?.total_price,
+          price_per_carat: (payload as any)?.price_per_carat,
+        },
+      });
       if (isEditMode) {
         await axios.put(
-          `/DOpurchases/Update/${editOPurchase.id_achat}`,
+          url,
           payload,
           {
             headers: { Authorization: `Bearer ${token}` },
@@ -615,8 +643,8 @@ const DOPurchase = () => {
           severity: "success",
         });
       } else {
-        const { id_achat, supplier, ...purchaseData } = payload;
-        await axios.post(`${apiUrl}/Add`, purchaseData, {
+        const { id_achat, supplier, vendor, ...purchaseData } = payload as any;
+        await axios.post(url, purchaseData, {
           headers: { Authorization: `Bearer ${token}` },
         });
         setSnackbar({
@@ -628,6 +656,15 @@ const DOPurchase = () => {
       await fetchData();
       handleCloseDialog();
     } catch (error: any) {
+      console.error("[DOPurchase] Save failed", {
+        message: error?.message,
+        status: error?.response?.status,
+        data: error?.response?.data,
+        url: error?.config?.url,
+        method: error?.config?.method,
+        baseURL: error?.config?.baseURL,
+        headers: error?.config?.headers,
+      });
       setSnackbar({
         open: true,
         message: error.response?.data?.message || "Save failed",
@@ -730,6 +767,7 @@ const DOPurchase = () => {
       "Certificate URL",
       "Laser Inscription",
       "Item Cost",
+      "Selling Price",
       "Total Price",
       "Origin Country",
       "Comment",
@@ -764,6 +802,7 @@ const DOPurchase = () => {
       boxe.certificate_url,
       boxe.laser_inscription,
       boxe.price_per_carat,
+      boxe.SellingPrice,
       boxe.total_price,
       boxe.origin_country,
       boxe.comment,
@@ -993,9 +1032,7 @@ const DOPurchase = () => {
               mounted = false;
             };
           }, [id_achat]);
-          if (thumb) {
-            console.log("DOPurchase image thumb URL:", thumb);
-          }
+          
           return (
             <>
               <Box
@@ -1025,12 +1062,7 @@ const DOPurchase = () => {
                         e
                       );
                     }}
-                    onLoad={() => {
-                      console.log(
-                        "[DOPurchase] Image loaded successfully:",
-                        thumb
-                      );
-                    }}
+                   
                     sx={{
                       width: "100%",
                       height: "100%",
@@ -1172,6 +1204,17 @@ const DOPurchase = () => {
           `${row.carat} ${row.price_per_carat} ${row.total_price}`,
         enableColumnFilter: false,
         enableSorting: false,
+      },
+      {
+        accessorKey: "SellingPrice",
+        header: "Sales Price",
+        size: 120,
+        Cell: ({ cell }) =>
+          typeof cell.getValue<number>() === "number" && cell.getValue<number>() !== 0
+            ? cell
+                .getValue<number>()
+                .toLocaleString(undefined, { style: "currency", currency: "USD" })
+            : "",
       },
       { accessorKey: "cut", header: "Cut", size: 80 },
       { accessorKey: "color", header: "Color", size: 60 },
@@ -1533,7 +1576,7 @@ const DOPurchase = () => {
     },
     initialState: {
       pagination: {
-        pageSize: 6,
+        pageSize: 5,
         pageIndex: 0,
       },
       columnVisibility: {
@@ -1548,6 +1591,7 @@ const DOPurchase = () => {
         certificate_number: true,
         certificate_lab: true,
         price_per_carat: true,
+        SellingPrice: true,
         total_price: true,
         origin_country: false,
         Date_Achat: true,

@@ -1,4 +1,4 @@
-import { useEffect, useState, useMemo } from "react";
+import { useEffect, useState, useMemo, useCallback } from "react";
 import axios from "../../../api";
 import { useNavigate } from "react-router-dom";
 import {
@@ -52,6 +52,7 @@ type Supplier = {
   Price_G_Gold: number;
   Percentage_Diamond: number;
   Price_G_Gold_Sales: number;
+  profit_margin?: number;
 };
 
 const initialSupplierState: Supplier = {
@@ -66,6 +67,7 @@ const initialSupplierState: Supplier = {
   Price_G_Gold: 0,
   Percentage_Diamond: 0,
   Price_G_Gold_Sales: 0,
+  profit_margin: 0,
 };
 
 type ItemsTypes = {
@@ -149,7 +151,7 @@ const Suppliers = () => {
     (localStorage.getItem("themeMode") as "light" | "dark") || "dark";
   const [themeMode, setThemeMode] = useState<"light" | "dark">(savedThemeMode);
 
-  const fetchData = async () => {
+  const fetchData = useCallback(async () => {
     const token = localStorage.getItem("token");
     if (!token) return navigate("/");
     try {
@@ -163,7 +165,7 @@ const Suppliers = () => {
     } finally {
       setLoading(false);
     }
-  };
+  }, [apiUrl, navigate]);
 
   const apiUrlT = `${apiIp}/itemstypes`;
 
@@ -183,16 +185,22 @@ const Suppliers = () => {
 
   useEffect(() => {
     fetchData();
-  }, []);
+  }, [fetchData]);
   useEffect(() => {
     fetchDataT();
   }, []);
+  // Refresh filtered table data whenever base data or selected type changes
+  useEffect(() => {
+    if (selectedType) {
+      setFilteredData(data.filter((s) => s.TYPE_SUPPLIER === selectedType));
+    }
+  }, [data, selectedType]);
 
-  const handleEdit = (row: Supplier) => {
+  const handleEdit = useCallback((row: Supplier) => {
     setEditSupplier(row);
     setIsEditMode(true);
     setOpenDialog(true);
-  };
+  }, []);
 
   const handleAddNew = () => {
     setEditSupplier(initialSupplierState);
@@ -255,7 +263,7 @@ const Suppliers = () => {
     }
   };
 
-  const handleDelete = async (row: Supplier) => {
+  const handleDelete = useCallback(async (row: Supplier) => {
     if (!window.confirm(`Delete "${row.client_name}"?`)) return;
     const token = localStorage.getItem("token");
     try {
@@ -266,7 +274,7 @@ const Suppliers = () => {
     } catch {
       alert("Delete failed");
     }
-  };
+  }, [apiUrl, fetchData]);
 
   const handleExportExcel = () => {
     const headers = [
@@ -281,6 +289,7 @@ const Suppliers = () => {
       "Gold Price",
       "Diamond %",
       "Gold Sales",
+      "Profit Margin",
     ];
     const rows = filteredData.map((s) => [
       s.id_client,
@@ -294,6 +303,7 @@ const Suppliers = () => {
       s.Price_G_Gold,
       s.Percentage_Diamond,
       s.Price_G_Gold_Sales,
+      s.profit_margin ?? 0,
     ]);
     const worksheet = XLSX.utils.aoa_to_sheet([headers, ...rows]);
     const workbook = XLSX.utils.book_new();
@@ -330,6 +340,11 @@ const Suppliers = () => {
         Cell: ({ cell }) => `${cell.getValue()}%`,
       },
       {
+        accessorKey: "profit_margin",
+        header: "Profit Margin %",
+        Cell: ({ cell }) => `${cell.getValue() ?? 0}%`,
+      },
+      {
         header: "Actions",
         id: "actions",
         size: 100,
@@ -357,7 +372,7 @@ const Suppliers = () => {
         ),
       },
     ],
-    []
+    [handleEdit, handleDelete]
   );
 
   const table = useMaterialReactTable({
@@ -572,6 +587,24 @@ const Suppliers = () => {
               inputProps={{ min: 0, max: 100 }}
               error={!!errors.Percentage_Diamond}
               helperText={errors.Percentage_Diamond}
+            />
+            <TextField
+              label="Profit Margin %"
+              type="number"
+              fullWidth
+              value={editSupplier?.profit_margin ?? ""}
+              onChange={(e) => {
+                const val = e.target.value;
+                if (/^\d{0,3}$/.test(val)) {
+                  const num = Number(val);
+                  if (val === "") {
+                    setEditSupplier({ ...editSupplier!, profit_margin: undefined });
+                  } else if (num >= 0 && num <= 100) {
+                    setEditSupplier({ ...editSupplier!, profit_margin: num });
+                  }
+                }
+              }}
+              inputProps={{ min: 0, max: 100 }}
             />
             <FormControl fullWidth>
               <InputLabel>Type</InputLabel>

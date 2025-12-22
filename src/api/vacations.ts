@@ -23,6 +23,8 @@ export type VacationRecord = {
   state: string;       // 'Approved', 'Pending', 'Rejected'
   type?: string;
   comment?: string;
+  effectiveDays?: number | null;
+  excluded?: any | null;
 };
 
 export async function getVacationsInRange(from: string, to: string): Promise<VacationRecord[]> {

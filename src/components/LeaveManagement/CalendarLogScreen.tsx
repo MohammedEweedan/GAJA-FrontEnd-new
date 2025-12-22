@@ -8,8 +8,6 @@ import React, {
 } from "react";
 import { useTranslation } from "react-i18next";
 import { useTheme, alpha, darken, lighten } from "@mui/material/styles";
-import Badge from "@mui/material/Badge";
-import PendingActionsIcon from "@mui/icons-material/PendingActions";
 import {
   Box,
   Typography,
@@ -145,10 +143,12 @@ const CalendarLogScreen: React.FC<{ employeeId?: string | number }> = ({
   const [eventDetailsOpen, setEventDetailsOpen] = useState<boolean>(false);
   // --- EDIT MODE state for leave events ---
   const [editMode, setEditMode] = useState(false);
+  const [confirmApprovedEditOpen, setConfirmApprovedEditOpen] = useState(false);
+  const [confirmApprovedEditLoading, setConfirmApprovedEditLoading] = useState(false);
   const [editForm, setEditForm] = useState<{
     startDate: string;
     endDate: string;
-    typeCode: string; // AL, SL, ...
+    typeCode: string; 
     comment: string;
   }>({
     startDate: "",
@@ -157,12 +157,9 @@ const CalendarLogScreen: React.FC<{ employeeId?: string | number }> = ({
     comment: "",
   });
 
-  // --- calendar window controls ---
-  const HISTORY_MONTHS_BACK = 18; // load 18 months back
-  const FUTURE_MONTHS_FWD = 3; // and 3 months forward
-
   const startOfMonth = (d: Date) =>
     new Date(d.getFullYear(), d.getMonth(), 1, 0, 0, 0, 0);
+  
   const endOfMonth = (d: Date) =>
     new Date(d.getFullYear(), d.getMonth() + 1, 0, 23, 59, 59, 999);
 
@@ -525,6 +522,19 @@ const CalendarLogScreen: React.FC<{ employeeId?: string | number }> = ({
   const handleSaveEditedLeave = async () => {
     if (!selectedEvent || selectedEvent.type !== "leave") return;
 
+    const selectedStatus = String(selectedEvent.status || '').toLowerCase();
+    const isApproved = selectedStatus === 'approved' || selectedStatus === 'accepted' || selectedStatus === 'approve' || selectedStatus === 'accept';
+
+    const origStart = selectedEvent.resource?.startDate
+      ? String(selectedEvent.resource.startDate).slice(0, 10)
+      : format(selectedEvent.start, 'yyyy-MM-dd');
+    const origEnd = selectedEvent.resource?.endDate
+      ? String(selectedEvent.resource.endDate).slice(0, 10)
+      : format(selectedEvent.end, 'yyyy-MM-dd');
+
+    const datesChanged = String(editForm.startDate).slice(0, 10) !== String(origStart).slice(0, 10) ||
+      String(editForm.endDate).slice(0, 10) !== String(origEnd).slice(0, 10);
+
     // validate
     if (!editForm.startDate || !editForm.endDate) {
       setSnack({
@@ -566,12 +576,7 @@ const CalendarLogScreen: React.FC<{ employeeId?: string | number }> = ({
       return;
     }
 
-    const effDays = computeEffectiveDays(
-      new Date(editForm.startDate),
-      new Date(editForm.endDate),
-    );
-
-    try {
+    const doUpdate = async (keepState?: boolean) => {
       setActionLoading(true);
 
       // 1) Try update
@@ -581,13 +586,13 @@ const CalendarLogScreen: React.FC<{ employeeId?: string | number }> = ({
         endDate: editForm.endDate,
         code: codeToSend,
         comment: editForm.comment ?? "",
-      });
+        keepState,
+      } as any);
 
       // 2) Fallback: recreate as pending when server cannot edit in place
       if (!upd.ok) {
-        // Do not recreate approved ones silently
-        const s = String(selectedEvent.status || "").toLowerCase();
-        if (["approved", "accepted", "approve", "accept"].includes(s)) {
+        // Never recreate approved ones
+        if (isApproved) {
           throw new Error(
             "The server doesn’t support editing approved leaves. Ask admin to enable the update route."
           );
@@ -606,7 +611,6 @@ const CalendarLogScreen: React.FC<{ employeeId?: string | number }> = ({
           endDate: editForm.endDate,
           reason: editForm.comment ?? "",
           contactNumber: "",
-          days: effDays,
         });
         setSnack({
           open: true,
@@ -658,6 +662,15 @@ const CalendarLogScreen: React.FC<{ employeeId?: string | number }> = ({
       }
 
       await refresh();
+    };
+
+    try {
+      if (isApproved && datesChanged) {
+        setConfirmApprovedEditOpen(true);
+        return;
+      }
+
+      await doUpdate(false);
     } catch (e: any) {
       setSnack({
         open: true,
@@ -669,6 +682,36 @@ const CalendarLogScreen: React.FC<{ employeeId?: string | number }> = ({
       });
     } finally {
       setActionLoading(false);
+    }
+  };
+
+  const confirmApprovedEdit = async () => {
+    if (!selectedEvent || selectedEvent.type !== 'leave') return;
+    try {
+      setConfirmApprovedEditLoading(true);
+      await updateLeaveRequestFlexible({
+        id: selectedEvent.resource?.id ?? selectedEvent.resource?.int_con ?? selectedEvent.id,
+        startDate: editForm.startDate,
+        endDate: editForm.endDate,
+        code: (editForm.typeCode || selectedEvent.leaveType || '').toString().toUpperCase(),
+        comment: editForm.comment ?? '',
+        keepState: true,
+      } as any);
+
+      setSnack({ open: true, msg: t('leave.status.updated', 'Leave updated'), severity: 'success' });
+      setConfirmApprovedEditOpen(false);
+      setEditMode(false);
+      setEventDetailsOpen(false);
+      setSelectedEvent(null);
+      await refresh();
+    } catch (e: any) {
+      setSnack({
+        open: true,
+        msg: e?.message || e?.response?.data?.message || t('leave.status.actionFailed', 'Action failed'),
+        severity: 'error',
+      });
+    } finally {
+      setConfirmApprovedEditLoading(false);
     }
   };
 
@@ -979,10 +1022,8 @@ const CalendarLogScreen: React.FC<{ employeeId?: string | number }> = ({
             // 👉 split into working-only spans so the UI never draws bars over Fridays/holidays
             const spans = splitWorkingSegments(startD, endD);
 
-            // effective days = sum of all working days across spans
-            const effectiveDays = spans.reduce(
-              (acc, seg) => acc + computeEffectiveDays(seg.start, seg.end),
-              0
+            const effectiveDays = Number(
+              lr.effectiveDays ?? lr.effective_days ?? lr.days ?? 0
             );
 
             // Only show approved/accepted (keep your rule)
@@ -1293,7 +1334,9 @@ const CalendarLogScreen: React.FC<{ employeeId?: string | number }> = ({
 
   const refresh = async () => setDate((d) => new Date(d));
 
-  const onModerate = async (status: "approved" | "rejected" | "edited") => {
+  const onModerate = async (
+    status: "approved" | "rejected" | "edited" | "cancelled"
+  ) => {
     if (!selectedEvent || selectedEvent.type !== "leave") return;
     const leaveId =
       selectedEvent.resource?.id ?? selectedEvent.resource?.int_con;
@@ -2095,12 +2138,14 @@ const CalendarLogScreen: React.FC<{ employeeId?: string | number }> = ({
                       {t("leave.status.days", "Days")}
                     </Typography>
                     <Typography>
-                      {selectedEvent.resource?.nbr_jour ??
-                        selectedEvent.resource?.days ??
-                        differenceInCalendarDays(
-                          selectedEvent.end,
-                          selectedEvent.start
-                        ) + 1}
+                      {Number(
+                        selectedEvent.resource?.effectiveDays ??
+                          selectedEvent.resource?.effective_days ??
+                          selectedEvent.effectiveDays ??
+                          selectedEvent.resource?.days ??
+                          selectedEvent.resource?.nbr_jour ??
+                          0
+                      )}
                     </Typography>
                   </Box>
                 )}
@@ -2147,6 +2192,13 @@ const CalendarLogScreen: React.FC<{ employeeId?: string | number }> = ({
                     >
                       {t("leave.status.reject", "Deny")}
                     </Button>
+                    <Button
+                      onClick={() => onModerate("cancelled")}
+                      color="warning"
+                      disabled={actionLoading || String(selectedEvent.status || '').toLowerCase() === 'cancelled'}
+                    >
+                      {t("common.cancel", "Cancel")}
+                    </Button>
                     {!editMode ? (
                       <Button
                         onClick={() => setEditMode(true)}
@@ -2183,6 +2235,61 @@ const CalendarLogScreen: React.FC<{ employeeId?: string | number }> = ({
                     </Button>
                   </>
                 )}
+              </DialogActions>
+            </Dialog>
+          )}
+
+          {/* Confirm: edit approved leave without re-approval */}
+          {selectedEvent?.type === 'leave' && (
+            <Dialog
+              open={confirmApprovedEditOpen}
+              onClose={() => setConfirmApprovedEditOpen(false)}
+              maxWidth="sm"
+              fullWidth
+            >
+              <DialogTitle>
+                {t('leave.editApproved.title', 'Update approved leave?')}
+              </DialogTitle>
+              <DialogContent>
+                <Typography variant="body2" color="text.secondary">
+                  {t(
+                    'leave.editApproved.body',
+                    `This leave is already approved for ${selectedEvent.employeeName || 'this employee'}. Do you want to update the dates and keep it approved?`
+                  )}
+                </Typography>
+                <Box mt={2}>
+                  <Typography variant="subtitle2">{t('leave.editApproved.old', 'Current')}</Typography>
+                  <Typography>
+                    {String(selectedEvent.resource?.startDate || format(selectedEvent.start, 'yyyy-MM-dd')).slice(0, 10)}
+                    {' → '}
+                    {String(selectedEvent.resource?.endDate || format(selectedEvent.end, 'yyyy-MM-dd')).slice(0, 10)}
+                  </Typography>
+                </Box>
+                <Box mt={2}>
+                  <Typography variant="subtitle2">{t('leave.editApproved.new', 'New')}</Typography>
+                  <Typography>
+                    {String(editForm.startDate).slice(0, 10)}
+                    {' → '}
+                    {String(editForm.endDate).slice(0, 10)}
+                  </Typography>
+                </Box>
+              </DialogContent>
+              <DialogActions>
+                <Button
+                  onClick={() => setConfirmApprovedEditOpen(false)}
+                  color="inherit"
+                  disabled={confirmApprovedEditLoading}
+                >
+                  {t('common.cancel', 'Cancel')}
+                </Button>
+                <Button
+                  onClick={confirmApprovedEdit}
+                  variant="contained"
+                  color="warning"
+                  disabled={confirmApprovedEditLoading}
+                >
+                  {t('leave.editApproved.confirm', 'Update & notify')}
+                </Button>
               </DialogActions>
             </Dialog>
           )}

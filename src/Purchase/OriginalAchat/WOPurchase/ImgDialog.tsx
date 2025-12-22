@@ -19,11 +19,12 @@ interface ImgDialogProps {
   open: boolean;
   onClose: () => void;
   id_achat: number | null;
-  type?: "watch" | "diamond"; // default 'watch'
+  // Logical purchase type; backend maps these to folders WatchPic / DiamondPic / GoldPic
+  type?: "watch" | "diamond" | "gold"; // default 'watch'
 }
 
-const API_HOST = (process.env.REACT_APP_API_IP as string) || "";
-const API_BASE = `${API_HOST}/images`;
+// Use relative base so axios instance baseURL handles host & optional /api prefix.
+const API_BASE = "/images";
 
 const ImgDialog: React.FC<ImgDialogProps> = ({
   open,
@@ -53,11 +54,16 @@ const ImgDialog: React.FC<ImgDialogProps> = ({
     const token = localStorage.getItem("token");
     if (!token || !id_achat) return;
     try {
-      const res = await axios.get(`${API_BASE}/list/${type}/${id_achat}`, {
+      // Backend list endpoints:
+      // watch -> /images/list/:id
+      // diamond -> /images/list/diamond/:id
+      // gold -> /images/list/gold/:id
+      const listSegment = type === "watch" ? "" : `/${type}`;
+      const listPath = `${API_BASE}/list${listSegment}/${id_achat}`.replace(/\/\/{2,}/g, "/");
+      const res = await axios.get(listPath, {
         headers: { Authorization: `Bearer ${token}` },
       });
-      console.log("Fetched images:", res.data); // Debug log
-      // If res.data is an array of objects, extract the correct property
+      // Normalize payload (array of strings OR array of objects with url/path/filename/name)
       if (
         Array.isArray(res.data) &&
         res.data.length > 0 &&
@@ -104,7 +110,8 @@ const ImgDialog: React.FC<ImgDialogProps> = ({
     formData.append("image", selectedFile);
     formData.append("id_achat", String(id_achat));
     try {
-      await axios.post(`${API_BASE}/upload/${type}/${id_achat}`, formData, {
+      // Upload endpoint always typed for uniform folder mapping (WatchPic / DiamondPic / GoldPic)
+      await axios.post(`${API_BASE}/upload/${type}/${id_achat}`.replace(/\/\/{2,}/g, "/"), formData, {
         headers: {
           Authorization: `Bearer ${token}`,
           "Content-Type": "multipart/form-data",
@@ -120,9 +127,10 @@ const ImgDialog: React.FC<ImgDialogProps> = ({
   };
 
   return (
-    <Dialog open={open} onClose={onClose} maxWidth="sm" fullWidth>
-      <DialogTitle>Add Images</DialogTitle>
-      <DialogContent>
+    <>
+      <Dialog open={open} onClose={onClose} maxWidth="sm" fullWidth>
+        <DialogTitle>Add Images</DialogTitle>
+        <DialogContent>
         <Typography variant="body1" color="text.secondary" gutterBottom>
           Add images for purchase ID: {id_achat ?? "N/A"}
         </Typography>
@@ -208,18 +216,50 @@ const ImgDialog: React.FC<ImgDialogProps> = ({
                     display: "flex",
                     alignItems: "stretch",
                     transition: "box-shadow 0.3s",
-                    cursor: "zoom-in",
                     "&:hover": {
                       boxShadow: 6,
                     },
                   }}
-                  onClick={() => setZoomImg(imgSrc)}
                 >
                   <Box
                     component="img"
                     src={imgSrc}
                     alt={`img-${idx}`}
                     loading="lazy"
+                    onError={(e) => {
+                      // Fallback sequence for watch type only
+                      if (type === 'watch') {
+                        const target = e.currentTarget as HTMLImageElement;
+                        try {
+                          const original = imgSrc.split('?')[0];
+                          if (/\/images\//.test(original)) {
+                            const u = new URL(original, window.location.origin);
+                            const parts = u.pathname.split('/'); // ['', 'images', id, filename]
+                            if (parts.length >= 4) {
+                              const idPart = parts[2];
+                              const filePart = parts.slice(3).join('/');
+                              const fallback = `${u.protocol}//${u.host}/uploads/WatchPic/${idPart}/${filePart}`;
+                              console.warn('[ImgDialog] watch image failed; retrying via static path:', fallback);
+                              target.onerror = null; // prevent loop
+                              target.src = fallback;
+                              return;
+                            }
+                          }
+                        } catch (err) {
+                          console.warn('[ImgDialog] fallback build error:', err);
+                        }
+                        // Inline placeholder if fallback not applied
+                        const placeholder =
+                          'data:image/svg+xml;utf8,' +
+                          encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" width="160" height="120" viewBox="0 0 160 120"><rect width="160" height="120" fill="#f0f0f0"/><text x="50%" y="50%" dominant-baseline="middle" text-anchor="middle" font-size="12" fill="#999">No Image</text></svg>`);
+                        (e.currentTarget as HTMLImageElement).src = placeholder;
+                      }
+                    }}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      const src = (e.currentTarget as HTMLImageElement).src;
+                      setZoomImg(src);
+                    }}
                     sx={{
                       width: "100%",
                       height: "100%",
@@ -229,6 +269,7 @@ const ImgDialog: React.FC<ImgDialogProps> = ({
                       background: "#f9f9f9",
                       imageRendering: "auto",
                       transition: "transform 0.3s",
+                      cursor: "zoom-in",
                       "&:hover": {
                         transform: "scale(1.04)",
                       },
@@ -266,8 +307,10 @@ const ImgDialog: React.FC<ImgDialogProps> = ({
           Close
         </Button>
       </Box>
-      {/* Zoom Dialog */}
-      <Dialog
+    </Dialog>
+
+    {/* Zoom Dialog */}
+    <Dialog
         open={!!zoomImg}
         onClose={() => setZoomImg(null)}
         maxWidth={false}
@@ -490,7 +533,7 @@ const ImgDialog: React.FC<ImgDialogProps> = ({
           {snack.message}
         </MuiAlert>
       </Snackbar>
-    </Dialog>
+    </>
   );
 
   // Helper function to resize base64 image using a canvas
@@ -519,7 +562,7 @@ const ImgDialog: React.FC<ImgDialogProps> = ({
       return { open: true, message: "No purchase ID", severity: "error" };
     const token = localStorage.getItem("token");
     try {
-      await axios.delete(`${API_BASE}/delete/${type}/${id_achat}/${filename}`, {
+      await axios.delete(`${API_BASE}/delete/${type}/${id_achat}/${filename}`.replace(/\/\/{2,}/g, "/"), {
         headers: { Authorization: `Bearer ${token}` },
       });
       fetchImages();

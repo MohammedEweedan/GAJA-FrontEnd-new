@@ -14,11 +14,13 @@ import FingerprintIcon from "@mui/icons-material/Fingerprint";
 import { hasRole } from "../getUserInfo";
 import { useTranslation } from "react-i18next";
 import { useTheme } from "@mui/material/styles";
+import { useNavigate } from "react-router-dom";
 
 const SelectActionCard: React.FC = () => {
   const [selectedCard, setSelectedCard] = React.useState<number | null>(null);
   const { t } = useTranslation();
   const theme = useTheme();
+  const navigate = useNavigate();
 
   // Accent like Analytics: prefer theme.palette.gaja.200
   const accent = (theme.palette as any)?.gaja?.[500];
@@ -36,6 +38,7 @@ const SelectActionCard: React.FC = () => {
         title: t("settings.usersList.title"),
         description: t("settings.usersList.desc"),
         icon: <GroupIcon fontSize="large" />,
+        onClick: () => navigate("/setting/generals/users"),
       },
       {
         id: 3,
@@ -99,7 +102,10 @@ const SelectActionCard: React.FC = () => {
             }}
           >
             <CardActionArea
-              onClick={() => setSelectedCard(index)}
+              onClick={() => {
+                setSelectedCard(index);
+                if (card.onClick) card.onClick();
+              }}
               aria-pressed={isActive}
               sx={{
                 height: "100%",

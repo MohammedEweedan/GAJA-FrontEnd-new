@@ -6,8 +6,7 @@ import axios from "../../api";
 import WatchLaterIcon from '@mui/icons-material/WatchLater';
 import AttachMoneyIcon from '@mui/icons-material/AttachMoney';
 import EuroIcon from '@mui/icons-material/Euro';
-import AnalyticsOverview from './AnalyticsOverview';
- 
+
 type BalanceItem = {
   Acc_No: string;
   balance: number;
@@ -26,7 +25,7 @@ export default function Dashboard() {
   const gaja = (theme.palette as any)?.gaja as Record<string, string> | undefined;
   const accent = theme.palette.mode === 'dark'
     ? (gaja?.[100] ?? '#b7a27d')
-    : (gaja?.[50] ?? '#374151');
+    : (gaja?.[50] ?? '#334d68');
 
   const [balances, setBalances] = useState<BalanceItem[]>([]);
   const acc_no = '110101';
@@ -66,7 +65,7 @@ export default function Dashboard() {
       p: 3
     }}>
       {/* Analytics KPIs and charts */}
-      <AnalyticsOverview />
+      
       <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 3, mt: 3 }}>
         {balances.filter(bal => Number(bal.balance) !== 0 || Number(bal.balance_curr) !== 0).map((bal, idx) => (
           <Box key={bal.Acc_No || idx} sx={{ flex: '1 1 320px', minWidth: 300, maxWidth: 400 }}>

@@ -220,87 +220,109 @@ const DNew_p = (props: NewPProps) => {
   const API_FALLBACK_IMAGE = "/images";
   const [images, setImages] = useState<string[]>([]);
   const [carouselIndex, setCarouselIndex] = useState(0);
-  // Removed blob-based fetch; we now use direct URLs like in DOPurchase
+
+  // Robust computation for displayed sale price for the current product
+  const productSalePrice = useMemo(() => {
+    const d = productDetails?.[0]?.purchaseD;
+    if (!d) return null;
+    if (d.sale_price !== undefined && d.sale_price !== null) return Number(d.sale_price);
+    if (typeof d.SellingPrice === "number") return d.SellingPrice;
+    if (d.total_price !== undefined && d.total_price !== null) return Number(d.total_price);
+    if (d.price_per_carat !== undefined && d.price_per_carat !== null && d.carat !== undefined && d.carat !== null)
+      return Number(d.price_per_carat) * Number(d.carat);
+    return null;
+  }, [productDetails]);
+  // Fetch images using the same approach as watches (WNew_P): call `/images/list/:id`,
+  // include auth header when present, normalize URLs to https, and fallback to
+  // the `/images` host if needed. This keeps behavior consistent between types.
   const fetchImages = useCallback(
     async (id_achat: number) => {
-      const token = localStorage.getItem("token");
-      if (!token || !id_achat) return false;
-      const endpoints = [
-        `${API_BASEImage}/list/diamond/${id_achat}`,
-        `${API_BASEImage}/list/${id_achat}`, // legacy/untyped (watch default)
-        `${API_FALLBACK_IMAGE}/list/diamond/${id_achat}`,
-        `${API_FALLBACK_IMAGE}/list/${id_achat}`,
-      ];
-      for (const url of endpoints) {
+      if (!id_achat) return false;
+      try {
+        const token = localStorage.getItem("token");
+        const res = await axios.get(`${API_BASEImage}/list/${id_achat}`, {
+          headers: token ? { Authorization: `Bearer ${token}` } : {},
+        });
+        const data = res.data;
+        let urls: string[] = [];
+        if (Array.isArray(data) && data.length > 0 && typeof data[0] === "object") {
+          urls = data.map((img: any) => img.url || img);
+        } else {
+          urls = data;
+        }
+        urls = urls.map((u) =>
+          typeof u === "string" && u.startsWith("http://") ? u.replace("http://", "https://") : u
+        );
+        setImages(urls.filter(Boolean));
+        return true;
+      } catch (err) {
+        // try fallback host
         try {
-          const res = await axios.get(url, {
-            headers: { Authorization: `Bearer ${token}` },
+          const token = localStorage.getItem("token");
+          const res = await axios.get(`${API_FALLBACK_IMAGE}/list/${id_achat}`, {
+            headers: token ? { Authorization: `Bearer ${token}` } : {},
           });
           const data = res.data;
-          if (Array.isArray(data) && data.length > 0) {
-            let urls: string[] = [];
-            if (typeof data[0] === "string") {
-              urls = data as string[];
-            } else if (typeof data[0] === "object" && data[0]) {
-              urls = data.map((obj: Record<string, any>) => {
-                const key = Object.keys(obj).find((k) =>
-                  ["url", "path", "filename", "name"].includes(k)
-                );
-                if (!key) return "";
-                if (key === "filename") {
-                  // Derive type from URL path; default to diamond
-                  const type = url.includes("/list/diamond/")
-                    ? "diamond"
-                    : "watch";
-                  return `${API_BASEImage}/${type}/${id_achat}/${obj[key]}`;
-                }
-                return String(obj[key]);
-              });
-            }
-            const withToken = urls
-              .filter(Boolean)
-              .map((u) => u + (u.includes("?") ? "&" : "?") + `token=${token}`);
-            if (withToken.length > 0) {
-              setImages(withToken);
-              return true;
-            }
+          let urls: string[] = [];
+          if (Array.isArray(data) && data.length > 0 && typeof data[0] === "object") {
+            urls = data.map((img: any) => img.url || img);
+          } else {
+            urls = data;
           }
+          urls = urls.map((u) =>
+            typeof u === "string" && u.startsWith("http://") ? u.replace("http://", "https://") : u
+          );
+          setImages(urls.filter(Boolean));
+          return true;
         } catch (e) {
-          // try next endpoint
+          setImages([]);
+          return false;
         }
       }
-      setImages([]);
-      return false;
     },
     [API_BASEImage, API_FALLBACK_IMAGE]
   );
 
-  // Fetch images when diamond productDetails arrive; fallback to single image_url
+  // Fetch images when product details provide an `id_achat` (mirror WNew_P) and
+  // fallback to any single `image_url` inside the diamond details if no list is found.
   useEffect(() => {
+    // Prefer top-level id_achat on productDetails, then diamond-specific id, then distribution
     let id_achat: number | undefined;
-    // Try multiple possible locations for id_achat
+
     id_achat =
-      productDetails?.[0]?.purchaseD?.id_achat ||
-      productDetails?.[0]?.id_achat ||
-      distribution?.purchaseD?.id_achat ||
-      distribution?.purchaseD?.purchase?.id_achat ||
-      distribution?.purchase?.id_achat ||
-      distribution?.id_achat;
+      productDetails?.[0]?.id_achat || productDetails?.[0]?.purchaseD?.id_achat ||
+      distribution?.purchaseD?.id_achat || distribution?.id_achat;
 
     (async () => {
       if (id_achat) {
-        const ok = await fetchImages(id_achat);
-        if (!ok) {
-          // Fallback to single URL if available
-          const url = productDetails?.[0]?.purchaseD?.image_url;
-          if (url) setImages([url]);
+        console.log("DNew_P: Fetching images for id_achat:", id_achat);
+        try {
+          const ok = await fetchImages(id_achat);
+          console.log("DNew_P: fetchImages result for", id_achat, ":", ok);
+          if (!ok) {
+            const url = productDetails?.[0]?.purchaseD?.image_url;
+            if (url) {
+              console.log("DNew_P: Falling back to single image_url", url);
+              setImages([url]);
+            }
+          }
+        } catch (err) {
+          console.error("DNew_P: Error during fetchImages for", id_achat, err);
         }
       } else {
         const url = productDetails?.[0]?.purchaseD?.image_url;
-        if (url) setImages([url]);
+        if (url) {
+          console.log("DNew_P: Using productDetails.purchaseD.image_url as fallback:", url);
+          setImages([url]);
+        }
       }
     })();
   }, [productDetails, distribution, fetchImages]);
+
+  // Log productDetails state for debugging
+  useEffect(() => {
+    console.log("DNew_P: productDetails state changed:", productDetails);
+  }, [productDetails]);
 
   // Reset carousel index when images change
   useEffect(() => {
@@ -489,8 +511,26 @@ const DNew_p = (props: NewPProps) => {
       });
 
       console.log("Product details response:", response.data);
-      setProductDetails(response.data); // Store product details in state
-      return response.data;
+
+      // Normalize response shape: ensure we always have an array of detail objects
+      let details: any = response.data;
+
+      // If response contains a `data` wrapper (common in some APIs), unwrap it
+      if (details && !Array.isArray(details) && details.data) {
+        details = details.data;
+      }
+
+      // If it's a single object with purchaseD/purchaseW, wrap into an array
+      if (details && !Array.isArray(details)) {
+        details = [details];
+      }
+
+      // Guard: ensure we have an array, otherwise set to empty array
+      if (!Array.isArray(details)) details = [];
+
+      console.log("Normalized product details:", details);
+      setProductDetails(details); // Store normalized product details in state
+      return details;
     } catch (error) {
       showNotification("Failed to fetch product details", "error");
       return null;
@@ -511,34 +551,51 @@ const DNew_p = (props: NewPProps) => {
     const fillFromDistribution = async () => {
       if (distribution) {
         const type = distribution.PurchaseType?.toLowerCase();
+        console.log("fillFromDistribution: distribution:", distribution, "type:", type);
         const details = await fetchProductDetails(
           distribution.distributionID,
           type
         );
-        if (details && details[0]?.purchaseD) {
-          setProductDetails(details);
+        console.log("fillFromDistribution: fetched details:", details);
+        if (details && details.length > 0) {
+          // Try to select the detail matching the PurchaseID (or id_achat) from distribution
+          const targetPurchaseId =
+            distribution?.PurchaseID ||
+            distribution?.purchase?.id_achat ||
+            distribution?.purchaseD?.id_achat ||
+            distribution?.id_achat ||
+            null;
 
-          // Set vendor from productDetails if available
-          const vendorObj = details[0].purchaseD.supplier
+          let selectedDetail: any = null;
+          if (targetPurchaseId != null) {
+            selectedDetail = details.find((d: any) => {
+              const pid = d?.purchaseD?.id_achat ?? d?.id_achat ?? d?.purchaseW?.id_achat ?? d?.purchase?.id_achat;
+              return pid === targetPurchaseId;
+            }) || null;
+            console.log("fillFromDistribution: targetPurchaseId:", targetPurchaseId, "selectedDetail:", selectedDetail);
+          }
+
+          // Fallback to first item if none matched
+          const detailToUse = selectedDetail || details[0];
+          setProductDetails([detailToUse]);
+
+          // Set vendor from selected detail if available
+          const purchaseD = detailToUse.purchaseD || detailToUse.purchaseW || detailToUse.purchase || {};
+          const vendorObj = purchaseD.supplier
             ? {
-                id_client: details[0].purchaseD.supplier.id_client || 0,
-                client_name: details[0].purchaseD.supplier.client_name || "",
-                TYPE_SUPPLIER:
-                  details[0].purchaseD.supplier.TYPE_SUPPLIER ||
-                  "Diamond Purchase",
+                id_client: purchaseD.supplier.id_client || 0,
+                client_name: purchaseD.supplier.client_name || "",
+                TYPE_SUPPLIER: purchaseD.supplier.TYPE_SUPPLIER || "Diamond Purchase",
               }
             : {
                 id_client: 0,
-                client_name: details[0].purchaseD.brand || "",
+                client_name: purchaseD.brand || "",
                 TYPE_SUPPLIER: "Diamond Purchase",
               };
 
           // Add vendor to suppliers if not present
           setSuppliers((prev) => {
-            if (
-              vendorObj.client_name &&
-              !prev.some((s) => s.client_name === vendorObj.client_name)
-            ) {
+            if (vendorObj.client_name && !prev.some((s) => s.client_name === vendorObj.client_name)) {
               return [...prev, vendorObj];
             }
             return prev;
@@ -548,9 +605,9 @@ const DNew_p = (props: NewPProps) => {
             ...prev,
             Fournisseur: vendorObj,
             client: vendorObj.id_client,
-            CODE_EXTERNAL: details[0].purchaseD.CODE_EXTERNAL || "",
-            comment_edit: details[0].purchaseD.comment_edit || "",
-            Design_art: details[0].purchaseD.Design_art || prev.Design_art,
+            CODE_EXTERNAL: purchaseD.CODE_EXTERNAL || "",
+            comment_edit: purchaseD.comment_edit || "",
+            Design_art: purchaseD.Design_art || prev.Design_art,
             Original_Invoice: distribution.distributionID,
           }));
         }
@@ -614,11 +671,14 @@ const DNew_p = (props: NewPProps) => {
         }
       : undefined;
 
+    // Do not copy product name or selling price into the edit form
     setEditPurchase({
       ...row,
       date_fact: formattedDate,
       Fournisseur: row.Fournisseur || supplierData,
       client: row.Fournisseur?.id_client || row.client,
+      Design_art: "", // Clear product name when selecting item to edit
+      Selling_Price_Currency: 0, // Clear selling price when selecting item to edit
     });
     setIsEditMode(true);
   };
@@ -1191,19 +1251,28 @@ const DNew_p = (props: NewPProps) => {
                       >
                         Brand:
                       </td>
-                      <td style={{ color: valueColor, width: 140 }}>
-                        {productDetails[0].purchaseD.supplier?.client_name ||
-                          "N/A"}
-                      </td>
-                      <td
+                        <td style={{ color: valueColor, width: 140 }}>
+                        {distribution?.PurchaseType?.toLowerCase().includes("gold")
+                          ? (distribution?.purchase?.supplier?.client_name ?? "N/A")
+                          : distribution?.PurchaseType?.toLowerCase().includes("diamond")
+                            ? (distribution?.purchaseD?.supplier?.client_name ?? "N/A")
+                            : distribution?.PurchaseType?.toLowerCase().includes("watche")
+                              ? (distribution?.purchaseW?.supplier?.client_name ?? "N/A")
+                              : distribution?.SupplierName
+                                || distribution?.supplierName
+                                || (typeof brand === 'string' ? brand : '')
+                                || productDetails?.[0]?.purchaseD?.supplier?.client_name
+                                || "N/A"}
+                        </td>
+                        <td
                         style={{
                           color: labelColor,
                           fontWeight: 500,
                           width: 110,
                         }}
-                      >
+                        >
                         Ref Code:
-                      </td>
+                        </td>
                       <td style={{ color: valueColor, width: 140 }}>
                         {productDetails[0].purchaseD.CODE_EXTERNAL}
                       </td>
@@ -1235,12 +1304,12 @@ const DNew_p = (props: NewPProps) => {
                         Sales Price:
                       </td>
                       <td style={{ color: valueColor }}>
-                        {Number(
-                          productDetails[0].purchaseD.SellingPrice
-                        ).toLocaleString(undefined, {
-                          minimumFractionDigits: 2,
-                          maximumFractionDigits: 2,
-                        })}
+                        {productSalePrice != null
+                          ? Number(productSalePrice).toLocaleString(undefined, {
+                              minimumFractionDigits: 2,
+                              maximumFractionDigits: 2,
+                            })
+                          : "-"}
                       </td>
                       <td style={{ color: labelColor, fontWeight: 500 }}>
                         Carat:

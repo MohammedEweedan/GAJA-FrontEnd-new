@@ -155,6 +155,9 @@ interface InvoicePrintData {
   totalAmountEur: number;
   totalWeight: number;
   itemCount: number;
+  amount_lyd?: number;
+  amount_currency?: number;
+  amount_EUR?: number;
   amount_currency_LYD: number;
   amount_EUR_LYD: number;
   type?: string;
@@ -190,16 +193,18 @@ const PrintInvoiceDialog: React.FC<PrintInvoiceDialogProps> = ({
   createdBy,
 }) => {
   const [confirmOpen, setConfirmOpen] = React.useState(false);
+  const [paymentRequiredOpen, setPaymentRequiredOpen] = React.useState(false);
+  const [paymentAction, setPaymentAction] = React.useState<"issue" | "close">("issue");
+  const [payLydStr, setPayLydStr] = React.useState("");
+  const [payUsdStr, setPayUsdStr] = React.useState("");
+  const [payUsdLydStr, setPayUsdLydStr] = React.useState("");
+  const [payEurStr, setPayEurStr] = React.useState("");
+  const [payEurLydStr, setPayEurLydStr] = React.useState("");
   const [invoiceNumFact, setInvoiceNumFact] = React.useState<number | null>(
     null
   );
   const [makeTransactionToCashier, setMakeTransactionToCashier] =
     React.useState(false);
-  const [closeWarningOpen, setCloseWarningOpen] = React.useState(false);
-  const [hasRest, setHasRest] = React.useState(false);
-  const [restOfMoney, setRestOfMoney] = React.useState<string>("0");
-  const [restOfMoneyUSD, setRestOfMoneyUSD] = React.useState<string>("0");
-  const [restOfMoneyEUR, setRestOfMoneyEUR] = React.useState<string>("0");
   const [showImage] = React.useState(true);
 
   // Initialize invoice number from the provided invoice when available
@@ -208,50 +213,6 @@ const PrintInvoiceDialog: React.FC<PrintInvoiceDialogProps> = ({
       setInvoiceNumFact(Number(invoice.num_fact));
     }
   }, [invoice]);
-
-  // Prefill rest amounts when invoice opens or changes
-  React.useEffect(() => {
-    if (invoice) {
-      try {
-        setRestOfMoney(
-          invoice.rest_of_money != null
-            ? String((invoice as any).rest_of_money)
-            : "0"
-        );
-      } catch {
-        setRestOfMoney("0");
-      }
-      try {
-        setRestOfMoneyUSD(
-          (invoice as any).rest_of_moneyUSD != null
-            ? String((invoice as any).rest_of_moneyUSD)
-            : "0"
-        );
-      } catch {
-        setRestOfMoneyUSD("0");
-      }
-      try {
-        setRestOfMoneyEUR(
-          (invoice as any).rest_of_moneyEUR != null
-            ? String((invoice as any).rest_of_moneyEUR)
-            : "0"
-        );
-      } catch {
-        setRestOfMoneyEUR("0");
-      }
-      // mark hasRest if any of the values are > 0
-      const anyRest =
-        Number((invoice as any).rest_of_money || 0) > 0 ||
-        Number((invoice as any).rest_of_moneyUSD || 0) > 0 ||
-        Number((invoice as any).rest_of_moneyEUR || 0) > 0;
-      setHasRest(!!anyRest);
-    } else {
-      setRestOfMoney("0");
-      setRestOfMoneyUSD("0");
-      setRestOfMoneyEUR("0");
-      setHasRest(false);
-    }
-  }, [invoice, open]);
 
   // Print only the DialogContent (invoice area)
   const handlePrint = () => {
@@ -358,8 +319,61 @@ const PrintInvoiceDialog: React.FC<PrintInvoiceDialogProps> = ({
     [data, invoiceNumFact, invoice]
   );
 
+  // Helper to derive invoice Type for backend GL account mapping
+  const invoiceType: string | undefined = React.useMemo(() => {
+    // Try direct data.type first if provided upstream
+    const directType = (data as any)?.type;
+    if (typeof directType === 'string' && directType.length > 0) {
+      return directType.toLowerCase();
+    }
+    // Inspect first item supplier type if available
+    const firstItem: any = data?.items?.[0];
+    let supplierType: string | undefined = firstItem?.Fournisseur?.TYPE_SUPPLIER;
+    // Fallback: some structures keep supplier under ACHATs array
+    if (!supplierType && firstItem?.ACHATs && firstItem.ACHATs.length > 0) {
+      supplierType = firstItem.ACHATs[0]?.Fournisseur?.TYPE_SUPPLIER;
+    }
+    if (supplierType) {
+      const lower = supplierType.toLowerCase();
+      if (lower.includes('diamond')) return 'diamond';
+      if (lower.includes('watch')) return 'watch';
+      if (lower.includes('gold')) return 'gold';
+    }
+    // Default to gold if nothing matches (adjust if needed)
+    return 'gold';
+  }, [data]);
+
+  const goldWeightInfo = React.useMemo(() => {
+    const directType = String((data as any)?.type || "").toLowerCase();
+    const firstItem: any = data?.items?.[0];
+    const supplierType =
+      String(
+        firstItem?.Fournisseur?.TYPE_SUPPLIER ||
+          firstItem?.ACHATs?.[0]?.Fournisseur?.TYPE_SUPPLIER ||
+          ""
+      ).toLowerCase();
+    const isGold = directType.includes("gold") || supplierType.includes("gold");
+    if (!isGold) return { totalWeight: 0, lydPerGram: 0 };
+
+    const totalWeight = (data?.items || []).reduce((sum, row: any) => {
+      const w =
+        row?.ACHATs?.[0]?.DistributionPurchase?.[0]?.Weight ??
+        row?.ACHATs?.[0]?.DistributionPurchase?.Weight ??
+        row?.DistributionPurchase?.[0]?.Weight ??
+        row?.DistributionPurchase?.Weight ??
+        row?.Weight;
+      const n = Number(w);
+      return sum + (Number.isFinite(n) ? n : 0);
+    }, 0);
+
+    const totalLyd = Number(data?.totalAmountLYD) || 0;
+    const lydPerGram = totalWeight > 0 ? totalLyd / totalWeight : 0;
+
+    return { totalWeight, lydPerGram };
+  }, [data]);
+ 
   // Handler for closing this invoice
-  const handleCloseInvoice = async (rest_of_money?: number) => {
+  const handleCloseInvoice = async () => {
     const token = localStorage.getItem("token");
     // Prefer ps/usr from current invoice when present
     const psParam = invoice?.ps != null ? String(invoice.ps) : String(ps ?? "");
@@ -415,30 +429,8 @@ const PrintInvoiceDialog: React.FC<PrintInvoiceDialogProps> = ({
         usr: closingUsr,
         num_fact: String(num_fact),
         MakeCashVoucher: String(!!makeTransactionToCashier),
+        Type: invoiceType, // pass type for GL account mapping
       };
-      if (
-        typeof rest_of_money !== "undefined" &&
-        !isNaN(Number(rest_of_money))
-      ) {
-        paramsObj.rest_of_money = String(rest_of_money);
-      }
-      // optionally include currency-specific rest amounts
-      if (
-        typeof restOfMoneyUSD !== "undefined" &&
-        restOfMoneyUSD !== null &&
-        restOfMoneyUSD !== "" &&
-        !isNaN(Number(restOfMoneyUSD))
-      ) {
-        paramsObj.rest_of_moneyUSD = String(restOfMoneyUSD);
-      }
-      if (
-        typeof restOfMoneyEUR !== "undefined" &&
-        restOfMoneyEUR !== null &&
-        restOfMoneyEUR !== "" &&
-        !isNaN(Number(restOfMoneyEUR))
-      ) {
-        paramsObj.rest_of_moneyEUR = String(restOfMoneyEUR);
-      }
       // Log params for debugging to ensure rest_of_money is sent
       try {
         console.log("Closing invoice - CloseNF params:", paramsObj);
@@ -464,8 +456,13 @@ const PrintInvoiceDialog: React.FC<PrintInvoiceDialogProps> = ({
       }
       // Fetch the invoice from server to confirm rest_of_money was saved
       try {
+        // Include usr filter to restrict fetched invoice details to current user context
         const verifyRes = await axios.get(`${apiUrlinv}/Getinvoice/`, {
-          params: { ps: psParam, num_fact: String(num_fact) },
+          params: {
+           // ps: psParam,
+            num_fact: String(num_fact),
+            usr: invoice?.usr,
+          },
           headers: { Authorization: `Bearer ${token}` },
         });
         console.log(
@@ -540,42 +537,181 @@ const PrintInvoiceDialog: React.FC<PrintInvoiceDialogProps> = ({
 
   const handleGenerateNewNumberClick = () => setConfirmOpen(true);
   const handleConfirmClose = () => setConfirmOpen(false);
-  const handleConfirmYes = async () => {
-    setConfirmOpen(false);
+
+  const getRemainingLyd = React.useCallback(() => {
+    const totalLyd = Math.ceil(Number(data?.totalAmountLYD) || 0);
+    const paidLyd = Math.ceil(Number((data as any)?.amount_lyd) || 0);
+    const paidUsdLyd = Math.ceil(Number((data as any)?.amount_currency_LYD) || 0);
+    const paidEurLyd = Math.ceil(Number((data as any)?.amount_EUR_LYD) || 0);
+    const diff = totalLyd - (paidLyd + paidUsdLyd + paidEurLyd);
+    return Math.max(0, diff);
+  }, [data]);
+
+  const isPartiallyPaid = React.useMemo(() => getRemainingLyd() > 0.01, [getRemainingLyd]);
+
+  const parseAmt = (s: string) => {
+    if (!s) return 0;
+    const v = Number(String(s).replace(/,/g, "").trim());
+    return Number.isFinite(v) ? v : 0;
+  };
+
+  const payLyd = parseAmt(payLydStr);
+  const payUsd = parseAmt(payUsdStr);
+  const payUsdLyd = parseAmt(payUsdLydStr);
+  const payEur = parseAmt(payEurStr);
+  const payEurLyd = parseAmt(payEurLydStr);
+
+  const enteredLydEquivalent =
+    Math.ceil(payLyd) + Math.ceil(payUsdLyd) + Math.ceil(payEurLyd);
+
+  const remainingLyd = getRemainingLyd();
+  const canConfirmPayment =
+    enteredLydEquivalent >= remainingLyd - 0.01 && enteredLydEquivalent <= remainingLyd + 0.01;
+
+  const isOverpay = enteredLydEquivalent > remainingLyd + 0.01;
+
+  const usdEquivMissing = payUsd > 0 && payUsdLyd <= 0;
+  const eurEquivMissing = payEur > 0 && payEurLyd <= 0;
+
+  const persistExtraPayment = React.useCallback(async () => {
+    const token = localStorage.getItem("token");
+    if (!token) {
+      alert("Missing token. Please login again.");
+      return false;
+    }
+    const psVal = String(invoice?.ps ?? (data?.invoice as any)?.ps ?? (data as any)?.ps ?? "");
+    const usrVal = String(invoice?.usr ?? (data?.invoice as any)?.usr ?? (data as any)?.usr ?? "");
+    if (!psVal || !usrVal) {
+      alert("User info missing. Cannot update payment.");
+      return false;
+    }
+
+    const currentLyd = Number((data as any)?.amount_lyd) || 0;
+    const currentUsd = Number((data as any)?.amount_currency) || 0;
+    const currentEur = Number((data as any)?.amount_EUR) || 0;
+    const currentUsdLyd = Number((data as any)?.amount_currency_LYD) || 0;
+    const currentEurLyd = Number((data as any)?.amount_EUR_LYD) || 0;
+
+    const body: any = {
+      total_remise_final: Number(data?.totalAmountUSD) || 0,
+      total_remise_final_lyd: Number(data?.totalAmountLYD) || 0,
+      amount_currency: currentUsd + payUsd,
+      amount_lyd: currentLyd + payLyd,
+      amount_EUR: currentEur + payEur,
+      amount_currency_LYD: currentUsdLyd + payUsdLyd,
+      amount_EUR_LYD: currentEurLyd + payEurLyd,
+      ps: psVal,
+      usr: usrVal,
+      customer: (data as any)?.invoice?.client ?? (invoice as any)?.client ?? 0,
+      sm: (data as any)?.invoice?.SourceMark ?? (invoice as any)?.SourceMark ?? "",
+      is_chira: (data as any)?.invoice?.is_chira ?? (invoice as any)?.is_chira ?? 0,
+      IS_WHOLE_SALE: (data as any)?.invoice?.IS_WHOLE_SALE ?? (invoice as any)?.IS_WHOLE_SALE ?? false,
+      remise: (data as any)?.remise ?? 0,
+      remise_per: (data as any)?.remise_per ?? 0,
+    };
+
+    try {
+      const currentNumFact = Number(invoiceNumFact ?? invoice?.num_fact ?? 0);
+      if (currentNumFact > 0) {
+        // Issued invoice: update each row by id_fact so payment persists.
+        const rows: any[] = Array.isArray((data as any)?.items) ? (data as any).items : [];
+        for (const r of rows) {
+          if (!r?.id_fact) continue;
+          await axios.put(
+            `${apiUrlinv}/Update/${r.id_fact}`,
+            {
+              ...body,
+              id_fact: r.id_fact,
+              num_fact: currentNumFact,
+            },
+            {
+              headers: { Authorization: `Bearer ${token}` },
+            }
+          );
+        }
+      } else {
+        // Cart invoice (num_fact=0): update all cart rows.
+        await axios.put(`${apiUrlinv}/UpdateTotals/0`, body, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+      }
+      return true;
+    } catch (e: any) {
+      alert(e?.response?.data?.message || "Failed to update payment");
+      return false;
+    }
+  }, [data, invoice, invoiceNumFact, payEur, payEurLyd, payLyd, payUsd, payUsdLyd]);
+
+  const proceedIssue = React.useCallback(async () => {
     const nf = await handleAddNew();
     if (!nf) {
       alert("Failed to generate invoice number.");
     }
+  }, [handleAddNew]);
+
+  const proceedClose = React.useCallback(async () => {
+    await handleCloseInvoice();
+  }, [handleCloseInvoice]);
+
+  const handlePaymentRequiredConfirm = async () => {
+    if (!canConfirmPayment) return;
+    if (usdEquivMissing || eurEquivMissing) return;
+    const ok = await persistExtraPayment();
+    if (!ok) return;
+
+    setPaymentRequiredOpen(false);
+    setPayLydStr("");
+    setPayUsdStr("");
+    setPayUsdLydStr("");
+    setPayEurStr("");
+    setPayEurLydStr("");
+
+    if (paymentAction === "issue") {
+      await proceedIssue();
+      return;
+    }
+    await proceedClose();
   };
 
-  const handleCloseInvoiceClick = () => setCloseWarningOpen(true);
-  const handleCloseWarningCancel = () => setCloseWarningOpen(false);
-  const handleCloseWarningConfirm = async () => {
-    // validate rest input if user indicated there is a rest
-    if (hasRest) {
-      const val = parseFloat(restOfMoney as any);
-      if (isNaN(val)) {
-        alert("Please enter a valid rest of money amount (LYD).");
-        return;
-      }
-      const valUSD =
-        restOfMoneyUSD !== "" ? parseFloat(restOfMoneyUSD as any) : 0;
-      if (restOfMoneyUSD !== "" && isNaN(valUSD)) {
-        alert("Please enter a valid rest amount for USD.");
-        return;
-      }
-      const valEUR =
-        restOfMoneyEUR !== "" ? parseFloat(restOfMoneyEUR as any) : 0;
-      if (restOfMoneyEUR !== "" && isNaN(valEUR)) {
-        alert("Please enter a valid rest amount for EUR.");
-        return;
-      }
-      setCloseWarningOpen(false);
-      await handleCloseInvoice(val);
-    } else {
-      setCloseWarningOpen(false);
-      await handleCloseInvoice();
+  const handleConfirmYes = async () => {
+    setConfirmOpen(false);
+    // Generating invoice number is allowed even if partially paid.
+    await proceedIssue();
+  };
+
+  const handleCloseInvoiceClick = async () => {
+    const isGiftInvoice = !!invoice?.IS_GIFT;
+    const isChiraInvoice = Number((invoice as any)?.is_chira ?? 0) === 1;
+    const totalLyd = Number(data?.totalAmountLYD) || 0;
+    const totalUsd = Number(data?.totalAmountUSD) || 0;
+    const totalEur = Number(data?.totalAmountEur) || 0;
+
+    const paidLyd = Number((data as any)?.amount_lyd) || 0;
+    const paidUsd = Number((data as any)?.amount_currency) || 0;
+    const paidEur = Number((data as any)?.amount_EUR) || 0;
+    const sumPaid = paidLyd + paidUsd + paidEur;
+
+    const paidUsdLyd = Number((data as any)?.amount_currency_LYD) || 0;
+    const paidEurLyd = Number((data as any)?.amount_EUR_LYD) || 0;
+    const diff = totalLyd - (paidLyd + paidUsdLyd + paidEurLyd);
+
+    // Require entering missing payment before closing
+    if (!isGiftInvoice && diff > 0.01) {
+      setPaymentAction("close");
+      setPaymentRequiredOpen(true);
+      return;
     }
+
+    if (!isGiftInvoice && !isChiraInvoice && sumPaid <= 0) {
+      alert("Cannot close invoice: paid amounts are 0 (allowed only for Chira).");
+      return;
+    }
+
+    if (!isGiftInvoice && totalLyd <= 0 && totalUsd <= 0 && totalEur <= 0) {
+      alert("Cannot close invoice: totals are 0.");
+      return;
+    }
+    await proceedClose();
   };
 
   return (
@@ -590,6 +726,11 @@ const PrintInvoiceDialog: React.FC<PrintInvoiceDialogProps> = ({
             background: "#fff",
           }}
         >
+          {isPartiallyPaid ? (
+            <Box sx={{ mr: "auto", color: "#b26a00", fontWeight: 700 }}>
+              This invoice is partially paid.
+            </Box>
+          ) : null}
           {/* Show Image Checkbox
           
             <FormControlLabel
@@ -603,27 +744,6 @@ const PrintInvoiceDialog: React.FC<PrintInvoiceDialogProps> = ({
           {/* Show close invoice button if invoice is not closed */}
           {invoice && showCloseInvoice && (
             <>
-              <FormControlLabel
-                control={
-                  <Checkbox
-                    checked={makeTransactionToCashier}
-                    onChange={(e) =>
-                      setMakeTransactionToCashier(e.target.checked)
-                    }
-                    color="warning"
-                    size="small"
-                  />
-                }
-                label="Do you want to Receive money in cashbox?"
-                sx={{
-                  mb: 0,
-                  fontSize: 14,
-                  ".MuiFormControlLabel-label": { fontSize: 16 },
-                  color: "warning.main",
-                  mr: "auto", // push to left
-                }}
-              />
-
               <Button
                 variant="contained"
                 color="error"
@@ -634,7 +754,7 @@ const PrintInvoiceDialog: React.FC<PrintInvoiceDialogProps> = ({
             </>
           )}
 
-          {!showCloseInvoiceActions &&
+          {/* {!showCloseInvoiceActions &&
             (!invoiceNumFact || invoiceNumFact === 0) && (
               <Button
                 variant="contained"
@@ -643,31 +763,11 @@ const PrintInvoiceDialog: React.FC<PrintInvoiceDialogProps> = ({
               >
                 Generate New Invoice Number
               </Button>
-            )}
+            )} */}
 
           {/* Only show close actions if prop is true */}
           {invoiceNumFact && !showCloseInvoiceActions ? (
             <>
-              <FormControlLabel
-                control={
-                  <Checkbox
-                    checked={makeTransactionToCashier}
-                    onChange={(e) =>
-                      setMakeTransactionToCashier(e.target.checked)
-                    }
-                    color="warning"
-                    size="small"
-                  />
-                }
-                label="Do you want to Receive money in cashbox?"
-                sx={{
-                  mb: 0,
-                  fontSize: 14,
-                  ".MuiFormControlLabel-label": { fontSize: 16 },
-                  color: "warning.main",
-                  mr: "auto", // push to left
-                }}
-              />
               <Button
                 variant="contained"
                 color="error"
@@ -690,22 +790,117 @@ const PrintInvoiceDialog: React.FC<PrintInvoiceDialogProps> = ({
         />
       </DialogContent>
       <DialogActions sx={{ background: "info", color: "#000" }}>
-        <Button onClick={onClose}>Cancel</Button>
+        <Button onClick={onClose} variant="outlined" color="error">
+          Cancel
+        </Button>
+        {!showCloseInvoiceActions && (!invoiceNumFact || invoiceNumFact === 0) ? (
+          <Button
+            variant="contained"
+            color="secondary"
+            onClick={handleGenerateNewNumberClick}
+          >
+            Generate Invoice Number
+          </Button>
+        ) : null}
         <Button
           variant="contained"
           color="primary"
           onClick={handlePrint}
-          sx={{ ml: 2 }}
+          disabled={!invoiceNumFact || Number(invoiceNumFact) === 0}
         >
           Print
         </Button>
       </DialogActions>
 
+      <MuiDialog open={paymentRequiredOpen} onClose={() => setPaymentRequiredOpen(false)}>
+        <MuiDialogTitle>Payment Required</MuiDialogTitle>
+        <MuiDialogContent>
+          Remaining amount:
+          <br />
+          <span style={{ color: "red", fontWeight: 700 }}>
+            {Math.ceil(remainingLyd).toLocaleString(undefined, { maximumFractionDigits: 0 })} LYD
+          </span>
+          <Box sx={{ mt: 2, display: "flex", flexDirection: "column", gap: 1.5 }}>
+            <TextField
+              label="Pay (LYD)"
+              value={payLydStr}
+              onChange={(e) => setPayLydStr(e.target.value)}
+              size="small"
+              fullWidth
+            />
+            <TextField
+              label="Pay (USD)"
+              value={payUsdStr}
+              onChange={(e) => setPayUsdStr(e.target.value)}
+              size="small"
+              fullWidth
+            />
+            <TextField
+              label="USD to LYD (equivalent)"
+              value={payUsdLydStr}
+              onChange={(e) => setPayUsdLydStr(e.target.value)}
+              size="small"
+              fullWidth
+              error={usdEquivMissing}
+              helperText={usdEquivMissing ? "Enter USD equivalent in LYD" : ""}
+            />
+            <TextField
+              label="Pay (EUR)"
+              value={payEurStr}
+              onChange={(e) => setPayEurStr(e.target.value)}
+              size="small"
+              fullWidth
+            />
+            <TextField
+              label="EUR to LYD (equivalent)"
+              value={payEurLydStr}
+              onChange={(e) => setPayEurLydStr(e.target.value)}
+              size="small"
+              fullWidth
+              error={eurEquivMissing}
+              helperText={eurEquivMissing ? "Enter EUR equivalent in LYD" : ""}
+            />
+            <Box sx={{ fontWeight: 700 }}>
+              Entered (LYD equiv): {Math.ceil(enteredLydEquivalent).toLocaleString(undefined, { maximumFractionDigits: 0 })} LYD
+            </Box>
+            {isOverpay ? (
+              <Box sx={{ color: "error.main", fontWeight: 700 }}>
+                Overpayment is not allowed. Reduce the entered amount.
+              </Box>
+            ) : null}
+          </Box>
+        </MuiDialogContent>
+        <MuiDialogActions>
+          <Button
+            onClick={() => {
+              setPaymentRequiredOpen(false);
+              setPayLydStr("");
+              setPayUsdStr("");
+              setPayUsdLydStr("");
+              setPayEurStr("");
+              setPayEurLydStr("");
+            }}
+          >
+            Cancel
+          </Button>
+          <Button
+            onClick={handlePaymentRequiredConfirm}
+            color="primary"
+            variant="contained"
+            disabled={!canConfirmPayment || usdEquivMissing || eurEquivMissing}
+          >
+            Confirm Payment & Continue
+          </Button>
+        </MuiDialogActions>
+      </MuiDialog>
+
       {/* Confirmation Dialog for Generate New Invoice Number */}
       <MuiDialog open={confirmOpen} onClose={handleConfirmClose}>
         <MuiDialogTitle>Confirmation</MuiDialogTitle>
         <MuiDialogContent>
-          Are you ready to generate new number?
+          Issue this invoice? 
+          <br />
+          <span style={{ color: "red" }}>This is final and cannot be undone.</span>
         </MuiDialogContent>
         <MuiDialogActions>
           <Button onClick={handleConfirmClose}>Cancel</Button>
@@ -719,78 +914,6 @@ const PrintInvoiceDialog: React.FC<PrintInvoiceDialogProps> = ({
         </MuiDialogActions>
       </MuiDialog>
 
-      {/* Warning Dialog for Close Invoice */}
-      <MuiDialog open={closeWarningOpen} onClose={handleCloseWarningCancel}>
-        <MuiDialogTitle sx={{ color: "warning.main" }}>Warning</MuiDialogTitle>
-        <MuiDialogContent>
-          <div
-            style={{
-              color: "#ed6c02",
-              fontWeight: 600,
-              fontSize: 18,
-              marginBottom: 12,
-            }}
-          >
-            Do you want to close this invoice?
-          </div>
-          <FormControlLabel
-            control={
-              <Checkbox
-                checked={hasRest}
-                onChange={(e) => setHasRest(e.target.checked)}
-                color="warning"
-              />
-            }
-            label="There is a rest of money for this invoice"
-          />
-          {hasRest && (
-            <div style={{ marginTop: 8 }}>
-              <TextField
-                label="Rest (LYD)"
-                value={restOfMoney}
-                onChange={(e) => setRestOfMoney(e.target.value)}
-                type="number"
-                InputProps={{ inputProps: { min: 0, step: "0.01" } }}
-                fullWidth
-                size="small"
-              />
-            </div>
-          )}
-
-          {hasRest && (
-            <div style={{ marginTop: 8, display: "flex", gap: 8 }}>
-              <TextField
-                label="Rest (USD)"
-                value={restOfMoneyUSD}
-                onChange={(e) => setRestOfMoneyUSD(e.target.value)}
-                type="number"
-                InputProps={{ inputProps: { min: 0, step: "0.01" } }}
-                fullWidth
-                size="small"
-              />
-              <TextField
-                label="Rest (EUR)"
-                value={restOfMoneyEUR}
-                onChange={(e) => setRestOfMoneyEUR(e.target.value)}
-                type="number"
-                InputProps={{ inputProps: { min: 0, step: "0.01" } }}
-                fullWidth
-                size="small"
-              />
-            </div>
-          )}
-        </MuiDialogContent>
-        <MuiDialogActions>
-          <Button onClick={handleCloseWarningCancel}>Cancel</Button>
-          <Button
-            onClick={handleCloseWarningConfirm}
-            color="warning"
-            variant="contained"
-          >
-            Yes
-          </Button>
-        </MuiDialogActions>
-      </MuiDialog>
     </Dialog>
   );
 };

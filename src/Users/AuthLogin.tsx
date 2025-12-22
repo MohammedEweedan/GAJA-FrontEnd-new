@@ -83,7 +83,7 @@ function AuthLogin({ ...others }) {
   async function SignIn(email: string, password: string) {
     try {
       const res = await axios.post(
-        "/api/login",
+        "/login",
         { email, password },
         { headers: { "Content-Type": "application/json" } }
       );

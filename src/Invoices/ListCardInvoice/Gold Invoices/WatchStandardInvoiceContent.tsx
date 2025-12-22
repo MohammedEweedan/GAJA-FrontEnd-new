@@ -23,6 +23,9 @@ interface InvoicePrintData {
   totalWeight: number;
   TotalAmountFinal: number;
   itemCount: number;
+  amount_lyd?: number;
+  amount_currency?: number;
+  amount_EUR?: number;
   amount_currency_LYD: number;
   amount_EUR_LYD: number;
   picint: number;
@@ -49,21 +52,63 @@ const WatchStandardInvoiceContent = forwardRef<HTMLDivElement, Props>(
       totalAmountEur,
       totalWeight,
       itemCount,
+      amount_lyd,
+      amount_currency,
+      amount_EUR,
     } = data;
+
+    const fmt0 = (v: any) =>
+      Math.ceil(Number(v) || 0).toLocaleString(undefined, {
+        minimumFractionDigits: 0,
+        maximumFractionDigits: 0,
+      });
+
+    const parseMetaFromComment = (raw: any): any | null => {
+      const s = String(raw || "");
+      const idx = s.lastIndexOf("__META__");
+      if (idx < 0) return null;
+      const jsonPart = s.slice(idx + "__META__".length);
+      try {
+        const obj = JSON.parse(jsonPart);
+        if (obj && typeof obj === "object") return obj;
+      } catch {
+        return null;
+      }
+      return null;
+    };
+
+    const parseDsMetaFromComment = (raw: any): any | null => {
+      const s = String(raw || "");
+      const idx = s.lastIndexOf("__DSMETA__");
+      if (idx < 0) return null;
+      const jsonPart = s.slice(idx + "__DSMETA__".length);
+      try {
+        const obj = JSON.parse(jsonPart);
+        if (obj && typeof obj === "object") return obj;
+      } catch {
+        return null;
+      }
+      return null;
+    };
     let ps: string | null = null;
-    // Cuser removed (unused)
+    let usr: string | null = null;
     const userStr = localStorage.getItem("user");
 
     if (userStr) {
       try {
         const userObj = JSON.parse(userStr);
         ps = userObj.ps ?? localStorage.getItem("ps");
-        // (removed unused Cuser extraction)
+        usr =
+          userObj.id_user?.toString?.() ||
+          userObj.Cuser?.toString?.() ||
+          localStorage.getItem("Cuser");
       } catch {
         ps = localStorage.getItem("ps");
+        usr = localStorage.getItem("Cuser");
       }
     } else {
       ps = localStorage.getItem("ps");
+      usr = localStorage.getItem("Cuser");
     }
 
     const [typeinv] = useState(() => {
@@ -196,36 +241,10 @@ const WatchStandardInvoiceContent = forwardRef<HTMLDivElement, Props>(
       return detected;
     }, [pdata, items]);
 
-    // Debug one-liner to help verify detection in console
+    // Minimal debug hook to trace data presence without unused variables
     useEffect(() => {
       if (pdata && pdata.length) {
-        // eslint-disable-next-line no-console
-        console.log(
-          "[DiamondDetect] hasDiamondData=",
-          hasDiamondData,
-          "ACHAT count first invoice=",
-          pdata[0]?.ACHATs?.length || 0
-        );
-        if (!hasDiamondData) {
-          const sample = pdata[0]?.ACHATs?.[0];
-          if (sample) {
-            const shallow = Object.keys(sample).reduce((acc: any, k) => {
-              acc[k] = sample[k];
-              return acc;
-            }, {});
-            // eslint-disable-next-line no-console
-            console.log("[DiamondDetect][SampleFirstACHAT]", shallow);
-            const dp: any =
-              sample?.DistributionPurchase ||
-              sample?.DistributionPurchases ||
-              sample?.distributionPurchase ||
-              sample?.distributionPurchases;
-            if (dp) {
-              // eslint-disable-next-line no-console
-              console.log("[DiamondDetect][SampleDistributionPurchase]", dp);
-            }
-          }
-        }
+        // no-op: keep this effect to allow quick debug additions if needed
       }
     }, [hasDiamondData, pdata]);
     const apiUrlinv = "/invoices";
@@ -242,9 +261,40 @@ const WatchStandardInvoiceContent = forwardRef<HTMLDivElement, Props>(
       try {
         const res = await axios.get<any[]>(`${apiUrlinv}/allDetails`, {
           headers: { Authorization: `Bearer ${token}` },
-          params: { ps: ps, num_fact: invoiceNumFact },
+          params: {
+            ps: invoice.ps,
+            num_fact: invoiceNumFact,
+          ...(usr ? { usr } : {}),
+          },
         });
-        setPData(res.data);
+
+
+
+       
+        // Client-side safeguard: filter by usr as well if present
+
+
+        // If invoiceNumFact is 0, filter by usr only (in-progress invoice)
+        let filtered;
+        if (invoiceNumFact === 0) {
+          filtered = usr
+            ? res.data.filter((inv: any) => String(inv.usr) === String(usr))
+            : res.data;
+
+
+             setPData(filtered);
+             
+        } else {
+               setPData(res.data);
+        }
+       
+        /*const filtered = usr
+          ? res.data.filter((inv: any) => String(inv.usr) === String(usr))
+          : res.data;*/
+
+         
+
+   
       } catch (err: any) {
       } finally {
         setLoading(false);
@@ -429,17 +479,16 @@ const WatchStandardInvoiceContent = forwardRef<HTMLDivElement, Props>(
         }
 
         // DIAMONDS (explicit invoice type or detected diamond data) now mimic watch logic using picint as unique key
+        // Treat `gold` invoices similarly so gold images/details stored under picint are also fetched
         const diamondInvoice =
-          typeinv && typeinv.toLowerCase().includes("diamond");
+          typeinv && (typeinv.toLowerCase().includes("diamond") || typeinv.toLowerCase().includes("gold"));
         if (diamondInvoice || hasDiamondData) {
           const uniqueDiamondPicints = Array.from(
             new Set(pdata.map((inv) => inv.picint).filter(Boolean))
           );
           // eslint-disable-next-line no-console
-          console.log(
-            "[DiamondFetch] uniqueDiamondPicints (picint-based)=",
-            uniqueDiamondPicints
-          );
+         
+          
           if (uniqueDiamondPicints.length === 0) {
             setAllDiamondDetails({});
           } else {
@@ -457,12 +506,7 @@ const WatchStandardInvoiceContent = forwardRef<HTMLDivElement, Props>(
                     ? res.data[0]
                     : res.data;
                 } catch (err) {
-                  // eslint-disable-next-line no-console
-                  console.warn(
-                    "[DiamondFetch] error fetching picint",
-                    pic,
-                    err
-                  );
+                   
                   diamondMap[pic] = null; // fallback inline
                 }
               })
@@ -477,57 +521,219 @@ const WatchStandardInvoiceContent = forwardRef<HTMLDivElement, Props>(
       // eslint-disable-next-line
     }, [pdata, typeinv, hasDiamondData]);
 
-    const API_BASEImage = "/images";
+    // Build the images base preserving any base path (e.g. "/api").
+    // Prefer axios baseURL when available and normalize to https.
+    const API_BASEImage = (() => {
+      try {
+        const base = (axios as any)?.defaults?.baseURL;
+        if (base) {
+          const u = new URL(base, window.location.origin);
+          // preserve existing path (e.g. /api) and append /images
+          const cleanPath = u.pathname.replace(/\/+$/, "");
+          u.pathname = `${cleanPath}/images`;
+          // enforce https scheme
+          u.protocol = 'https:';
+          return u.toString().replace(/\/+$/, "");
+        }
+        // Fallback to window origin
+        const o = new URL(window.location.origin);
+        o.protocol = 'https:';
+        return `${o.origin}/images`;
+      } catch {
+        try {
+          const { hostname, port } = window.location as any;
+          const p = port ? `:${port}` : "";
+          return `https://${hostname}${p}/images`;
+        } catch {
+          return '/images';
+        }
+      }
+    })();
+
+    // Ensure any image URL is https absolute (handles http://, //, and /paths)
+    const toHttpsAbsolute = (url: string): string => {
+      try {
+        if (!url) return url;
+        if (url.startsWith("https://")) return url;
+        if (url.startsWith("http://")) return "https://" + url.substring(7);
+        if (url.startsWith("//")) return `https:${url}`;
+        if (url.startsWith("/")) {
+          // use the same origin as API_BASEImage
+          const origin = API_BASEImage.replace(/\/images$/,'');
+          return `${origin}${url}`;
+        }
+        return url;
+      } catch {
+        return url;
+      }
+    };
 
     const [imageUrls, setImageUrls] = useState<Record<string, string[]>>({});
 
     // Typed fetch helper (watch | diamond)
     const fetchImagesTyped = async (
-      id: number,
+      id: number | string,
       type: "watch" | "diamond"
     ): Promise<string[] | null> => {
       const token = localStorage.getItem("token");
       try {
-        const res = await axios.get(`${API_BASEImage}/list/${type}/${id}`, {
+        const url = `${API_BASEImage}/list/${type}/${id}`;
+        try { console.log('[InvoiceImages:fetch] GET', url); } catch {}
+        const res = await axios.get(url, {
           headers: { Authorization: `Bearer ${token}` },
         });
-        if (Array.isArray(res.data) && res.data.length) return res.data;
+        const out = Array.isArray(res.data) ? res.data : [];
+        try { console.log('[InvoiceImages:fetch] OK', { url, count: out.length }); } catch {}
+        if (out.length) return out;
         return [];
       } catch (e) {
         // eslint-disable-next-line no-console
-        console.warn("[Images] fetch failed", type, id);
+        try { console.log('[InvoiceImages:fetch] ERR', { url: `${API_BASEImage}/list/${type}/${id}`, error: (e as any)?.message || e }); } catch {}
+        
         return null;
       }
     };
 
-    // Fetch images for watch or diamond when detected (typed endpoints)
+    // Fetch images for watch, diamond, or gold when detected (typed endpoints)
     useEffect(() => {
       const isWatch = !!(typeinv && typeinv.toLowerCase().includes("watch"));
+      const isGold = !!(typeinv && typeinv.toLowerCase().includes("gold"));
+      // Diamond should not trigger for gold-only; honor explicit diamond type or detected diamond details without gold
       const isDiamond = !!(
         (typeinv && typeinv.toLowerCase().includes("diamond")) ||
-        hasDiamondData
+        (hasDiamondData && !isGold)
       );
-      if (!(isWatch || isDiamond)) return;
+      if (!(isWatch || isDiamond || isGold)) return;
 
       // Build candidate ids
       let sourceIds: string[] = [];
       if (isWatch) {
         sourceIds = Object.keys(allWatchDetails);
+        // Fallback: if no watch details yet, use invoice/item picint-based ids
+        if (sourceIds.length === 0) {
+          sourceIds = pdata
+            .map((inv) => inv.picint)
+            .filter(Boolean)
+            .map(String);
+          if (sourceIds.length === 0) {
+            sourceIds = items
+              .map((it: any) => it.picint || it.id_fact || it.id_achat)
+              .filter(Boolean)
+              .map(String);
+          }
+        }
       } else if (isDiamond) {
         sourceIds = Object.keys(allDiamondDetails);
         if (sourceIds.length === 0) {
           sourceIds = pdata.map((inv) => inv.picint).filter(Boolean);
         }
+      } else if (isGold) {
+        // For gold, use picint or id_fact from pdata/items
+        sourceIds = pdata
+          .map((inv) => inv.picint || inv.id_fact || inv.id_achat)
+          .filter(Boolean)
+          .map(String);
+        if (sourceIds.length === 0) {
+          sourceIds = items
+            .map((it: any) => it.picint || it.id_fact || it.id_achat)
+            .filter(Boolean)
+            .map(String);
+        }
       }
       const unique = Array.from(new Set(sourceIds)).filter(Boolean);
+      // Emit a clear log so we can see mode and ids considered
+      console.log('[InvoiceImages:config]', { API_BASEImage, axiosBase: (axios as any)?.defaults?.baseURL });
+      console.log('[InvoiceImages:init]', { isWatch, isGold, isDiamond, sourceCount: sourceIds.length, unique });
       (async () => {
         for (const id of unique) {
           if (!id) continue;
           if (imageUrls[id]) continue; // already have
+          // Debug: trace image fetch attempts (use console.log to avoid stripped debug)
+          console.log('[InvoiceImages] fetching for key', id, { typeinv, isWatch, isGold, isDiamond });
           if (isWatch) {
-            const urls = await fetchImagesTyped(Number(id), "watch");
-            if (urls && urls.length) {
-              setImageUrls((prev) => ({ ...prev, [id]: urls }));
+            // For watches, images are stored under id_achat on the server.
+            // Map picint -> candidate id_achat values and fetch using those.
+            const detail = allWatchDetails[id];
+            const candidateIds: string[] = [];
+            const pushId = (v: any) => {
+              if (v !== undefined && v !== null) {
+                const s = String(v).trim();
+                if (s !== "" && !candidateIds.includes(s)) candidateIds.push(s);
+              }
+            };
+            if (detail) {
+              // common fields that may carry purchase id
+              pushId(detail.id_achat);
+              pushId(detail.ID_ACHAT);
+              pushId(detail.purchase_id);
+              pushId(detail.idAchat);
+              pushId(detail.IDACHAT);
+              // nested common shapes
+              const nestedA = detail.OriginalAchat || detail.originalAchat || detail.achat || detail.Achat || detail.purchase || detail.Purchase;
+              if (nestedA && typeof nestedA === 'object') {
+                pushId(nestedA.id_achat);
+                pushId(nestedA.ID_ACHAT);
+                pushId(nestedA.idAchat);
+                pushId(nestedA.IDACHAT);
+                pushId(nestedA.purchase_id);
+              }
+            }
+            // Also scan ACHAT rows from the matching invoice by picint
+            pdata
+              .filter((inv) => String(inv.picint) === String(id))
+              .forEach((inv) => {
+                (inv.ACHATs || []).forEach((a: any) => pushId(a?.id_achat));
+              });
+
+            let fetched = false;
+            console.log('[InvoiceImages] watch candidateIds', candidateIds);
+            for (const cid of candidateIds) {
+              if (!cid) continue;
+              console.log('[InvoiceImages] watch candidate id_achat', cid);
+              // Avoid re-fetching if we already have URLs under this cid
+              if (imageUrls[cid]) {
+                setImageUrls((prev) => ({ ...prev, [id]: prev[cid] }));
+                fetched = true;
+                break;
+              }
+              let urls = await fetchImagesTyped(cid, "watch");
+              // Fallback to default watch list if typed returns empty
+              if (!urls || urls.length === 0) {
+                try {
+                  const token = localStorage.getItem('token');
+                  const fUrl = `${API_BASEImage}/list/${cid}`;
+                  try { console.log('[InvoiceImages:fetch-fallback] GET', fUrl); } catch {}
+                  const r = await axios.get(fUrl, { headers: { Authorization: `Bearer ${token}` } });
+                  if (Array.isArray(r.data) && r.data.length) urls = r.data.map((it: any) => it.url || it);
+                  try { console.log('[InvoiceImages:fetch-fallback] OK', { url: fUrl, count: Array.isArray(r.data) ? r.data.length : 0 }); } catch {}
+                } catch {}
+              }
+              if (urls && urls.length) {
+                // Store under both the picint key and id_achat key for easy lookup later
+                setImageUrls((prev) => ({ ...prev, [id]: urls, [cid]: urls }));
+                fetched = true;
+                console.log('[InvoiceImages] watch fetched', { key: id, id_achat: cid, count: urls.length });
+                break;
+              }
+            }
+            // If no candidate id_achat found, last resort try the picint (legacy paths)
+            if (!fetched) {
+              console.log('[InvoiceImages] watch fallback picint', id);
+              let urls = await fetchImagesTyped(id, "watch");
+              if (!urls || urls.length === 0) {
+                try {
+                  const token = localStorage.getItem('token');
+                  const fUrl = `${API_BASEImage}/list/${id}`;
+                  try { console.log('[InvoiceImages:fetch-fallback] GET', fUrl); } catch {}
+                  const r = await axios.get(fUrl, { headers: { Authorization: `Bearer ${token}` } });
+                  if (Array.isArray(r.data) && r.data.length) urls = r.data.map((it: any) => it.url || it);
+                  try { console.log('[InvoiceImages:fetch-fallback] OK', { url: fUrl, count: Array.isArray(r.data) ? r.data.length : 0 }); } catch {}
+                } catch {}
+              }
+              if (urls && urls.length) {
+                setImageUrls((prev) => ({ ...prev, [id]: urls }));
+                console.log('[InvoiceImages] watch fallback picint fetched', { key: id, count: urls.length });
+              }
             }
           } else if (isDiamond) {
             // Try diamond by this id (picint) first
@@ -556,11 +762,13 @@ const WatchStandardInvoiceContent = forwardRef<HTMLDivElement, Props>(
                 });
               for (const cid of candidateIds) {
                 if (cid && !imageUrls[cid]) {
+                  console.log('[InvoiceImages] diamond candidate id_achat', cid);
                   const u2 = await fetchImagesTyped(cid, "diamond");
                   if (u2 && u2.length) {
                     // store under both cid and original id so render fallback works
                     setImageUrls((prev) => ({ ...prev, [id]: u2, [cid]: u2 }));
                     urls = u2;
+                    console.log('[InvoiceImages] diamond fetched', { key: id, id_achat: cid, count: u2.length });
                     break;
                   }
                 }
@@ -569,11 +777,70 @@ const WatchStandardInvoiceContent = forwardRef<HTMLDivElement, Props>(
               // urls is typed (string[] | null); ensure non-null for state shape
               setImageUrls((prev) => ({ ...prev, [id]: urls || [] }));
             }
+          } else if (isGold) {
+            // Gold images are stored per id_achat. Build candidates and fetch.
+            const token = localStorage.getItem("token");
+            // Put picint/id first as requested, then other id_achat candidates
+            const candidateIds: string[] = [];
+            const pushId = (v: any) => {
+              if (v !== undefined && v !== null) {
+                const s = String(v).trim();
+                if (s !== '' && !candidateIds.includes(s)) candidateIds.push(s);
+              }
+            };
+            // Ensure we try the row key first if numeric
+            pushId(id);
+            // From invoices that map to this identifier (picint/id_fact/id_achat)
+            pdata
+              .filter(
+                (inv) =>
+                  String(inv.picint) === String(id) ||
+                  String(inv.id_fact) === String(id) ||
+                  String(inv.id_achat) === String(id)
+              )
+              .forEach((inv) => {
+                (inv.ACHATs || []).forEach((a: any) => pushId(a?.id_achat));
+              });
+            // candidateIds now has id first, followed by found id_achat values
+
+            let fetched = false;
+            for (const cid of candidateIds) {
+              if (!cid) continue;
+              // If we already fetched for this cid, map it to this id and stop
+              if (imageUrls[cid]) {
+                setImageUrls((prev) => ({ ...prev, [id]: prev[cid] }));
+                fetched = true;
+                break;
+              }
+              try {
+                console.log('[InvoiceImages] gold candidate id_achat', cid);
+                let urls: string[] = [];
+                try {
+                  const gUrl = `${API_BASEImage}/list/gold/${cid}`;
+                  try { console.log('[InvoiceImages:fetch-gold] GET', gUrl); } catch {}
+                  const r = await axios.get(gUrl,
+                    { headers: { Authorization: `Bearer ${token}` } });
+                  if (Array.isArray(r.data) && r.data.length) {
+                    urls = r.data.map((it: any) => it.url || it);
+                  }
+                } catch {}
+                // Do not fallback to watch list for gold; keep gold-only sources
+                if (urls && urls.length) {
+                  setImageUrls((prev) => ({ ...prev, [id]: urls, [cid]: urls }));
+                  fetched = true;
+                  console.log('[InvoiceImages] gold fetched', { key: id, id_achat: cid, count: urls.length });
+                  break;
+                }
+              } catch {}
+            }
+            if (!fetched) {
+              setImageUrls((prev) => ({ ...prev, [id]: [] }));
+            }
           }
         }
       })();
       // eslint-disable-next-line
-    }, [pdata, allWatchDetails, allDiamondDetails, typeinv, hasDiamondData]);
+    }, [pdata, allWatchDetails, allDiamondDetails, typeinv, hasDiamondData, items]);
 
     // Inline print styles (kept local to component so production build includes them)
     const printStyles = `
@@ -781,6 +1048,11 @@ const WatchStandardInvoiceContent = forwardRef<HTMLDivElement, Props>(
               >
                 S/N
               </TableCell>
+              {typeinv && typeinv.toLowerCase().includes("gold") && (
+                <TableCell sx={{ color: "#000", width: 90, minWidth: 90 }}>
+                  ID
+                </TableCell>
+              )}
               {/* New Image column */}
               {showImage && (
                 <TableCell
@@ -803,9 +1075,11 @@ const WatchStandardInvoiceContent = forwardRef<HTMLDivElement, Props>(
               {typeinv && typeinv.toLowerCase().includes("gold") && (
                 <>
                   <TableCell sx={{ color: "#000" }}>Weight</TableCell>
+                  <TableCell sx={{ color: "#000" }}>Price /g</TableCell>
+                  <TableCell sx={{ color: "#000" }}>Price /piece</TableCell>
                   <TableCell sx={{ color: "#000" }}>Gold Color</TableCell>
                   <TableCell sx={{ color: "#000" }}>Rush Color</TableCell>
-                  <TableCell sx={{ color: "#000" }}>Sise</TableCell>
+                 
                 </>
               )}
               {typeinv && !typeinv.toLowerCase().includes("gold") && (
@@ -925,7 +1199,7 @@ const WatchStandardInvoiceContent = forwardRef<HTMLDivElement, Props>(
                         );
                       }
                     } else if (
-                      (typeinv && typeinv.toLowerCase().includes("diamond")) ||
+                      (typeinv && (typeinv.toLowerCase().includes("diamond") || typeinv.toLowerCase().includes("gold"))) ||
                       hasDiamondData
                     ) {
                       // Diamond: first try parent picint-based map (mirroring watch logic)
@@ -1034,6 +1308,22 @@ const WatchStandardInvoiceContent = forwardRef<HTMLDivElement, Props>(
                         >
                           {idx + 1}
                         </TableCell>
+                        {typeinv && typeinv.toLowerCase().includes("gold") && (
+                          <TableCell
+                            sx={{
+                              color: "#000",
+                              fontSize: 11,
+                              padding: "6px 8px",
+                              width: 90,
+                              minWidth: 90,
+                            }}
+                          >
+                            {(() => {
+                              const parent = item._parent;
+                              return parent?.id_art ?? parent?.picint ?? "";
+                            })()}
+                          </TableCell>
+                        )}
                         {/* New Image cell */}
                         {showImage && (
                           <TableCell
@@ -1049,13 +1339,23 @@ const WatchStandardInvoiceContent = forwardRef<HTMLDivElement, Props>(
                             {(() => {
                               const parentInvoice = item._parent;
                               const rowId = parentInvoice?.picint;
-                              // Fallback sequence for image source (row picint, direct id_achat, any diamond detail id)
-                              let urls = imageUrls[rowId] || [];
+                              // Fallback sequence for image source (row picint, direct id_achat, invoice.picint, any diamond detail id)
+                              let urls = [] as string[];
+                              if (rowId && imageUrls[rowId]) urls = imageUrls[rowId];
+                              if ((!urls || urls.length === 0) && item.id_achat && imageUrls[item.id_achat]) {
+                                urls = imageUrls[item.id_achat];
+                              }
+                              // Try using current invoice picint as fallback key
+                              if ((!urls || urls.length === 0) && typeof invoice?.picint !== 'undefined') {
+                                const invKey = String(invoice.picint);
+                                if (imageUrls[invKey]) urls = imageUrls[invKey];
+                              }
                               if (urls.length === 0 && item.id_achat)
                                 urls = imageUrls[item.id_achat] || urls;
                               if (
                                 urls.length === 0 &&
                                 (typeinv?.toLowerCase().includes("diamond") ||
+                                  typeinv?.toLowerCase().includes("gold") ||
                                   hasDiamondData)
                               ) {
                                 const dDet =
@@ -1077,16 +1377,123 @@ const WatchStandardInvoiceContent = forwardRef<HTMLDivElement, Props>(
                                   urls = imageUrls[altId];
                                 }
                               }
+                              // As a last resort for gold, attempt a direct gold key using rowId
+                              if ((!urls || urls.length === 0) && rowId && imageUrls[rowId]) {
+                                urls = imageUrls[rowId];
+                              }
                               const token = localStorage.getItem("token");
-                              if (urls.length > 0) {
-                                const imgUrl = urls[0];
-                                let urlWithToken = imgUrl;
+                              const isGoldType = typeinv?.toLowerCase().includes("gold");
+                              const isWatchType = typeinv?.toLowerCase().includes("watch");
+                              let candidateUrls = urls;
+                              // Neutral normalization based on source folder, independent of type
+                              if (Array.isArray(candidateUrls) && candidateUrls.length) {
+                                candidateUrls = candidateUrls.map((u) => {
+                                  try {
+                                    const t = new URL(u, window.location.origin);
+                                    const parts = t.pathname.split('/').filter(Boolean);
+                                    // Reduce any already-correct secure path to relative
+                                    if (/^\/images\//.test(t.pathname)) return t.pathname;
+                                    // Map known upload mounts to secure routes
+                                    const len = parts.length;
+                                    if (len >= 3) {
+                                      const filename = parts[len - 1];
+                                      const idSeg = parts[len - 2];
+                                      const mount = parts.slice(0, len - 2).join('/').toLowerCase();
+                                      if (mount.includes('uploads/goldpic') || mount.includes('uploads/opurchases/upload-attachment') || mount.includes('uploads/purchase')) {
+                                        return `/images/gold/${encodeURIComponent(idSeg)}/${encodeURIComponent(filename)}`;
+                                      }
+                                      if (mount.includes('uploads/watchpic')) {
+                                        return `/images/${encodeURIComponent(idSeg)}/${encodeURIComponent(filename)}`;
+                                      }
+                                    }
+                                  } catch {}
+                                  return u;
+                                });
+                              }
+
+                              // Normalize gold URLs to secure route like diamond: /images/gold/:id/:filename
+                              if (isGoldType && Array.isArray(candidateUrls) && candidateUrls.length) {
+                                candidateUrls = candidateUrls.map((u) => {
+                                  try {
+                                    // Normalize any absolute URL to relative secure route so we can prefix with API base later
+                                    if (/\/images\/gold\//.test(u)) {
+                                      const t = new URL(u, window.location.origin);
+                                      return t.pathname;
+                                    }
+                                    const urlObj = new URL(u, window.location.origin);
+                                    const parts = urlObj.pathname.split('/').filter(Boolean);
+                                    // Expect patterns like /uploads/GoldPic/:id/:file or /uploads/Opurchases/upload-attachment/:id/:file or /uploads/purchase/:id/:file
+                                    const len = parts.length;
+                                    if (len >= 3) {
+                                      const filename = parts[len - 1];
+                                      const idSeg = parts[len - 2];
+                                      if (idSeg) {
+                                        return `/images/gold/${encodeURIComponent(idSeg)}/${encodeURIComponent(filename)}`;
+                                      }
+                                    }
+                                  } catch {}
+                                  return u;
+                                });
+                              }
+                              // Normalize watch URLs to secure route: /images/:id/:filename
+                              if (isWatchType && Array.isArray(candidateUrls) && candidateUrls.length) {
+                                candidateUrls = candidateUrls.map((u) => {
+                                  try {
+                                    // Skip non-watch types
+                                    if (/\/images\/(gold|diamond)\//.test(u)) return u;
+                                    // If absolute, reduce to path to ensure API origin is applied later
+                                    if (/^https?:\/\//i.test(u)) {
+                                      const t = new URL(u);
+                                      if (/^\/images\/[^/]+\/[^/]+/.test(t.pathname)) {
+                                        return t.pathname;
+                                      }
+                                    }
+                                    // If already relative like /images/:id/:file keep as-is
+                                    if (/^\/images\/[^/]+\/[^/]+/.test(u)) return u;
+                                    const urlObj = new URL(u, window.location.origin);
+                                    const parts = urlObj.pathname.split('/').filter(Boolean);
+                                    const len = parts.length;
+                                    if (len >= 3) {
+                                      const filename = parts[len - 1];
+                                      const idSeg = parts[len - 2];
+                                      if (idSeg) {
+                                        return `/images/${encodeURIComponent(idSeg)}/${encodeURIComponent(filename)}`;
+                                      }
+                                    }
+                                  } catch {}
+                                  return u;
+                                });
+                              }
+                              if (candidateUrls.length > 0) {
+                                try {
+                                  console.log('[InvoiceImages:urls]', {
+                                    type: isGoldType ? 'gold' : (isWatchType ? 'watch' : 'other'),
+                                    rowPicint: rowId,
+                                    rowIdAchat: item?.id_achat,
+                                    urlsIn: urls,
+                                    urlsNormalized: candidateUrls
+                                  });
+                                } catch {}
+                                // Prefer the last candidate (often newest by prior sorts); fallback to first
+                                const imgUrl = candidateUrls[candidateUrls.length - 1] || candidateUrls[0];
+                                // Force https absolute URL for images
+                                const httpsImg = toHttpsAbsolute(imgUrl);
+                                let urlWithToken = httpsImg;
                                 if (token) {
                                   urlWithToken +=
-                                    (imgUrl.includes("?") ? "&" : "?") +
+                                    (httpsImg.includes("?") ? "&" : "?") +
                                     "token=" +
                                     encodeURIComponent(token);
                                 }
+                                try {
+                                  console.log('[InvoiceImages:render] img', {
+                                    rowPicint: rowId,
+                                    rowIdAchat: item?.id_achat,
+                                    isGoldType,
+                                    imgUrl: httpsImg,
+                                    urlWithToken
+                                  });
+                                } catch {}
                                 return (
                                   <Box
                                     component="img"
@@ -1114,6 +1521,14 @@ const WatchStandardInvoiceContent = forwardRef<HTMLDivElement, Props>(
                                   />
                                 );
                               } else {
+                                try {
+                                  console.log('[InvoiceImages:render] no-image', {
+                                    rowPicint: rowId,
+                                    rowIdAchat: item?.id_achat,
+                                    isGoldType,
+                                    checkedKeys: [rowId, item?.id_achat, invoice?.picint]
+                                  });
+                                } catch {}
                                 return (
                                   <span style={{ color: "#bbb", fontSize: 10 }}>
                                     No Image
@@ -1177,7 +1592,50 @@ const WatchStandardInvoiceContent = forwardRef<HTMLDivElement, Props>(
                                 padding: "2px 6px",
                               }}
                             >
-                              {item.qty + " g"}
+                              {fmt0(item.qty)} g
+                            </TableCell>
+
+                            <TableCell
+                              sx={{
+                                color: "#000",
+                                fontSize: 11,
+                                padding: "2px 6px",
+                              }}
+                            >
+                              {(() => {
+                                const parent = item._parent;
+                                const meta = parseMetaFromComment(parent?.COMMENT);
+                                const w = Number(item.qty || 0);
+                                const piece =
+                                  meta?.price_per_piece != null
+                                    ? Number(meta.price_per_piece)
+                                    : Number(parent?.prix_vente_remise ?? parent?.prix_vente ?? 0);
+                                const perGram =
+                                  meta?.price_per_gram != null
+                                    ? Number(meta.price_per_gram)
+                                    : w > 0
+                                      ? piece / w
+                                      : 0;
+                                return fmt0(perGram);
+                              })()}
+                            </TableCell>
+
+                            <TableCell
+                              sx={{
+                                color: "#000",
+                                fontSize: 11,
+                                padding: "2px 6px",
+                              }}
+                            >
+                              {(() => {
+                                const parent = item._parent;
+                                const meta = parseMetaFromComment(parent?.COMMENT);
+                                const piece =
+                                  meta?.price_per_piece != null
+                                    ? Number(meta.price_per_piece)
+                                    : Number(parent?.prix_vente_remise ?? parent?.prix_vente ?? 0);
+                                return <span style={{ fontFamily: "monospace" }}>{fmt0(piece)}</span>;
+                              })()}
                             </TableCell>
                             <TableCell
                               sx={{
@@ -1237,6 +1695,83 @@ const WatchStandardInvoiceContent = forwardRef<HTMLDivElement, Props>(
           </TableBody>
         </Table>
 
+        {typeinv && typeinv.toLowerCase().includes("gold") && (
+          <Box sx={{ mt: 1, display: "flex", flexDirection: "column", gap: 0.5 }}>
+            {(() => {
+              const currentInvoiceData = pdata.find((inv: any) => inv.num_fact === invoiceNumFact) || {};
+              const dsMeta = parseDsMetaFromComment(currentInvoiceData?.COMMENT || invoice?.COMMENT);
+
+              const discValue = Number(dsMeta?.discount_value ?? 0) || 0;
+              const surValue = Number(dsMeta?.surcharge_value ?? 0) || 0;
+              const discPer = Number(dsMeta?.discount_per ?? 0) || 0;
+              const surPer = Number(dsMeta?.surcharge_per ?? 0) || 0;
+
+              const netValue = Number(data.remise) || 0;
+              const netPer = Number(data.remise_per) || 0;
+
+              const effectiveDiscValue = dsMeta ? discValue : (netValue < 0 ? Math.abs(netValue) : 0);
+              const effectiveSurValue = dsMeta ? surValue : (netValue > 0 ? netValue : 0);
+              const effectiveDiscPer = dsMeta ? discPer : (netPer < 0 ? Math.abs(netPer) : 0);
+              const effectiveSurPer = dsMeta ? surPer : (netPer > 0 ? netPer : 0);
+
+              const nonGiftAchat = pdata
+                .flatMap((inv: any) => (inv.ACHATs || []).map((a: any) => ({ ...a, _p: inv })))
+                .filter((a: any) => !a?._p?.IS_GIFT);
+
+              const subtotalNonGift = nonGiftAchat.reduce((sum: number, a: any) => {
+                const parent = a._p;
+                const m = parseMetaFromComment(parent?.COMMENT);
+                const piece =
+                  m?.price_per_piece != null
+                    ? Number(m.price_per_piece)
+                    : Number(parent?.prix_vente_remise ?? parent?.prix_vente ?? 0);
+                return sum + (Number(piece) || 0);
+              }, 0);
+
+              const discFromPercent = subtotalNonGift * (effectiveDiscPer / 100);
+              const surFromPercent = subtotalNonGift * (effectiveSurPer / 100);
+
+              const showDiscount = effectiveDiscValue > 0 || effectiveDiscPer > 0;
+              const showSurcharge = effectiveSurValue > 0 || effectiveSurPer > 0;
+
+              return (
+                <>
+                  {showDiscount ? (
+                    <Box sx={{ display: "flex", justifyContent: "space-between" }}>
+                      <Typography sx={{ fontWeight: 700, color: "#d32f2f" }}>
+                        Discount
+                      </Typography>
+                      <Typography sx={{ fontFamily: "monospace", color: "#d32f2f" }}>
+                        {(() => {
+                          const parts: string[] = [];
+                          if (effectiveDiscValue > 0) parts.push(fmt0(effectiveDiscValue));
+                          if (effectiveDiscPer > 0) parts.push(`${fmt0(effectiveDiscPer)}% (${fmt0(discFromPercent)})`);
+                          return parts.join(" + ");
+                        })()}
+                      </Typography>
+                    </Box>
+                  ) : null}
+                  {showSurcharge ? (
+                    <Box sx={{ display: "flex", justifyContent: "space-between" }}>
+                      <Typography sx={{ fontWeight: 700, color: "#2e7d32" }}>
+                        Surcharge
+                      </Typography>
+                      <Typography sx={{ fontFamily: "monospace", color: "#2e7d32" }}>
+                        {(() => {
+                          const parts: string[] = [];
+                          if (effectiveSurValue > 0) parts.push(fmt0(effectiveSurValue));
+                          if (effectiveSurPer > 0) parts.push(`${fmt0(effectiveSurPer)}% (${fmt0(surFromPercent)})`);
+                          return parts.join(" + ");
+                        })()}
+                      </Typography>
+                    </Box>
+                  ) : null}
+                </>
+              );
+            })()}
+          </Box>
+        )}
+
         <Box
           className="invoice-totals"
           sx={{
@@ -1266,10 +1801,7 @@ const WatchStandardInvoiceContent = forwardRef<HTMLDivElement, Props>(
                 <Typography>
                   <span style={{ fontWeight: "bold" }}>Total LYD:</span>
                   <span style={{ fontFamily: "monospace" }}>
-                    {totalAmountLYD.toLocaleString(undefined, {
-                      minimumFractionDigits: 2,
-                      maximumFractionDigits: 2,
-                    })}
+                    {fmt0(totalAmountLYD)}
                   </span>
                 </Typography>
                 <Typography>
@@ -1282,32 +1814,10 @@ const WatchStandardInvoiceContent = forwardRef<HTMLDivElement, Props>(
                         0
                       )
                       .toLocaleString(undefined, {
-                        maximumFractionDigits: 2,
+                        minimumFractionDigits: 0,
+                        maximumFractionDigits: 0,
                       })}{" "}
                     g
-                  </span>
-                </Typography>
-                <Typography>
-                  <span style={{ fontWeight: "bold" }}>Price /g:</span>
-                  <span style={{ fontFamily: "monospace" }}>
-                    {(() => {
-                      const totalWeight = pdata
-                        .flatMap((inv) => inv.ACHATs || [])
-                        .reduce(
-                          (sum, item) => sum + (parseFloat(item.qty) || 0),
-                          0
-                        );
-                      return totalWeight > 0
-                        ? (totalAmountLYD / totalWeight).toLocaleString(
-                            undefined,
-                            {
-                              minimumFractionDigits: 2,
-                              maximumFractionDigits: 2,
-                            }
-                          )
-                        : "0.00";
-                    })()}{" "}
-                    LYD
                   </span>
                 </Typography>
               </>
@@ -1325,44 +1835,61 @@ const WatchStandardInvoiceContent = forwardRef<HTMLDivElement, Props>(
                   </span>
                 </Typography>
 
-                {/* Discount display */}
-                {data.remise && data.remise > 0 ? (
-                  <Typography>
-                    <span style={{ fontWeight: "bold" }}>Discount: </span>
-                    <span style={{ fontFamily: "monospace", color: "#d32f2f" }}>
-                      {data.remise.toLocaleString(undefined, {
-                        minimumFractionDigits: 2,
-                        maximumFractionDigits: 2,
-                      })}
-                    </span>
-                  </Typography>
-                ) : data.remise_per && data.remise_per > 0 ? (
-                  <Typography>
-                    <span style={{ fontWeight: "bold" }}>
-                      Discount ({data.remise_per}%):
-                    </span>
-                    <span style={{ fontFamily: "monospace", color: "#d32f2f" }}>
-                      {(
-                        (TotalAmountFinal * data.remise_per) /
-                        100
-                      ).toLocaleString(undefined, {
-                        minimumFractionDigits: 2,
-                        maximumFractionDigits: 2,
-                      })}
-                    </span>
-                  </Typography>
-                ) : null}
+                {(() => {
+                  const netValue = Number(data.remise) || 0;
+                  const netPer = Number(data.remise_per) || 0;
+                  const hasDiscount = netValue < 0 || netPer < 0;
+                  const hasSurcharge = netValue > 0 || netPer > 0;
+                  const absValue = Math.abs(netValue);
+                  const absPer = Math.abs(netPer);
+
+                  return (
+                    <>
+                      {hasDiscount ? (
+                        <Typography>
+                          <span style={{ fontWeight: "bold" }}>Discount:</span>{" "}
+                          <span style={{ fontFamily: "monospace", color: "#d32f2f" }}>
+                            {absValue > 0
+                              ? absValue.toLocaleString(undefined, {
+                                  minimumFractionDigits: 2,
+                                  maximumFractionDigits: 2,
+                                })
+                              : absPer.toLocaleString(undefined, {
+                                  minimumFractionDigits: 2,
+                                  maximumFractionDigits: 2,
+                                }) + "%"}
+                          </span>
+                        </Typography>
+                      ) : null}
+
+                      {hasSurcharge ? (
+                        <Typography>
+                          <span style={{ fontWeight: "bold" }}>Surcharge:</span>{" "}
+                          <span style={{ fontFamily: "monospace", color: "#2e7d32" }}>
+                            {absValue > 0
+                              ? absValue.toLocaleString(undefined, {
+                                  minimumFractionDigits: 2,
+                                  maximumFractionDigits: 2,
+                                })
+                              : absPer.toLocaleString(undefined, {
+                                  minimumFractionDigits: 2,
+                                  maximumFractionDigits: 2,
+                                }) + "%"}
+                          </span>
+                        </Typography>
+                      ) : null}
+                    </>
+                  );
+                })()}
 
                 {/* Total USD after discount */}
                 <Typography>
                   <span style={{ fontWeight: "bold" }}>Total Saved USD:</span>
                   <span style={{ fontFamily: "monospace" }}>
-                    {(data.remise && data.remise > 0
-                      ? TotalAmountFinal - data.remise
-                      : data.remise_per && data.remise_per > 0
-                        ? TotalAmountFinal -
-                          (TotalAmountFinal * data.remise_per) / 100
-                        : TotalAmountFinal
+                    {(
+                      (Number(TotalAmountFinal) || 0) +
+                      (Number(data.remise) || 0) +
+                      (Number(TotalAmountFinal) || 0) * ((Number(data.remise_per) || 0) / 100)
                     ).toLocaleString(undefined, {
                       minimumFractionDigits: 2,
                       maximumFractionDigits: 2,
@@ -1384,28 +1911,19 @@ const WatchStandardInvoiceContent = forwardRef<HTMLDivElement, Props>(
             <Typography>
               <span style={{ fontWeight: "bold" }}>LYD Paid:</span>{" "}
               <span style={{ fontFamily: "monospace" }}>
-                {totalAmountLYD.toLocaleString(undefined, {
-                  minimumFractionDigits: 2,
-                  maximumFractionDigits: 2,
-                })}
+                {fmt0(amount_lyd)}
               </span>
             </Typography>
             <Typography>
               <span style={{ fontWeight: "bold" }}>USD Paid:</span>{" "}
               <span style={{ fontFamily: "monospace" }}>
-                {totalAmountUSD.toLocaleString(undefined, {
-                  minimumFractionDigits: 2,
-                  maximumFractionDigits: 2,
-                })}
+                {fmt0(amount_currency)}
               </span>
             </Typography>
             <Typography>
               <span style={{ fontWeight: "bold" }}>EUR Paid:</span>{" "}
               <span style={{ fontFamily: "monospace" }}>
-                {totalAmountEur.toLocaleString(undefined, {
-                  minimumFractionDigits: 2,
-                  maximumFractionDigits: 2,
-                })}
+                {fmt0(amount_EUR)}
               </span>
             </Typography>
           </Box>

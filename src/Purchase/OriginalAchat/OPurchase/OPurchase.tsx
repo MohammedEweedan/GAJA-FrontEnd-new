@@ -1,5 +1,5 @@
-import { useEffect, useState, useMemo, forwardRef } from "react";
-import axios from "../../api";
+import { useEffect, useState, useMemo, useCallback, forwardRef } from "react";
+import axios from "../../../../src/api";
 import { useNavigate, useLocation } from "react-router-dom";
 import {
   MaterialReactTable,
@@ -29,14 +29,14 @@ import DeleteOutlineIcon from "@mui/icons-material/DeleteOutline";
 import AddIcon from "@mui/icons-material/Add";
 import ImportExportIcon from "@mui/icons-material/ImportExport";
 import AttachFileIcon from "@mui/icons-material/AttachFile";
-import CloudUploadIcon from "@mui/icons-material/CloudUpload";
+import AttchOPFiles from "./AttchOPFiles";
 
 import EmailIcon from "@mui/icons-material/Email";
 import * as XLSX from "xlsx";
 import Backdrop from "@mui/material/Backdrop";
 
 import LinearProgress from "@mui/material/LinearProgress";
-import Logo from "../../ui-component/Logo";
+import Logo from "../../../ui-component/Logo";
 import CheckCircleIcon from "@mui/icons-material/Verified";
 import HourglassEmptyIcon from "@mui/icons-material/HourglassEmpty";
 
@@ -76,6 +76,7 @@ type OPurchae = {
   MakingCharge?: number;
   ShippingCharge?: number;
   TravelExpesenes?: number;
+  LossExpesenes?: number;
   cost_g?: number;
   Rate?: number;
   cost_g_LYD?: number;
@@ -83,6 +84,7 @@ type OPurchae = {
   Approval_Date?: string;
   ApprouvedBy?: string;
   ounceCost?: number;
+  IndirectCost?: number;
 };
 
 type DistributionPurchase = {
@@ -121,6 +123,7 @@ const initialBoxeState: OPurchae = {
   IsApprouved: "",
   Approval_Date: new Date().toISOString().slice(0, 10),
   ApprouvedBy: "",
+  IndirectCost: undefined,
 };
 
 const Alert = forwardRef<HTMLDivElement, AlertProps>((props, ref) => (
@@ -144,6 +147,8 @@ const OPurchase = () => {
     ps = localStorage.getItem("ps");
     Cuser = localStorage.getItem("Cuser");
   }
+  // reference to avoid unused var warning in strict settings
+  void ps;
 
   const [data, setData] = useState<OPurchae[]>([]);
   const [loading, setLoading] = useState(true);
@@ -158,12 +163,13 @@ const OPurchase = () => {
   }>({ open: false, message: "", severity: "success" });
   const [suppliers, setSuppliers] = useState<Supplier[]>([]);
   const [loadingSuppliers, setLoadingSuppliers] = useState(false);
+  // reference to avoid unused var warning in strict settings
+  void loadingSuppliers;
   const [attachmentDialog, setAttachmentDialog] = useState<{
     open: boolean;
     row: OPurchae | null;
   }>({ open: false, row: null });
-  const [attachment, setAttachment] = useState<File | null>(null);
-  const [uploading, setUploading] = useState(false);
+
   const [sendingEmail, setSendingEmail] = useState(false);
   const [emailProgress, setEmailProgress] = useState(0);
   const [distributionDialog, setDistributionDialog] = useState<{
@@ -200,17 +206,78 @@ const OPurchase = () => {
     MakingCharge: 0,
     ShippingCharge: 0,
     TravelExpesenes: 0,
+    LossExpesenes: 0,
+    IndirectCost: 0,
     cost_g: 0,
     Rate: 0,
     cost_g_LYD: 0,
     ounceCost: 0,
   });
 
-  const navigate = useNavigate();
-  const apiIp = process.env.REACT_APP_API_IP;
-  const apiUrl = `http://${apiIp}/Opurchases`;
+  // Edit cost by brand dialog state
+  const [openBrandCostDialog, setOpenBrandCostDialog] = useState(false);
+  const [selectedBrand, setSelectedBrand] = useState<Supplier | null>(null);
+  const [brandCosts, setBrandCosts] = useState({
+    MakingCharge: 0,
+    ShippingCharge: 0,
+    TravelExpesenes: 0,
+    LossExpesenes: 0,
+    IndirectCost: 0,
+  });
 
-  const fetchData = async () => {
+  // When a brand is selected, populate the brandCosts from an existing
+  // purchase record for that brand if available. This avoids needing a
+  // dedicated backend endpoint — we reuse the already-fetched `data`.
+  useEffect(() => {
+    if (!selectedBrand) {
+      setBrandCosts({
+        MakingCharge: 0,
+        ShippingCharge: 0,
+        TravelExpesenes: 0,
+        LossExpesenes: 0,
+        IndirectCost: 0,
+      });
+      return;
+    }
+
+    // Prefer a purchase that already has cost fields set (non-null).
+    const purchaseWithCosts = data.find((r) =>
+      r.Brand === selectedBrand.id_client && (
+        r.MakingCharge != null ||
+        r.ShippingCharge != null ||
+        r.TravelExpesenes != null ||
+        r.LossExpesenes != null ||
+        r.IndirectCost != null
+      )
+    );
+
+    if (purchaseWithCosts) {
+      setBrandCosts({
+        MakingCharge: purchaseWithCosts.MakingCharge ?? 0,
+        ShippingCharge: purchaseWithCosts.ShippingCharge ?? 0,
+        TravelExpesenes: purchaseWithCosts.TravelExpesenes ?? 0,
+        LossExpesenes: purchaseWithCosts.LossExpesenes ?? 0,
+        IndirectCost: purchaseWithCosts.IndirectCost ?? 0,
+      });
+    } else {
+      // No existing costs found for this brand — reset to defaults (zeros).
+      setBrandCosts({
+        MakingCharge: 0,
+        ShippingCharge: 0,
+        TravelExpesenes: 0,
+        LossExpesenes: 0,
+        IndirectCost: 0,
+      });
+    }
+  }, [selectedBrand, data]);
+
+  const navigate = useNavigate();
+  const rawApiIp = process.env.REACT_APP_API_IP || "";
+  const apiIp = rawApiIp.replace(/\/+$/, "");
+  // If API IP is not provided, use relative path so axios baseURL will be used
+  const apiUrl = apiIp ? `${apiIp}/Opurchases` : "/Opurchases";
+
+  const fetchData = useCallback(async () => {
     const token = localStorage.getItem("token");
     if (!token) return navigate("/");
 
@@ -230,9 +297,9 @@ const OPurchase = () => {
     } finally {
       setLoading(false);
     }
-  };
+  }, [navigate, apiUrl]);
 
-  const fetchSuppliers = async () => {
+  const fetchSuppliers = useCallback(async () => {
     const apiUrlsuppliers = "/suppliers";
     const token = localStorage.getItem("token");
     try {
@@ -254,12 +321,12 @@ const OPurchase = () => {
     } finally {
       setLoadingSuppliers(false);
     }
-  };
+  }, []);
 
   useEffect(() => {
     fetchData();
     fetchSuppliers();
-  }, [navigate]);
+  }, [fetchData, fetchSuppliers]);
 
   useEffect(() => {
     const fetchPsList = async () => {
@@ -280,14 +347,14 @@ const OPurchase = () => {
     fetchPsList();
   }, []);
 
-  const handleEdit = (row: OPurchae) => {
+  const handleEdit = useCallback((row: OPurchae) => {
     setEditOPurchase({
       ...row,
       supplier: suppliers.find((s) => s.id_client === row.Brand) || null,
     });
     setIsEditMode(true);
     setOpenDialog(true);
-  };
+  }, [suppliers]);
 
   const handleAddNew = () => {
     setEditOPurchase(initialBoxeState);
@@ -386,7 +453,7 @@ const OPurchase = () => {
     }
   };
 
-  const handleDelete = async (row: OPurchae) => {
+  const handleDelete = useCallback(async (row: OPurchae) => {
     if (!window.confirm(`Delete "${row.Comment_Achat}"?`)) return;
     const token = localStorage.getItem("token");
     try {
@@ -402,15 +469,15 @@ const OPurchase = () => {
     } catch {
       setSnackbar({ open: true, message: "Delete failed", severity: "error" });
     }
-  };
+  }, [apiUrl, fetchData]);
 
   // Helper for formatting numbers with comma and point (local)
   const formatAmount = (value?: number) =>
     typeof value === "number"
       ? value.toLocaleString(undefined, {
-          minimumFractionDigits: 2,
-          maximumFractionDigits: 2,
-        })
+        minimumFractionDigits: 2,
+        maximumFractionDigits: 2,
+      })
       : "";
 
   const formatDate = (dateStr?: string) => {
@@ -423,10 +490,19 @@ const OPurchase = () => {
     });
   };
 
+  // Format loss percentages with 3 decimal places
+  const formatLoss = (value?: number) =>
+    typeof value === "number"
+      ? value.toLocaleString(undefined, {
+        minimumFractionDigits: 3,
+        maximumFractionDigits: 3,
+      })
+      : "";
+
   const handleExportExcel = () => {
     const headers = [
-      "ID Achat",
-      "Comment",
+      "System ID",
+      "Product Name",
       "Date",
       "Full Weight",
       "Net Weight",
@@ -449,8 +525,8 @@ const OPurchase = () => {
       formatAmount(boxe.NetWeight),
       boxe.user?.name_user || boxe.user?.name || boxe.Usr,
       suppliers.find((s) => s.id_client === boxe.Brand)?.client_name ||
-        boxe.Brand ||
-        "",
+      boxe.Brand ||
+      "",
       boxe.DocumentNo,
       boxe.Stone_Details,
       boxe.Net_Details,
@@ -467,63 +543,49 @@ const OPurchase = () => {
     setSnackbar({ open: true, message: "Excel exported", severity: "info" });
   };
 
+  const handleOpenBrandCost = () => {
+    setSelectedBrand(null);
+    setBrandCosts({
+      MakingCharge: 0,
+      ShippingCharge: 0,
+      TravelExpesenes: 0,
+      LossExpesenes: 0,
+      IndirectCost: 0,
+    });
+    setOpenBrandCostDialog(true);
+  };
+
+  const handleSaveBrandCosts = async () => {
+    if (!selectedBrand) {
+      setSnackbar({ open: true, message: "Please select a brand", severity: "warning" });
+      return;
+    }
+    const token = localStorage.getItem("token");
+    try {
+      await axios.put(
+        `${apiUrl}/UpdateCostsByBrand/${selectedBrand.id_client}`,
+        { ...brandCosts },
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+      setSnackbar({ open: true, message: "Costs updated for brand", severity: "success" });
+      setOpenBrandCostDialog(false);
+      await fetchData();
+    } catch (e: any) {
+      setSnackbar({
+        open: true,
+        message: e?.response?.data?.message || "Failed to update costs",
+        severity: "error",
+      });
+    }
+  };
+
   // --- Attachment logic ---
   const handleOpenAttachmentDialog = (row: OPurchae) => {
     setAttachmentDialog({ open: true, row });
-    setAttachment(null);
   };
 
   const handleCloseAttachmentDialog = () => {
     setAttachmentDialog({ open: false, row: null });
-    setAttachment(null);
-  };
-
-  const handleAttachmentChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (e.target.files && e.target.files.length > 0) {
-      setAttachment(e.target.files[0]);
-    }
-  };
-
-  const handleUploadAttachment = async () => {
-    if (!attachment || !attachmentDialog.row) {
-      setSnackbar({
-        open: true,
-        message: "No file or purchase selected",
-        severity: "warning",
-      });
-      return;
-    }
-
-    setUploading(true);
-    const token = localStorage.getItem("token");
-    const formData = new FormData();
-    formData.append("file", attachment);
-    formData.append("id_achat", String(attachmentDialog.row.id_achat));
-
-    try {
-      const res = await axios.post(`${apiUrl}/upload-attachment`, formData, {
-        headers: {
-          Authorization: `Bearer ${token}`,
-          "Content-Type": "multipart/form-data",
-        },
-      });
-      setSnackbar({
-        open: true,
-        message: "Attachment uploaded successfully",
-        severity: "success",
-      });
-      setAttachment(null);
-      setAttachmentDialog({ open: false, row: null });
-      await fetchData();
-    } catch (error: any) {
-      setSnackbar({
-        open: true,
-        message: error.response?.data?.message || "Upload failed",
-        severity: "error",
-      });
-    } finally {
-      setUploading(false);
-    }
   };
 
   const handleOpenDistributionDialog = async (purchase: OPurchae) => {
@@ -555,8 +617,8 @@ const OPurchase = () => {
 
   const columns = useMemo<MRT_ColumnDef<OPurchae>[]>(
     () => [
-      { accessorKey: "id_achat", header: "ID Achat", size: 60 },
-      { accessorKey: "Comment_Achat", header: "Comment", size: 120 },
+      { accessorKey: "id_achat", header: "System ID", size: 60 },
+      { accessorKey: "Comment_Achat", header: "Product Name", size: 120 },
       {
         accessorKey: "Date_Achat",
         header: "Date",
@@ -586,12 +648,14 @@ const OPurchase = () => {
           "",
       },
       {
-        accessorKey: "Brand",
+        id: "Supplier",
         header: "Supplier",
-        size: 120,
-        Cell: ({ row }) =>
-          suppliers.find((s) => s.id_client === row.original.Brand)
-            ?.client_name || "",
+        size: 140,
+        accessorFn: (row) =>
+          suppliers.find((s) => s.id_client === row.Brand)?.client_name || "",
+        filterFn: "includesString",
+        filterVariant: "autocomplete",
+        filterSelectOptions: suppliers.map((s) => s.client_name),
       },
       {
         accessorKey: "DocumentNo",
@@ -633,97 +697,79 @@ const OPurchase = () => {
         size: 140,
         Cell: ({ row }) => (
           <Box sx={{ display: "flex", gap: 1, alignItems: "center" }}>
-            {row.original.attachmentUrl ? (
-              <>
-                <Tooltip title="Download Attachment">
-                  <IconButton
-                    component="a"
-                    href={row.original.attachmentUrl}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    color="success"
-                    size="small"
-                  >
-                    <AttachFileIcon fontSize="small" />
-                  </IconButton>
-                </Tooltip>
-                {/* New: Send for Approval */}
-                <Tooltip title="Send Approval Email">
-                  <IconButton
-                    color="secondary"
-                    size="small"
-                    onClick={async () => {
-                      const email = "hasni.zied@gmail.com";
-                      if (!email) return;
-                      setSendingEmail(true);
+            <Tooltip title="Open Attachments">
+              <IconButton
+                color="primary"
+                onClick={() => handleOpenAttachmentDialog(row.original)}
+                size="small"
+              >
+                <AttachFileIcon fontSize="small" />
+              </IconButton>
+            </Tooltip>
+            <Tooltip title="Send Approval Email">
+              <IconButton
+                color="secondary"
+                size="small"
+                onClick={async () => {
+                  const email = "hasni.zied@gmail.com";
+                  if (!email) return;
+                  setSendingEmail(true);
+                  setEmailProgress(0);
+
+                  // Simulate progress
+                  let progress = 0;
+                  const interval = setInterval(() => {
+                    progress += Math.floor(Math.random() * 10) + 5;
+                    setEmailProgress(progress > 95 ? 95 : progress);
+                  }, 200);
+
+                  try {
+                    await axios.post("/Opurchases/send-approval", {
+                      id_achat: row.original.id_achat,
+                      email,
+                      purchaseInfo: {
+                        Comment_Achat: row.original.Comment_Achat,
+                        Date_Achat: row.original.Date_Achat,
+                        FullWeight: row.original.FullWeight,
+                        NetWeight: row.original.NetWeight,
+                        Supplier:
+                          suppliers.find(
+                            (s) => s.id_client === row.original.Brand
+                          )?.client_name || "",
+                        DocumentNo: row.original.DocumentNo,
+                        Stone_Details: row.original.Stone_Details,
+                        Net_Details: row.original.Net_Details,
+                        //Purity: row.original.Purity,
+                        // PureWt: row.original.PureWt,
+                        MakingStoneRate: row.original.MakingStoneRate,
+                        MakingStoneValue: row.original.MakingStoneValue,
+                        MetalValue: row.original.MetalValue,
+                      },
+                    });
+                    setSnackbar({
+                      open: true,
+                      message: "Approval email sent!",
+                      severity: "success",
+                    });
+                  } catch (err) {
+                    setSnackbar({
+                      open: true,
+                      message: "Failed to send email",
+                      severity: "error",
+                    });
+                  } finally {
+                    clearInterval(interval);
+                    setEmailProgress(100);
+                    setTimeout(() => {
+                      setSendingEmail(false);
                       setEmailProgress(0);
-
-                      // Simulate progress
-                      let progress = 0;
-                      const interval = setInterval(() => {
-                        progress += Math.floor(Math.random() * 10) + 5;
-                        setEmailProgress(progress > 95 ? 95 : progress);
-                      }, 200);
-
-                      try {
-                        await axios.post("/Opurchases/send-approval", {
-                          id_achat: row.original.id_achat,
-                          email,
-                          purchaseInfo: {
-                            Comment_Achat: row.original.Comment_Achat,
-                            Date_Achat: row.original.Date_Achat,
-                            FullWeight: row.original.FullWeight,
-                            NetWeight: row.original.NetWeight,
-                            Supplier:
-                              suppliers.find(
-                                (s) => s.id_client === row.original.Brand
-                              )?.client_name || "",
-                            DocumentNo: row.original.DocumentNo,
-                            Stone_Details: row.original.Stone_Details,
-                            Net_Details: row.original.Net_Details,
-                            //Purity: row.original.Purity,
-                            // PureWt: row.original.PureWt,
-                            MakingStoneRate: row.original.MakingStoneRate,
-                            MakingStoneValue: row.original.MakingStoneValue,
-                            MetalValue: row.original.MetalValue,
-                          },
-                        });
-                        setSnackbar({
-                          open: true,
-                          message: "Approval email sent!",
-                          severity: "success",
-                        });
-                      } catch (err) {
-                        setSnackbar({
-                          open: true,
-                          message: "Failed to send email",
-                          severity: "error",
-                        });
-                      } finally {
-                        clearInterval(interval);
-                        setEmailProgress(100);
-                        setTimeout(() => {
-                          setSendingEmail(false);
-                          setEmailProgress(0);
-                        }, 500);
-                      }
-                    }}
-                  >
-                    <EmailIcon fontSize="small" />
-                  </IconButton>
-                </Tooltip>
-              </>
-            ) : (
-              <Tooltip title="Attach File">
-                <IconButton
-                  color="primary"
-                  onClick={() => handleOpenAttachmentDialog(row.original)}
-                  size="small"
-                >
-                  <CloudUploadIcon fontSize="small" />
-                </IconButton>
-              </Tooltip>
-            )}
+                    }, 500);
+                  }
+                }}
+              >
+                <EmailIcon fontSize="small" />
+              </IconButton>
+            </Tooltip>
           </Box>
         ),
       },
@@ -783,6 +829,18 @@ const OPurchase = () => {
         Cell: ({ cell }) => formatAmount(cell.getValue<number>()),
       },
       {
+        accessorKey: "LossExpesenes",
+        header: "Loss Expenses (%)",
+        size: 100,
+        Cell: ({ cell }) => formatLoss(cell.getValue<number>()),
+      },
+      {
+        accessorKey: "IndirectCost",
+        header: "Indirect Cost",
+        size: 100,
+        Cell: ({ cell }) => formatAmount(cell.getValue<number>()),
+      },
+      {
         accessorKey: "cost_g",
         header: "Cost (g)",
         size: 100,
@@ -815,15 +873,71 @@ const OPurchase = () => {
         ),
       },
     ],
-    [suppliers]
+    [suppliers, handleEdit, handleDelete]
   );
+
+  // Compute rows missing costs or having LossExpesenes == 2
+  const missingCostRows = useMemo(() =>
+    data.filter((r) =>
+      r.MakingCharge == null ||
+      r.ShippingCharge == null ||
+      r.TravelExpesenes == null ||
+      r.LossExpesenes == null ||
+      r.LossExpesenes === 2
+    ),
+    [data]);
+
+  const brandsWithCompleteCosts = useMemo(() => {
+    const goodBrandIds = new Set<number>();
+    data.forEach((r) => {
+      if (
+        r.Brand != null &&
+        r.MakingCharge != null &&
+        r.ShippingCharge != null &&
+        r.TravelExpesenes != null &&
+        r.LossExpesenes != null &&
+        r.LossExpesenes !== 2
+      ) {
+        goodBrandIds.add(r.Brand as number);
+      }
+    });
+    const names = suppliers
+      .filter((s) => goodBrandIds.has(s.id_client))
+      .map((s) => s.client_name);
+    return Array.from(new Set(names)).sort();
+  }, [data, suppliers]);
+
+  const brandsWithIncompleteCosts = useMemo(() => {
+    const badBrandIds = new Set<number>();
+    data.forEach((r) => {
+      if (
+        r.Brand != null && (
+          r.MakingCharge == null ||
+          r.ShippingCharge == null ||
+          r.TravelExpesenes == null ||
+          r.LossExpesenes == null ||
+          r.LossExpesenes === 2
+        )
+      ) {
+        badBrandIds.add(r.Brand as number);
+      }
+    });
+    const names = suppliers
+      .filter((s) => badBrandIds.has(s.id_client))
+      .map((s) => s.client_name);
+    return Array.from(new Set(names)).sort();
+  }, [data, suppliers]);
 
   const table = useMaterialReactTable({
     columns,
     data,
     state: { isLoading: loading, density: "compact" },
     enableDensityToggle: true,
+    enableColumnFilters: true,
+    enableGlobalFilter: true,
     initialState: {
+      showColumnFilters: true,
+      showGlobalFilter: true,
       columnVisibility: {
         MetalValue: false,
         Stone_Details: false,
@@ -836,6 +950,8 @@ const OPurchase = () => {
         MakingCharge: false,
         ShippingCharge: false,
         TravelExpesenes: false,
+        IndirectCost: false,
+        LossExpesenes: false,
         cost_g: false,
         Rate: false,
         cost_g_LYD: false,
@@ -850,6 +966,8 @@ const OPurchase = () => {
       MakingCharge: row.MakingCharge ?? 0,
       ShippingCharge: row.ShippingCharge ?? 0,
       TravelExpesenes: row.TravelExpesenes ?? 0,
+      LossExpesenes: row.LossExpesenes ?? 0,
+      IndirectCost: row.IndirectCost ?? 0,
       cost_g: row.cost_g ?? 0,
       Rate: row.Rate ?? 0,
       cost_g_LYD: row.cost_g_LYD ?? 0,
@@ -903,6 +1021,20 @@ const OPurchase = () => {
         <Box sx={{ display: "flex", gap: 2 }}>
           <Button
             variant="outlined"
+            color="inherit"
+            onClick={handleOpenBrandCost}
+            sx={{
+              borderRadius: 3,
+              textTransform: "none",
+              fontWeight: "bold",
+              px: 3,
+              py: 1,
+            }}
+          >
+            Edit Cost by Brand
+          </Button>
+          <Button
+            variant="outlined"
             color="secondary"
             startIcon={<ImportExportIcon />}
             onClick={handleExportExcel}
@@ -932,6 +1064,41 @@ const OPurchase = () => {
             New Purchase
           </Button>
         </Box>
+      </Box>
+
+
+
+      <Box sx={{ mb: 2, display: 'flex', gap: 1, flexWrap: 'wrap', alignItems: 'center' }}>
+        {brandsWithCompleteCosts.map((name) => (
+          <Box
+            key={`ok-${name}`}
+            sx={{
+              px: 1.25,
+              py: 0.5,
+              borderRadius: 2,
+              bgcolor: 'rgba(76,175,80,0.08)',
+              border: '1px solid rgba(76,175,80,0.3)',
+              fontSize: 12,
+            }}
+          >
+            {name}
+          </Box>
+        ))}
+        {brandsWithIncompleteCosts.map((name) => (
+          <Box
+            key={`bad-${name}`}
+            sx={{
+              px: 1.25,
+              py: 0.5,
+              borderRadius: 2,
+              bgcolor: 'rgba(244,67,54,0.08)',
+              border: '1px solid rgba(244,67,54,0.3)',
+              fontSize: 12,
+            }}
+          >
+            {name}
+          </Box>
+        ))}
       </Box>
 
       <MaterialReactTable table={table} />
@@ -1023,10 +1190,10 @@ const OPurchase = () => {
                   ...prev!,
                   supplier: newValue
                     ? {
-                        id_client: newValue.id_client,
-                        client_name: newValue.client_name,
-                        TYPE_SUPPLIER: newValue.TYPE_SUPPLIER,
-                      }
+                      id_client: newValue.id_client,
+                      client_name: newValue.client_name,
+                      TYPE_SUPPLIER: newValue.TYPE_SUPPLIER,
+                    }
                     : null,
                   Brand: newValue ? newValue.id_client : undefined,
                 }));
@@ -1144,48 +1311,13 @@ const OPurchase = () => {
         </DialogActions>
       </Dialog>
 
-      {/* Attachment Dialog */}
-      <Dialog
+      {/* Attachment Dialog (replaced by AttchOPFiles component) */}
+      <AttchOPFiles
         open={attachmentDialog.open}
         onClose={handleCloseAttachmentDialog}
-      >
-        <DialogTitle>Upload Attachment</DialogTitle>
-        <DialogContent>
-          <Box sx={{ display: "flex", flexDirection: "column", gap: 2, mt: 1 }}>
-            <Button
-              variant="outlined"
-              component="label"
-              startIcon={<CloudUploadIcon />}
-              color="primary"
-              sx={{ textTransform: "none", fontWeight: "bold" }}
-              disabled={uploading}
-            >
-              {attachment ? attachment.name : "Choose File"}
-              <input type="file" hidden onChange={handleAttachmentChange} />
-            </Button>
-            {attachment && (
-              <Button
-                variant="contained"
-                color="success"
-                onClick={handleUploadAttachment}
-                disabled={uploading}
-                sx={{ textTransform: "none", fontWeight: "bold" }}
-              >
-                {uploading ? "Uploading..." : "Send"}
-              </Button>
-            )}
-          </Box>
-        </DialogContent>
-        <DialogActions>
-          <Button
-            onClick={handleCloseAttachmentDialog}
-            color="secondary"
-            disabled={uploading}
-          >
-            Close
-          </Button>
-        </DialogActions>
-      </Dialog>
+        purchase={attachmentDialog.row}
+        onUploaded={fetchData}
+      />
 
       <Dialog
         open={distributionDialog.open}
@@ -1218,10 +1350,10 @@ const OPurchase = () => {
               <b>Difference:</b>{" "}
               {formatAmount(
                 (distributionDialog.purchase?.NetWeight ?? 0) -
-                  distributions.reduce(
-                    (sum, d) => sum + (Number(d.Weight) || 0),
-                    0
-                  )
+                distributions.reduce(
+                  (sum, d) => sum + (Number(d.Weight) || 0),
+                  0
+                )
               )}{" "}
               g
             </Typography>
@@ -1299,101 +1431,101 @@ const OPurchase = () => {
                   0
                 ) >
                 0 && (
-                <Button
-                  variant="contained"
-                  color="primary"
-                  onClick={async () => {
-                    if (!distributionDialog.purchase) return;
-                    // Validation for required fields
-                    const errors = {
-                      ps: !newDistribution.ps,
-                      Weight: !newDistribution.Weight,
-                      distributionDate: !newDistribution.distributionDate,
-                    };
-                    setDistributionErrors(errors);
+                  <Button
+                    variant="contained"
+                    color="primary"
+                    onClick={async () => {
+                      if (!distributionDialog.purchase) return;
+                      // Validation for required fields
+                      const errors = {
+                        ps: !newDistribution.ps,
+                        Weight: !newDistribution.Weight,
+                        distributionDate: !newDistribution.distributionDate,
+                      };
+                      setDistributionErrors(errors);
 
-                    if (errors.ps || errors.Weight || errors.distributionDate) {
-                      setSnackbar({
-                        open: true,
-                        message:
-                          "All fields (Point of Sale, Weight, Date) are required.",
-                        severity: "warning",
-                      });
-                      return;
-                    }
+                      if (errors.ps || errors.Weight || errors.distributionDate) {
+                        setSnackbar({
+                          open: true,
+                          message:
+                            "All fields (Point of Sale, Weight, Date) are required.",
+                          severity: "warning",
+                        });
+                        return;
+                      }
 
-                    // Prevent distributing more than Net Weight
-                    const distributed = distributions.reduce(
-                      (sum, d) => sum + (Number(d.Weight) || 0),
-                      0
-                    );
-                    const netWeight =
-                      distributionDialog.purchase?.NetWeight ?? 0;
-                    if (
-                      distributed + Number(newDistribution.Weight) >
-                      netWeight
-                    ) {
-                      setSnackbar({
-                        open: true,
-                        message: "Cannot distribute more than the Net Weight.",
-                        severity: "error",
-                      });
-                      setDistributionErrors((prev) => ({
-                        ...prev,
-                        Weight: true,
-                      }));
-                      return;
-                    }
+                      // Prevent distributing more than Net Weight
+                      const distributed = distributions.reduce(
+                        (sum, d) => sum + (Number(d.Weight) || 0),
+                        0
+                      );
+                      const netWeight =
+                        distributionDialog.purchase?.NetWeight ?? 0;
+                      if (
+                        distributed + Number(newDistribution.Weight) >
+                        netWeight
+                      ) {
+                        setSnackbar({
+                          open: true,
+                          message: "Cannot distribute more than the Net Weight.",
+                          severity: "error",
+                        });
+                        setDistributionErrors((prev) => ({
+                          ...prev,
+                          Weight: true,
+                        }));
+                        return;
+                      }
 
-                    const token = localStorage.getItem("token");
-                    try {
-                      await axios.post(
-                        "/Dpurchases/Add",
-                        {
-                          ...newDistribution,
-                          usr: Cuser,
-                          PurchaseID: distributionDialog.purchase.id_achat,
-                        },
-                        {
+                      const token = localStorage.getItem("token");
+                      try {
+                        await axios.post(
+                          "/Dpurchases/Add",
+                          {
+                            ...newDistribution,
+                            usr: Cuser,
+                            PurchaseID: distributionDialog.purchase.id_achat,
+                          },
+                          {
+                            headers: { Authorization: `Bearer ${token}` },
+                          }
+                        );
+                        setSnackbar({
+                          open: true,
+                          message: "Distribution added",
+                          severity: "success",
+                        });
+                        // Refresh list
+                        const res = await axios.get(`/Dpurchases/all`, {
                           headers: { Authorization: `Bearer ${token}` },
-                        }
-                      );
-                      setSnackbar({
-                        open: true,
-                        message: "Distribution added",
-                        severity: "success",
-                      });
-                      // Refresh list
-                      const res = await axios.get(`/Dpurchases/all`, {
-                        headers: { Authorization: `Bearer ${token}` },
-                      });
-                      setDistributions(
-                        res.data.filter(
-                          (d: any) =>
-                            d.PurchaseID ===
+                        });
+                        setDistributions(
+                          res.data.filter(
+                            (d: any) =>
+                              d.PurchaseID ===
                               distributionDialog.purchase!.id_achat &&
-                            d.PurchaseType === "Gold Purchase"
-                        )
-                      );
-                      setNewDistribution({
-                        ps: 0,
-                        Weight: 0,
-                        distributionDate: new Date().toISOString().slice(0, 10),
-                        PurchaseType: "Gold Purchase",
-                      });
-                      setDistributionErrors({});
-                    } catch {
-                      setSnackbar({
-                        open: true,
-                        message: "Failed to add distribution",
-                        severity: "error",
-                      });
-                    }
-                  }}
-                >
-                  Add
-                </Button>
-              )}
+                              d.PurchaseType === "Gold Purchase"
+                          )
+                        );
+                        setNewDistribution({
+                          ps: 0,
+                          Weight: 0,
+                          distributionDate: new Date().toISOString().slice(0, 10),
+                          PurchaseType: "Gold Purchase",
+                        });
+                        setDistributionErrors({});
+                      } catch {
+                        setSnackbar({
+                          open: true,
+                          message: "Failed to add distribution",
+                          severity: "error",
+                        });
+                      }
+                    }}
+                  >
+                    Add
+                  </Button>
+                )}
             </Box>
             <Divider />
           </Box>
@@ -1798,6 +1930,76 @@ const OPurchase = () => {
         </Box>
       </Backdrop>
 
+      {/* Edit Cost by Brand Dialog */}
+      <Dialog
+        open={openBrandCostDialog}
+        onClose={() => setOpenBrandCostDialog(false)}
+        maxWidth="sm"
+        fullWidth
+      >
+        <DialogTitle>
+          Edit Cost by Brand
+          <Divider sx={{ mb: 0 }} />
+        </DialogTitle>
+        <DialogContent>
+          <Box sx={{ mt: 2, display: "flex", flexDirection: "column", gap: 2 }}>
+            <Autocomplete
+              options={suppliers}
+              getOptionLabel={(o) => o.client_name}
+              value={selectedBrand}
+              onChange={(_e, v) => setSelectedBrand(v)}
+              renderInput={(params) => (
+                <TextField {...params} label="Gold Brand" placeholder="Select brand" />
+              )}
+            />
+            <Box sx={{ display: "grid", gridTemplateColumns: { xs: "1fr", sm: "1fr 1fr" }, gap: 2 }}>
+              <TextField
+                label="Making Charge (USD/g)"
+                type="number"
+                value={brandCosts.MakingCharge}
+                onChange={(e) => setBrandCosts((c) => ({ ...c, MakingCharge: Number(e.target.value) }))}
+              />
+              <TextField
+                label="Shipping Charge (USD/g)"
+                type="number"
+                value={brandCosts.ShippingCharge}
+                onChange={(e) => setBrandCosts((c) => ({ ...c, ShippingCharge: Number(e.target.value) }))}
+              />
+              <TextField
+                label="Travel Expenses (USD/g)"
+                type="number"
+                value={brandCosts.TravelExpesenes}
+                onChange={(e) => setBrandCosts((c) => ({ ...c, TravelExpesenes: Number(e.target.value) }))}
+              />
+              <TextField
+                label="Loss Expenses (%)"
+                type="number"
+                value={brandCosts.LossExpesenes?.toFixed(3)}
+                onChange={(e) => setBrandCosts((c) => ({ ...c, LossExpesenes: e.target.value === '' ? 0 : parseFloat(e.target.value) }))}
+                inputProps={{ step: "0.001" }}
+              />
+              <TextField
+                label="Indirect Cost (%)"
+                type="number"
+                value={brandCosts.IndirectCost}
+                onChange={(e) => setBrandCosts((c) => ({ ...c, IndirectCost: Number(e.target.value) }))}
+              />
+            </Box>
+            <Typography variant="caption" color="text.secondary">
+              Note: Updates apply to all purchases for the selected brand.
+            </Typography>
+          </Box>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setOpenBrandCostDialog(false)} color="inherit" variant="outlined">
+            Cancel
+          </Button>
+          <Button onClick={handleSaveBrandCosts} color="primary" variant="contained">
+            Save
+          </Button>
+        </DialogActions>
+      </Dialog>
+
       {/* 6. Add the dialog component in the return block (before export default) */}
       <Dialog
         open={openJournalDialog}
@@ -1869,6 +2071,31 @@ const OPurchase = () => {
                 fullWidth
               />
               <TextField
+                label="Loss Expenses (%)"
+                type="number"
+                value={journalFields.LossExpesenes?.toFixed(3) ?? "0.000"}
+                onChange={(e) =>
+                  setJournalFields((f) => ({
+                    ...f,
+                    LossExpesenes: e.target.value === '' ? 0 : parseFloat(e.target.value),
+                  }))
+                }
+                inputProps={{ step: "0.001" }}
+                fullWidth
+              />
+              <TextField
+                label="Indirect Cost (%)"
+                type="number"
+                value={journalFields.IndirectCost ?? 0}
+                onChange={(e) =>
+                  setJournalFields((f) => ({
+                    ...f,
+                    IndirectCost: Number(e.target.value),
+                  }))
+                }
+                fullWidth
+              />
+              <TextField
                 label="Cost (g) [USD]"
                 type="number"
                 value={journalFields.cost_g}
@@ -1903,18 +2130,7 @@ const OPurchase = () => {
                 InputProps={{ readOnly: true }}
                 fullWidth
               />
-              <TextField
-                label="Ounce Cost [USD] OZ"
-                type="number"
-                value={journalFields.ounceCost || ""}
-                onChange={(e) =>
-                  setJournalFields((f) => ({
-                    ...f,
-                    ounceCost: Number(e.target.value),
-                  }))
-                }
-                fullWidth
-              />
+             
             </Box>
 
             <Box
@@ -1979,9 +2195,9 @@ const OPurchase = () => {
                 Grand Total (USD):{" "}
                 {formatAmount(
                   (journalRow?.NetWeight ?? 0) * (journalFields.cost_g || 0) +
-                    journalFields.MakingCharge +
-                    journalFields.ShippingCharge +
-                    journalFields.TravelExpesenes
+                  journalFields.MakingCharge +
+                  journalFields.ShippingCharge +
+                  journalFields.TravelExpesenes
                 )}
               </Typography>
               <Typography
@@ -1991,11 +2207,11 @@ const OPurchase = () => {
                 Grand Total (LYD):{" "}
                 {formatAmount(
                   (journalRow?.NetWeight ?? 0) *
-                    (journalFields.cost_g_LYD || 0) +
-                    (journalFields.MakingCharge +
-                      journalFields.ShippingCharge +
-                      journalFields.TravelExpesenes) *
-                      (journalFields.Rate || 0)
+                  (journalFields.cost_g_LYD || 0) +
+                  (journalFields.MakingCharge +
+                    journalFields.ShippingCharge +
+                    journalFields.TravelExpesenes) *
+                  (journalFields.Rate || 0)
                 )}
               </Typography>
 

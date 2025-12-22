@@ -108,11 +108,15 @@ async function fetchImageListForExport(
   const token = localStorage.getItem("token");
   const API_BASEImage = "/images";
   const t = supplierType?.toLowerCase() || "";
-  let typed: "watch" | "diamond" | undefined;
+  let typed: "watch" | "diamond" | "gold" | undefined;
   if (t.includes("watch")) typed = "watch";
   else if (t.includes("diamond")) typed = "diamond";
+  else if (t.includes("gold")) typed = "gold";
   const endpoints = typed
-    ? [`${API_BASEImage}/list/${typed}/${id}`, `${API_BASEImage}/list/${id}`]
+    ? [
+      `${API_BASEImage}/list/${typed}/${id}`,
+      `${API_BASEImage}/list/${id}`
+    ]
     : [`${API_BASEImage}/list/${id}`];
   for (const url of endpoints) {
     try {
@@ -181,8 +185,8 @@ const SalesReportsTable = ({
 }) => {
   // Fetch users on mount
 
-  const [type, setType] = useState<"all" | "gold" | "diamond" | "watch">(
-    initialType || "all"
+  const [selectedTypes, setSelectedTypes] = useState<string[]>(
+    initialType ? [initialType] : ["all"]
   );
   const [data, setData] = useState<any[]>([]);
   const [loading, setLoading] = useState(false);
@@ -211,7 +215,7 @@ const SalesReportsTable = ({
   const [paymentStatus, setPaymentStatus] = useState<
     "all" | "paid" | "unpaid" | "partial"
   >("all");
-  const [productTypes, setProductTypes] = useState<string[]>([]); // Gold, Diamond, Watch
+
   const navigate = useNavigate();
 
   const apiUrlusers = `/users`;
@@ -224,31 +228,11 @@ const SalesReportsTable = ({
       });
       setUsers(res.data);
     } catch (error) {
-      console.error("Error fetching Users:", error);
+
     } finally {
       // no-op
     }
   };
-
-  // Navigate to Customer Profile from a row
-  const openCustomerProfile = React.useCallback((row: any) => {
-    let id: number | null = null;
-    try {
-      id = row?.Client?.id_client || row?.Client?.Id_client || row?.client || null;
-      const name = row?.Client?.client_name || "";
-      const phone = row?.Client?.tel_client || "";
-      if (id) localStorage.setItem("customerFocusId", String(id));
-      if (name) localStorage.setItem("customerFocusName", String(name));
-      if (phone) localStorage.setItem("customerFocusPhone", String(phone));
-    } catch {}
-    // Prefer encrypted customer route to carry the id in URL
-    if (id) {
-      const path = buildEncryptedClientPath(Number(id));
-      navigate(path);
-    } else {
-      navigate("/invoice/customerProfile");
-    }
-  }, [navigate]);
 
   useEffect(() => {
     fetchUsers();
@@ -281,6 +265,7 @@ const SalesReportsTable = ({
   }, []);
 
   const API_BASEImage = "/images";
+  const apiUrlWatches = "/WOpurchases";
   // Raw URL lists per picint/id_achat
   const [imageUrls, setImageUrls] = useState<Record<string, string[]>>({});
   // Blob/object URLs per picint/id_achat (used for display/export)
@@ -289,6 +274,8 @@ const SalesReportsTable = ({
   );
   // Keep a flat list of created object URLs so we can revoke them on unmount only
   const createdBlobUrlsRef = React.useRef<string[]>([]);
+  // Watch details (OriginalAchatWatches) keyed by invoice picint
+  const [watchDetailsMap, setWatchDetailsMap] = useState<Record<string, any>>({});
   // Selected Point-of-Sale filter (default to user's ps from localStorage/user if available)
   const getInitialPs = () => {
     // Return ps as a string id when possible, or 'all'
@@ -372,11 +359,16 @@ const SalesReportsTable = ({
     if (imageUrls[id] !== undefined) return; // already fetched
     const token = localStorage.getItem("token");
     const t = supplierType?.toLowerCase() || "";
-    let typed: "watch" | "diamond" | undefined;
+    let typed: "watch" | "diamond" | "gold" | undefined;
     if (t.includes("watch")) typed = "watch";
     else if (t.includes("diamond")) typed = "diamond";
+    else if (t.includes("gold")) typed = "gold";
     const endpoints = typed
-      ? [`${API_BASEImage}/list/${typed}/${id}`, `${API_BASEImage}/list/${id}`]
+      ? [
+        `${API_BASEImage}/list/${typed}/${id}`,
+        // legacy fallback (watch default)
+        `${API_BASEImage}/list/${id}`
+      ]
       : [`${API_BASEImage}/list/${id}`];
     for (const url of endpoints) {
       try {
@@ -387,33 +379,37 @@ const SalesReportsTable = ({
           const list = res.data
             .map((u: string) => {
               if (typeof u !== "string") return "";
-              // Always force https for system.gaja.ly to avoid redirect on preflight
-              if (
-                u.startsWith("https://system.gaja.ly") ||
-                u.startsWith("http://system.gaja.ly")
-              ) {
-                u =
-                  "https://system.gaja.ly" +
-                  u.substring(
-                    u.indexOf("system.gaja.ly") + "system.gaja.ly".length
-                  );
+              // Force https for system.gaja.ly (handles http or https variants)
+              if (u.includes("system.gaja.ly")) {
+                try {
+                  const afterHost = u.substring(u.indexOf("system.gaja.ly") + "system.gaja.ly".length);
+                  u = `https://system.gaja.ly${afterHost}`;
+                } catch { /* ignore */ }
               }
-              // If page is https and URL is plain http (any host), upgrade
-              if (
-                window?.location?.protocol === "https:" &&
-                u.startsWith("http://")
-              ) {
+              // Upgrade to https if current page is https
+              if (window?.location?.protocol === "https:" && u.startsWith("http://")) {
                 try {
                   const after = u.substring("http://".length);
                   u = "https://" + after;
-                } catch {
-                  /* ignore */
-                }
+                } catch { /* ignore */ }
               }
-              // Append token as query param to avoid Authorization header (which triggers preflight + redirect)
+              // If watch type, rewrite /images/:id/:filename -> /images/watch/:id/:filename
+              if (typed === 'watch') {
+                try {
+                  const obj = new URL(u, window.location.origin);
+                  const parts = obj.pathname.split('/');
+                  // Expect ['', 'images', id, filename]
+                  if (parts.length >= 4 && parts[1] === 'images' && /^\d+$/.test(parts[2]) && parts[3]) {
+                    // Only rewrite if not already /images/watch
+                    if (parts[2] !== 'watch') {
+                      obj.pathname = ['', 'images', 'watch', parts[2], ...parts.slice(3)].join('/');
+                      u = obj.toString();
+                    }
+                  }
+                } catch { /* ignore */ }
+              }
               if (token) {
                 const urlObj = new URL(u, window.location.origin);
-                // Remove existing token param to prevent duplication
                 urlObj.searchParams.delete("token");
                 urlObj.searchParams.append("token", token);
                 u = urlObj.toString();
@@ -436,16 +432,18 @@ const SalesReportsTable = ({
     const blobUrls: string[] = [];
     for (const url of urls) {
       try {
-        const imgUrl = url.startsWith("http") ? url : `${API_BASEImage}/${url}`; // url already has ?token
+        const imgUrl =
+          url.startsWith("http") || url.startsWith("/")
+            ? url
+            : `${API_BASEImage}/${url.replace(/^\/+/, "")}`; // url already has ?token
         const resp = await fetch(imgUrl, { method: "GET" });
         if (!resp.ok) continue;
         const blob = await resp.blob();
         const blobUrl = URL.createObjectURL(blob);
         blobUrls.push(blobUrl);
-        // track created object URLs so we can revoke them on unmount
         createdBlobUrlsRef.current.push(blobUrl);
       } catch {
-        // fallback: skip or push empty
+        // skip if failed
       }
     }
     setImageBlobUrls((prev) => ({ ...prev, [picint]: blobUrls }));
@@ -477,30 +475,171 @@ const SalesReportsTable = ({
   }, []);
 
   useEffect(() => {
-    setLoading(true);
-    const token = localStorage.getItem("token");
-    // When selectedPs === 'all' some backend endpoints expect a ps value (or the user's ps)
-    // to avoid unintentionally filtering everything. Use the user's stored ps as a fallback.
-    const userPsFallback = localStorage.getItem("ps") || undefined;
-    const psParam =
-      selectedPs && selectedPs !== "all" ? selectedPs : userPsFallback;
+    const fetchData = async () => {
+      setLoading(true);
+      const token = localStorage.getItem("token");
+      const typeFilters = (selectedTypes || []).filter((t) => t !== "all");
 
-    axios
-      .get(`/invoices/allDetailsP`, {
-        headers: { Authorization: `Bearer ${token}` },
-        params: {
-          ...(psParam ? { ps: psParam } : {}),
-          ...(type !== "all" ? { type } : {}),
-          from: periodFrom || undefined,
-          to: periodTo || undefined,
-        },
-      })
-      .then((res) => {
-        setData(res.data);
-      })
-      .catch(() => setData([]))
-      .finally(() => setLoading(false));
-  }, [type, periodFrom, periodTo, selectedPs, chiraRefreshFlag, invoiceRefreshFlag]);
+      // If "All" selected, fetch per point-of-sale and merge results since backend may not support global listing.
+      if (selectedPs === "all") {
+        try {
+          // If psOptions not yet loaded, wait until they are.
+          if (!psOptions || psOptions.length === 0) {
+            setData([]);
+            return;
+          }
+          const requests: Promise<any>[] = [];
+          psOptions.forEach((p) => {
+            if (typeFilters.length > 1) {
+              typeFilters.forEach((t) => {
+                requests.push(
+                  axios.get(`/invoices/allDetailsP`, {
+                    headers: { Authorization: token ? `Bearer ${token}` : undefined },
+                    params: {
+                      ps: p.Id_point,
+                      type: t,
+                      from: periodFrom || undefined,
+                      to: periodTo || undefined,
+                    },
+                  })
+                );
+              });
+            } else {
+              const singleType = typeFilters[0];
+              requests.push(
+                axios.get(`/invoices/allDetailsP`, {
+                  headers: { Authorization: token ? `Bearer ${token}` : undefined },
+                  params: {
+                    ps: p.Id_point,
+                    ...(singleType ? { type: singleType } : {}),
+                    from: periodFrom || undefined,
+                    to: periodTo || undefined,
+                  },
+                })
+              );
+            }
+          });
+          const results = await Promise.allSettled(requests);
+          const merged: any[] = [];
+          results.forEach((r) => {
+            if (r.status === "fulfilled" && Array.isArray(r.value.data)) {
+              merged.push(...r.value.data);
+            }
+          });
+          // Deduplicate by invoice number or picint
+          const seen = new Set<string>();
+          const dedup = merged.filter((row) => {
+            const key = String(row.num_fact || row.id_fact || row.picint || Math.random());
+            if (seen.has(key)) return false;
+            seen.add(key);
+            return true;
+          });
+          setData(dedup);
+        } catch (err) {
+
+          setData([]);
+        } finally {
+          setLoading(false);
+        }
+        return;
+      }
+
+      // Single PS (or undefined) fetch
+      try {
+        const psParam = selectedPs && selectedPs !== "all" ? selectedPs : undefined;
+        if (typeFilters.length > 1) {
+          const reqs = typeFilters.map((t) =>
+            axios.get(`/invoices/allDetailsP`, {
+              headers: { Authorization: token ? `Bearer ${token}` : undefined },
+              params: {
+                ...(psParam ? { ps: psParam } : {}),
+                type: t,
+                from: periodFrom || undefined,
+                to: periodTo || undefined,
+              },
+            })
+          );
+          const results = await Promise.allSettled(reqs);
+          const merged: any[] = [];
+          results.forEach((r) => {
+            if (r.status === "fulfilled" && Array.isArray(r.value.data)) {
+              merged.push(...r.value.data);
+            }
+          });
+          const seen = new Set<string>();
+          const dedup = merged.filter((row) => {
+            const key = String(row.num_fact || row.id_fact || row.picint || Math.random());
+            if (seen.has(key)) return false;
+            seen.add(key);
+            return true;
+          });
+          setData(dedup);
+        } else {
+          const singleType = typeFilters[0];
+          const res = await axios.get(`/invoices/allDetailsP`, {
+            headers: { Authorization: token ? `Bearer ${token}` : undefined },
+            params: {
+              ...(psParam ? { ps: psParam } : {}),
+              ...(singleType ? { type: singleType } : {}),
+              from: periodFrom || undefined,
+              to: periodTo || undefined,
+            },
+          });
+          setData(res.data);
+        }
+      } catch (err) {
+        setData([]);
+      } finally {
+        setLoading(false);
+      }
+    };
+    fetchData();
+  }, [selectedTypes, periodFrom, periodTo, selectedPs, chiraRefreshFlag, invoiceRefreshFlag, psOptions]);
+
+  // Fetch watch details (OriginalAchatWatches) for watch invoices using invoice picint
+  useEffect(() => {
+    const fetchWatchDetails = async () => {
+      const token = localStorage.getItem("token");
+      if (!token) return;
+
+      // Only consider invoices where supplier type is watch
+      const watchRows = (data || []).filter((row: any) => {
+        const t = String(row?.ACHATs?.[0]?.Fournisseur?.TYPE_SUPPLIER || "").toLowerCase();
+        return t.includes("watch");
+      });
+
+      const ids = Array.from(
+        new Set(
+          watchRows
+            .map((row: any) => row.picint)
+            .filter((id: any) => id && watchDetailsMap[String(id)] === undefined)
+        )
+      );
+      if (ids.length === 0) return;
+
+      const next: Record<string, any> = {};
+      await Promise.all(
+        ids.map(async (id: number) => {
+          try {
+            const res = await axios.get(`${apiUrlWatches}/getitem/${id}`, {
+              headers: { Authorization: `Bearer ${token}` },
+            });
+            next[String(id)] = Array.isArray(res.data) ? res.data[0] : res.data;
+          } catch {
+            next[String(id)] = null;
+          }
+        })
+      );
+      if (Object.keys(next).length > 0) {
+        setWatchDetailsMap((prev) => ({ ...prev, ...next }));
+      }
+    };
+
+    if (data && data.length > 0) {
+      fetchWatchDetails();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [data, watchDetailsMap]);
 
   // When filter criteria change (not internal refresh flags), clear cached images so they reload for the new dataset
   useEffect(() => {
@@ -508,52 +647,52 @@ const SalesReportsTable = ({
     setImageUrls({});
     setImageBlobUrls({});
     setPageIndex(0);
-  }, [type, periodFrom, periodTo, selectedPs]);
+  }, [selectedTypes, periodFrom, periodTo, selectedPs]);
   // Calculate total weight in gram (sum of qty for all rows)
-const totalWeight = data.reduce((sum, row) => {
-  const achats = row.ACHATs || [];
-  if (achats.length > 0) {
-    const achat = achats[0];
-    // Only sum qty if TYPE_SUPPLIER contains 'gold'
-    const typeSupplier = achat.Fournisseur?.TYPE_SUPPLIER || "";
-    if (typeSupplier.toLowerCase().includes("gold")) {
-      const qty = Number(achat.qty);
-      if (!isNaN(qty)) return sum + qty;
-    }
-  }
-  return sum;
-}, 0);
-
-// Calculate total invoice amounts by type (sum max per invoice)
-function getMaxTotalByType(typeStr: string) {
-  // Map from num_fact to max total_remise_final for that invoice and type
-  const invoiceMap = new Map<string, number>();
-  data.forEach((row: any) => {
+  const totalWeight = data.reduce((sum, row) => {
     const achats = row.ACHATs || [];
-    if (achats.length === 0) return;
-    const typeSupplier = achats[0]?.Fournisseur?.TYPE_SUPPLIER || "";
-    if (!String(typeSupplier).toLowerCase().includes(typeStr)) return;
-    const numFact = row.num_fact;
-    let val: number = Number(row.total_remise_final) || 0;
-    if (row.remise > 0) {
-      val = Number(row.total_remise_final) - Number(row.remise);
-    } else if (row.remise_per > 0) {
-      val = Number(row.total_remise_final) -
-        (Number(row.total_remise_final) * Number(row.remise_per)) / 100;
-    }
-    if (!isNaN(val)) {
-      if (!invoiceMap.has(numFact) || (invoiceMap.get(numFact) as number) < val) {
-        invoiceMap.set(numFact, val);
+    if (achats.length > 0) {
+      const achat = achats[0];
+      // Only sum qty if TYPE_SUPPLIER contains 'gold'
+      const typeSupplier = achat.Fournisseur?.TYPE_SUPPLIER || "";
+      if (typeSupplier.toLowerCase().includes("gold")) {
+        const qty = Number(achat.qty);
+        if (!isNaN(qty)) return sum + qty;
       }
     }
-  });
-  // Sum the max values
-  let sum = 0;
-  Array.from(invoiceMap.values()).forEach((v) => {
-    sum += v;
-  });
-  return sum;
-}
+    return sum;
+  }, 0);
+
+  // Calculate total invoice amounts by type (sum max per invoice)
+  function getMaxTotalByType(typeStr: string) {
+    // Map from num_fact to max total_remise_final for that invoice and type
+    const invoiceMap = new Map<string, number>();
+    data.forEach((row: any) => {
+      const achats = row.ACHATs || [];
+      if (achats.length === 0) return;
+      const typeSupplier = achats[0]?.Fournisseur?.TYPE_SUPPLIER || "";
+      if (!String(typeSupplier).toLowerCase().includes(typeStr)) return;
+      const numFact = row.num_fact;
+      let val: number = Number(row.total_remise_final) || 0;
+      if (row.remise > 0) {
+        val = Number(row.total_remise_final) - Number(row.remise);
+      } else if (row.remise_per > 0) {
+        val = Number(row.total_remise_final) -
+          (Number(row.total_remise_final) * Number(row.remise_per)) / 100;
+      }
+      if (!isNaN(val)) {
+        if (!invoiceMap.has(numFact) || (invoiceMap.get(numFact) as number) < val) {
+          invoiceMap.set(numFact, val);
+        }
+      }
+    });
+    // Sum the max values
+    let sum = 0;
+    Array.from(invoiceMap.values()).forEach((v) => {
+      sum += v;
+    });
+    return sum;
+  }
   const totalGold = getMaxTotalByType("gold");
   const totalDiamond = getMaxTotalByType("diamond");
   const totalWatch = getMaxTotalByType("watch");
@@ -591,11 +730,58 @@ function getMaxTotalByType(typeStr: string) {
       // Extract product details from ACHATs
       const achats: any[] = row.ACHATs || [];
       achats.forEach((achat: any) => {
-        const design = achat.Design_art || "";
-        const code = achat.id_fact || "";
+        // For watch items: use model from OriginalAchatWatches via invoice picint/DistributionPurchase.
+        // For non-watch items: keep existing Design_art/design name.
+        let watch: any = undefined;
+        const dp: any = (achat as any).DistributionPurchase;
+        if (Array.isArray(dp) && dp.length > 0 && typeof dp[0] === "object") {
+          watch = dp[0]?.OriginalAchatWatch;
+        } else if (dp && typeof dp === "object") {
+          watch = dp?.OriginalAchatWatch;
+        }
+        if (!watch && (achat as any).OriginalAchatWatch) {
+          watch = (achat as any).OriginalAchatWatch;
+        }
+
         const typeSupplier = achat.Fournisseur?.TYPE_SUPPLIER || "";
+        const typeLower = String(typeSupplier).toLowerCase();
+
+        // If it's a watch sale, show model (and serial number when available) as product name.
+        // Prefer values from watchDetailsMap (OriginalAchatWatches),
+        // then DistributionPurchase/ACHAT fields. Do NOT fall back to Design_art for watches.
+        let design: string;
+        if (typeLower.includes("watch")) {
+          const invoicePicint = row.picint;
+          const watchDetails =
+            (invoicePicint !== undefined && invoicePicint !== null
+              ? watchDetailsMap[String(invoicePicint)]
+              : undefined) || undefined;
+          const model =
+            (watchDetails?.model as string | undefined) ||
+            (watchDetails?.Model as string | undefined) ||
+            (watch?.model as string | undefined) ||
+            (watch?.Model as string | undefined) ||
+            (achat.Model as string | undefined) ||
+            (achat.model as string | undefined) ||
+            "";
+          const serial =
+            (watchDetails?.serial_number as string | undefined) ||
+            (watch?.serial_number as string | undefined) ||
+            (achat.serial_number as string | undefined) ||
+            "";
+
+          design = serial ? `${model} | SN: ${serial}` : model;
+        } else {
+          // Non-watch (gold/diamond/etc.): keep previous behaviour using Design_art/design
+          design =
+            (achat.Design_art as string | undefined) ||
+            (achat.design as string | undefined) ||
+            "";
+        }
+
+        const code = achat.id_fact || "";
         let weight = "";
-        if (typeSupplier.toLowerCase().includes("gold")) {
+        if (typeLower.includes("gold")) {
           weight = achat.qty?.toString() || "";
         }
         // Prefer achat.picint, then achat.id_achat, then invoice.picint
@@ -619,6 +805,8 @@ function getMaxTotalByType(typeStr: string) {
           picint, // Add picint to product details
           IS_GIFT,
           CODE_EXTERNAL: codeExternal,
+          // Carry invoice-level selling price so downstream views can access it per detail
+          prix_vente_remise: row.prix_vente_remise ?? null,
         });
       });
     });
@@ -793,6 +981,7 @@ function getMaxTotalByType(typeStr: string) {
         row.Utilisateur && row.Utilisateur.name_user
           ? row.Utilisateur.name_user
           : "";
+      const invoiceComment = (row as any).COMMENT ?? "";
       const isChiraFlag = row.is_chira === true || row.is_chira === 1;
       const returnChira = row.return_chira;
       const commentChira = row.comment_chira;
@@ -804,18 +993,18 @@ function getMaxTotalByType(typeStr: string) {
                     <div><b>Time:</b> ${createdStr}</div>
                     <div><b>Point Of Sale:</b> ${row.ps || ""}</div>
                     ${user ? `<div><b>Sold by:</b> ${user}</div>` : ""}
+                    ${invoiceComment ? `<div><b>Comment:</b> ${invoiceComment}</div>` : ""}
                     <div><b>Chira:</b> <span style="color:${isChiraFlag ? "#388e3c" : "#d32f2f"};font-weight:600">${isChiraFlag ? "Yes" : "No"}</span></div>
-                    ${
-                      !isChiraFlag &&
-                      (returnChira || commentChira || usrReceiveChira)
-                        ? `
+                    ${!isChiraFlag &&
+          (returnChira || commentChira || usrReceiveChira)
+          ? `
                         <div style="margin-top:4px;background:#f9fbe7;border-radius:4px;padding:6px 8px">
                             ${returnChira ? `<div><b style='color:#388e3c'>Return Date:</b> ${returnChira}</div>` : ""}
                             ${usrReceiveChira ? `<div><b style='color:#d32f2f'>Return By:</b> ${usrReceiveChira}</div>` : ""}
                             ${commentChira ? `<div><b style='color:#1976d2'>Comment Chira:</b> ${commentChira}</div>` : ""}
                         </div>`
-                        : ""
-                    }
+          : ""
+        }
                 </div>
             `;
 
@@ -824,13 +1013,16 @@ function getMaxTotalByType(typeStr: string) {
       if (row._productDetails && row._productDetails.length > 0) {
         detailsHtml = `<table class='export-product-table'><thead><tr><th>Design | Weight | Code | Type | Price</th></tr></thead><tbody>`;
         row._productDetails.forEach((d: any, idx: number) => {
-          const price = row.prix_vente_remise
-            ? `${row.prix_vente_remise} ${d.typeSupplier?.toLowerCase().includes("gold") ? "LYD" : "USD"}`
-            : "";
+          const priceValue =
+            d.prix_vente_remise ?? row.prix_vente_remise ?? "";
+          const formattedPrice =
+            priceValue !== "" && priceValue !== null && priceValue !== undefined
+              ? `${formatNumber(priceValue)} ${d.typeSupplier?.toLowerCase().includes("gold") ? "LYD" : "USD"}`
+              : "";
           // Include invoice id (id_fact or num_fact) near each product line
           const invoiceId = row.id_fact ?? "";
           const prefix = invoiceId ? `${invoiceId} | ` : "";
-          const lineText = `${prefix}${d.design} | ${d.weight || ""} | ${d.code} | ${d.typeSupplier}${price ? " | " + price : ""}`;
+          const lineText = `${prefix}${d.design} | ${d.weight || ""} | ${d.code} | ${d.typeSupplier}${formattedPrice ? " | " + formattedPrice : ""}`;
           const refLine = String(d.typeSupplier || "")
             .toLowerCase()
             .includes("diamond")
@@ -838,7 +1030,9 @@ function getMaxTotalByType(typeStr: string) {
             : "";
           const picint = d.picint;
           const urls =
-            picint && picintToBase64[picint] ? picintToBase64[picint] : [];
+            picint && picintToBase64[picint]
+              ? picintToBase64[picint]
+              : [];
           const gift =
             d.IS_GIFT === true ? ' <span title="Gift">🎁</span>' : "";
           // Limit to first two images to mirror on-screen table; show +N if more
@@ -959,6 +1153,7 @@ function getMaxTotalByType(typeStr: string) {
 
   // Generate an MHTML document with embedded images (cid) for Excel
   async function generateExportMhtml(): Promise<string> {
+    let typed: "watch" | "diamond" | "gold" | undefined;
     // 1) Collect images as base64
     const parseDataUrl = (
       dataUrl: string
@@ -1083,6 +1278,7 @@ function getMaxTotalByType(typeStr: string) {
         row.Utilisateur && row.Utilisateur.name_user
           ? row.Utilisateur.name_user
           : "";
+      const invoiceComment = (row as any).COMMENT ?? "";
       const isChiraFlag = row.is_chira === true || row.is_chira === 1;
       const returnChira = row.return_chira;
       const commentChira = row.comment_chira;
@@ -1094,18 +1290,18 @@ function getMaxTotalByType(typeStr: string) {
                     <div><b>Time:</b> ${createdStr}</div>
                     <div><b>Point Of Sale:</b> ${row.ps || ""}</div>
                     ${user ? `<div><b>Sold by:</b> ${user}</div>` : ""}
+                    ${invoiceComment ? `<div><b>Comment:</b> ${invoiceComment}</div>` : ""}
                     <div><b>Chira:</b> <span style="color:${isChiraFlag ? "#388e3c" : "#d32f2f"};font-weight:600">${isChiraFlag ? "Yes" : "No"}</span></div>
-                    ${
-                      !isChiraFlag &&
-                      (returnChira || commentChira || usrReceiveChira)
-                        ? `
+                    ${!isChiraFlag &&
+          (returnChira || commentChira || usrReceiveChira)
+          ? `
                         <div style="margin-top:4px;background:#f9fbe7;border-radius:4px;padding:6px 8px">
                             ${returnChira ? `<div><b style='color:#388e3c'>Return Date:</b> ${returnChira}</div>` : ""}
                             ${usrReceiveChira ? `<div><b style='color:#d32f2f'>Return By:</b> ${usrReceiveChira}</div>` : ""}
                             ${commentChira ? `<div><b style='color:#1976d2'>Comment Chira:</b> ${commentChira}</div>` : ""}
                         </div>`
-                        : ""
-                    }
+          : ""
+        }
                 </div>`;
 
       // Build details with cid images
@@ -1113,13 +1309,16 @@ function getMaxTotalByType(typeStr: string) {
       if (row._productDetails && row._productDetails.length > 0) {
         detailsHtml = `<table class='export-product-table'><thead><tr><th>Design | Weight | Code | Type | Price</th></tr></thead><tbody>`;
         row._productDetails.forEach((d: any) => {
-          const price = row.prix_vente_remise
-            ? `${row.prix_vente_remise} ${d.typeSupplier?.toLowerCase().includes("gold") ? "LYD" : "USD"}`
-            : "";
+          const priceValue =
+            d.prix_vente_remise ?? row.prix_vente_remise ?? "";
+          const formattedPrice =
+            priceValue !== "" && priceValue !== null && priceValue !== undefined
+              ? `${formatNumber(priceValue)} ${d.typeSupplier?.toLowerCase().includes("gold") ? "LYD" : "USD"}`
+              : "";
           // Include invoice id (id_fact or num_fact) near each product line for export
           const invoiceId = row.id_fact ?? row.num_fact ?? "";
           const prefix = invoiceId ? `${invoiceId} | ` : "";
-          const lineText = `${prefix}${d.design} | ${d.weight || ""} | ${d.code} | ${d.typeSupplier}${price ? " | " + price : ""}`;
+          const lineText = `${prefix}${d.design} | ${d.weight || ""} | ${d.code} | ${d.typeSupplier}${formattedPrice ? " | " + formattedPrice : ""}`;
           const refLine = String(d.typeSupplier || "")
             .toLowerCase()
             .includes("diamond")
@@ -1284,7 +1483,7 @@ function getMaxTotalByType(typeStr: string) {
       );
       setInvoiceRefreshFlag((f) => f + 1);
     } catch (err: any) {
-      console.error("Failed to return invoice to cart", err);
+
       alert(
         "Failed to return invoice to cart: " + (err?.message || "unknown error")
       );
@@ -1300,6 +1499,66 @@ function getMaxTotalByType(typeStr: string) {
   const [imageDialogUrl, setImageDialogUrl] = React.useState<string | null>(
     null
   );
+  // Admin: edit seller dialog state
+  const [editSellerOpen, setEditSellerOpen] = useState(false);
+  const [editSellerTargetInvoice, setEditSellerTargetInvoice] = useState<any>(null);
+  const [editSellerSelectedUserId, setEditSellerSelectedUserId] = useState<number | null>(null);
+
+  const handleOpenEditSeller = (row: any) => {
+    setEditSellerTargetInvoice(row);
+    const currentId = Number(row?.Utilisateur?.id_user ?? 0) || null;
+    setEditSellerSelectedUserId(currentId);
+    setEditSellerOpen(true);
+  };
+
+  const handleConfirmEditSeller = async () => {
+    // Persist seller change by num_fact; update UI on success
+    if (!editSellerTargetInvoice || !editSellerSelectedUserId) {
+      setEditSellerOpen(false);
+      return;
+    }
+    const chosen = (Array.isArray(users) ? users : []).find(
+      (u: any) => Number(u.id_user) === Number(editSellerSelectedUserId)
+    );
+    const newName = chosen?.name_user || `User ${editSellerSelectedUserId}`;
+    const numFact = editSellerTargetInvoice?.num_fact || editSellerTargetInvoice?.id_fact || null;
+    if (!numFact) {
+      alert("Missing invoice number");
+      return;
+    }
+    try {
+      const token = localStorage.getItem("token");
+      await axios.put(
+        `/invoices/UpdateUserByNumFact/${encodeURIComponent(String(numFact))}`,
+        { usr: Number(editSellerSelectedUserId) },
+        { headers: { Authorization: token ? `Bearer ${token}` : undefined } }
+      );
+      // Update local UI to reflect new seller
+      setData((prev) => {
+        return prev.map((row: any) => {
+          if (String(row?.num_fact) === String(numFact)) {
+            const updated = { ...row };
+            updated.usr = Number(editSellerSelectedUserId);
+            updated.Utilisateur = {
+              ...(row.Utilisateur || {}),
+              id_user: Number(editSellerSelectedUserId),
+              name_user: newName,
+            };
+            return updated;
+          }
+          return row;
+        });
+      });
+      setInvoiceRefreshFlag((f) => f + 1);
+    } catch (e: any) {
+
+      alert("Failed to update seller: " + (e?.message || "unknown error"));
+    } finally {
+      setEditSellerOpen(false);
+      setEditSellerTargetInvoice(null);
+      setEditSellerSelectedUserId(null);
+    }
+  };
 
   // --------- NEW: GLOBAL FILTER + CARD PAGINATION ---------
   const filteredData = React.useMemo(() => {
@@ -1309,6 +1568,13 @@ function getMaxTotalByType(typeStr: string) {
       base = base.filter((row) =>
         JSON.stringify(row).toLowerCase().includes(term)
       );
+    }
+    // Multi-select type filter (gold/diamond/watch)
+    if (selectedTypes.length > 0 && !selectedTypes.includes("all")) {
+      base = base.filter((row) => {
+        const typeSupplier = String(row?.ACHATs?.[0]?.Fournisseur?.TYPE_SUPPLIER || "").toLowerCase();
+        return selectedTypes.some((t) => typeSupplier.includes(t));
+      });
     }
     // Multi-select sale kinds filter
     if (saleKinds.length > 0 && !saleKinds.includes("All")) {
@@ -1333,9 +1599,9 @@ function getMaxTotalByType(typeStr: string) {
     if (paymentStatus !== "all") {
       base = base.filter((row) => {
         const due =
-          (Number(row.amount_lyd || 0) || 0) +
-          (Number(row.amount_currency_LYD || 0) || 0) +
-          (Number(row.amount_EUR_LYD || 0) || 0);
+          row.Utilisateur && row.Utilisateur.name_user
+            ? row.Utilisateur.name_user
+            : "";
         const outstanding =
           (Number(row.rest_of_money || 0) || 0) +
           (Number(row.rest_of_moneyUSD || row.rest_of_money_usd || 0) || 0) +
@@ -1346,8 +1612,8 @@ function getMaxTotalByType(typeStr: string) {
           totalOutstanding <= 0
             ? "paid"
             : !isClosed
-            ? "unpaid"
-            : "partial";
+              ? "unpaid"
+              : "partial";
         return status === paymentStatus;
       });
     }
@@ -1366,7 +1632,7 @@ function getMaxTotalByType(typeStr: string) {
       });
     }
     return base;
-  }, [sortedData, globalFilter, saleKinds, paymentStatus, restOnly]);
+  }, [sortedData, globalFilter, selectedTypes, saleKinds, paymentStatus, restOnly]);
   // Totals of "rest" fields for the currently filtered dataset
   const totalRestLYD = React.useMemo(() => {
     return filteredData.reduce((sum, row) => {
@@ -1386,6 +1652,88 @@ function getMaxTotalByType(typeStr: string) {
       return sum + (isNaN(v) ? 0 : v);
     }, 0);
   }, [filteredData]);
+
+  const summaryStats = React.useMemo(() => {
+    const typeMaps: Record<"gold" | "diamond" | "watch", Map<string, number>> = {
+      gold: new Map(),
+      diamond: new Map(),
+      watch: new Map(),
+    };
+    let itemCount = 0;
+    let totalWeightFiltered = 0;
+
+    filteredData.forEach((row: any) => {
+      if (Array.isArray(row._productDetails)) {
+        itemCount += row._productDetails.length;
+      }
+
+      const achats: any[] = row.ACHATs || [];
+      if (achats.length === 0) {
+        return;
+      }
+
+      const firstAchat = achats[0];
+      const supplierTypeRaw = firstAchat?.Fournisseur?.TYPE_SUPPLIER || "";
+      const supplierType = String(supplierTypeRaw).toLowerCase();
+
+      if (supplierType.includes("gold")) {
+        const qty = Number(firstAchat.qty);
+        if (!isNaN(qty)) {
+          totalWeightFiltered += qty;
+        }
+      }
+
+      let targetType: "gold" | "diamond" | "watch" | null = null;
+      if (supplierType.includes("gold")) targetType = "gold";
+      else if (supplierType.includes("diamond")) targetType = "diamond";
+      else if (supplierType.includes("watch")) targetType = "watch";
+
+      if (!targetType) {
+        return;
+      }
+
+      const numFact = row.num_fact;
+      if (!numFact) {
+        return;
+      }
+
+      const baseTotal = Number(row.total_remise_final) || 0;
+      const remiseValue = Number(row.remise) || 0;
+      const remisePerValue = Number(row.remise_per) || 0;
+      let adjustedTotal = baseTotal;
+      if (remiseValue > 0) {
+        adjustedTotal = baseTotal - remiseValue;
+      } else if (remisePerValue > 0) {
+        adjustedTotal =
+          baseTotal - (baseTotal * remisePerValue) / 100;
+      }
+      if (isNaN(adjustedTotal)) {
+        return;
+      }
+
+      const map = typeMaps[targetType];
+      if (!map.has(numFact) || (map.get(numFact) as number) < adjustedTotal) {
+        map.set(numFact, adjustedTotal);
+      }
+    });
+
+    const sumMap = (m: Map<string, number>) => {
+      let sum = 0;
+      m.forEach((v) => {
+        sum += v;
+      });
+      return sum;
+    };
+
+    return {
+      invoiceCount: filteredData.length,
+      itemCount,
+      totalWeight: totalWeightFiltered,
+      totalGold: sumMap(typeMaps.gold),
+      totalDiamond: sumMap(typeMaps.diamond),
+      totalWatch: sumMap(typeMaps.watch),
+    };
+  }, [filteredData]);
   const [pageSize, setPageSize] = useState<number>(5);
   const pageCount = Math.max(1, Math.ceil(filteredData.length / pageSize));
   const safePageIndex = Math.min(pageIndex, pageCount - 1);
@@ -1397,7 +1745,7 @@ function getMaxTotalByType(typeStr: string) {
   // Reset to first page when filters or search change
   useEffect(() => {
     setPageIndex(0);
-  }, [globalFilter, type, periodFrom, periodTo, selectedPs, saleKinds, paymentStatus]);
+  }, [globalFilter, selectedTypes, periodFrom, periodTo, selectedPs, saleKinds, paymentStatus]);
 
   // ---- CARD RENDERER (replaces table row) ----
   const renderInvoiceCard = (row: any) => {
@@ -1422,6 +1770,7 @@ function getMaxTotalByType(typeStr: string) {
     const returnChira = row.return_chira;
     const commentChira = row.comment_chira;
     const usrReceiveChira = row.usr_receive_chira;
+    const invoiceComment = (row as any).COMMENT ?? "";
 
     // Primary label: show Chira No when chira=yes, otherwise Invoice No
     const primaryLabel = isChiraVal
@@ -1459,20 +1808,17 @@ function getMaxTotalByType(typeStr: string) {
       (clientValue &&
         (clientValue.id_client ||
           clientValue.Id_client ||
-          clientValue.id ||
           clientValue.client_id)) ||
       row?.id_client ||
       row?.client_id ||
       row?.Id_client ||
-      row?.id_cli ||
-      row?.id_cl ||
       null;
 
     const totalRemiseFinal = row.total_remise_final ?? "";
     // amount fields are accessed directly from `row` where needed
 
     const details: any[] = row._productDetails || [];
-    const prix_vente_remise = row.prix_vente_remise;
+    const invoicePrixVenteRemise = row.prix_vente_remise;
 
     const isClosed = !!row.IS_OK;
     // derive a short invoice type label from first product supplier type
@@ -1536,6 +1882,13 @@ function getMaxTotalByType(typeStr: string) {
                 <Typography sx={{ fontSize: 16, fontWeight: 800 }}>
                   {primaryLabel}
                 </Typography>
+                {invoiceComment ? (
+                  <Chip
+                    label={`Comment: ${invoiceComment}`}
+                    size="small"
+                    variant="outlined"
+                  />
+                ) : null}
               </Box>
 
               {/* Row 2: Meta info */}
@@ -1571,7 +1924,7 @@ function getMaxTotalByType(typeStr: string) {
                       let sellerId: number | null = null;
                       try {
                         sellerId = row?.Utilisateur?.id_user ?? null;
-                      } catch {}
+                      } catch { }
                       if (
                         !sellerId &&
                         Array.isArray(users) &&
@@ -1602,6 +1955,16 @@ function getMaxTotalByType(typeStr: string) {
                 ) : (
                   <Chip label={`Sold by: —`} size="small" variant="outlined" />
                 )}
+                {isAdmin && (
+                  <Button
+                    variant="outlined"
+                    size="small"
+                    sx={{ ml: 0.5, fontSize: 11, py: 0.2, px: 0.8, textTransform: "none" }}
+                    onClick={() => handleOpenEditSeller(row)}
+                  >
+                   Changing the seller
+                  </Button>
+                )}
               </Box>
 
               {/* Row 3: Client / Source / Chira / State */}
@@ -1619,8 +1982,7 @@ function getMaxTotalByType(typeStr: string) {
                     size="small"
                     color="primary"
                     onClick={() => {
-                      // Prefer encrypted dynamic customer path so Home router resolves directly
-                      let path = "/invoice/customerProfile";
+                      const path = "/invoice/customerProfile";
                       try {
                         if (typeof window !== "undefined") {
                           // Persist whatever we have immediately
@@ -1648,28 +2010,22 @@ function getMaxTotalByType(typeStr: string) {
                               "customerFocusPhone",
                               String(telPart)
                             );
-                          // Build encrypted route when we have a concrete id
-                          if (clientId) {
-                            try {
-                              path = buildEncryptedClientPath(Number(clientId));
-                            } catch {}
-                          }
                         }
-                      } catch {}
+                      } catch { }
                       // Enforce hard redirect and stop further handling to avoid router interference
                       try {
                         if (typeof window !== "undefined") {
                           (window as any).location.href = path;
                           return;
                         }
-                      } catch {}
+                      } catch { }
                       // Fallback: try assign, then SPA navigate
                       try {
                         if (typeof window !== "undefined") {
                           window.location.assign(path);
                           return;
                         }
-                      } catch {}
+                      } catch { }
                       navigate(path);
                     }}
                     clickable
@@ -1881,6 +2237,7 @@ function getMaxTotalByType(typeStr: string) {
               {/* Group details by typeSupplier */}
               {(() => {
                 const grouped: Record<string, any[]> = {};
+
                 details.forEach((d) => {
                   const k =
                     (d.typeSupplier && String(d.typeSupplier)) || "Other";
@@ -1916,6 +2273,18 @@ function getMaxTotalByType(typeStr: string) {
                           : [];
                         const invoiceIdForLine =
                           d.id_fact || row.id_fact || row.num_fact;
+                        const rawPrice =
+                          d.prix_vente_remise ??
+                          invoicePrixVenteRemise ??
+                          "";
+                        const resolvedPriceLabel =
+                          rawPrice !== "" && rawPrice !== null && rawPrice !== undefined
+                            ? `${formatNumber(rawPrice)} ${d.typeSupplier
+                              ?.toLowerCase()
+                              .includes("gold")
+                              ? "LYD"
+                              : "USD"}`
+                            : "—";
                         return (
                           <Box
                             key={idx}
@@ -1949,33 +2318,147 @@ function getMaxTotalByType(typeStr: string) {
                                   alt={`Product Img`}
                                   style={{
                                     width: "100%",
-                                    height: 140,
-                                    objectFit: "cover",
+                                    height: "100%",
+                                    objectFit: "fill",
                                     borderRadius: 6,
                                     border: "1px solid #eee",
                                     cursor: "pointer",
                                   }}
-                                  onClick={() => {
-                                    setImageDialogUrl(productBlobUrls[0]);
+                                  onClick={(e) => {
+                                    try {
+                                      const src = (e.currentTarget as HTMLImageElement).src;
+                                      setImageDialogUrl(src);
+                                    } catch {
+                                      setImageDialogUrl(productBlobUrls[0]);
+                                    }
                                     setImageDialogOpen(true);
+                                  }}
+                                  onError={(e) => {
+                                    // Attempt fallback only for watch items and only if current src has /images/watch
+                                    try {
+                                      if (String(d.typeSupplier || '').toLowerCase().includes('watch')) {
+                                        const imgEl = e.currentTarget as HTMLImageElement;
+                                        const tried = imgEl.getAttribute('data-fallback-tried');
+                                        const origSrc = imgEl.getAttribute('data-orig-src') || imgEl.src;
+                                        if (!tried && /\/images\/watch\//.test(origSrc)) {
+                                          imgEl.setAttribute('data-orig-src', origSrc);
+                                          // Build fallback chain
+                                          const urlObj = new URL(origSrc, window.location.origin);
+                                          const parts = urlObj.pathname.split('/'); // ['', 'images', 'watch', id, filename]
+                                          if (parts.length >= 5) {
+                                            const idPart = parts[3];
+                                            const filenamePart = parts.slice(4).join('/').split('?')[0];
+                                            const token = urlObj.searchParams.get('token');
+                                            const generic = `${urlObj.protocol}//${urlObj.host}/images/${idPart}/${filenamePart}` + (token ? `?token=${encodeURIComponent(token)}` : '');
+                                            const staticUrl = `${urlObj.protocol}//${urlObj.host}/uploads/WatchPic/${idPart}/${filenamePart}`;
+                                            imgEl.setAttribute('data-fallback-tried', '1');
+                                            // Try generic first
+                                            imgEl.onerror = () => {
+                                              imgEl.onerror = null; // final fallback
+                                              imgEl.src = staticUrl;
+                                            };
+                                            imgEl.src = generic;
+                                          }
+                                        }
+                                      }
+                                    } catch {/* ignore */ }
                                   }}
                                 />
                               ) : (
-                                <Box
-                                  sx={{
-                                    width: "100%",
-                                    height: 140,
-                                    border: "1px dashed #ccc",
-                                    borderRadius: 2,
-                                    display: "flex",
-                                    alignItems: "center",
-                                    justifyContent: "center",
-                                    color: "#aaa",
-                                    fontSize: 12,
-                                  }}
-                                >
-                                  No Image
-                                </Box>
+                                (() => {
+                                  // Fallback: show first raw URL while blob is still loading (or if blob fetch failed)
+                                  const productRawUrls = productPicint
+                                    ? imageUrls[productPicint] || []
+                                    : [];
+                                  if (productRawUrls.length > 0) {
+                                    return (
+                                      <img
+                                        src={productRawUrls[0]}
+                                        alt="Product Img"
+                                        style={{
+                                          width: "100%",
+                                          height: 140,
+                                          objectFit: "cover",
+                                          borderRadius: 6,
+                                          border: "1px solid #eee",
+                                          cursor: "pointer",
+                                        }}
+                                        onClick={(e) => {
+                                          try {
+                                            const src = (e.currentTarget as HTMLImageElement).src;
+                                            setImageDialogUrl(src);
+                                          } catch {
+                                            setImageDialogUrl(productRawUrls[0]);
+                                          }
+                                          setImageDialogOpen(true);
+                                        }}
+                                        onError={(e) => {
+                                          try {
+                                            if (String(d.typeSupplier || '').toLowerCase().includes('watch')) {
+                                              const imgEl = e.currentTarget as HTMLImageElement;
+                                              const tried = imgEl.getAttribute('data-fallback-tried');
+                                              const origSrc = imgEl.getAttribute('data-orig-src') || imgEl.src;
+                                              // Handle both /images/watch and /images direct paths
+                                              if (!tried && /\/images\//.test(origSrc)) {
+                                                imgEl.setAttribute('data-orig-src', origSrc);
+                                                const urlObj = new URL(origSrc, window.location.origin);
+                                                const p = urlObj.pathname.split('/');
+                                                // Shapes:
+                                                // ['', 'images', id, filename]
+                                                // ['', 'images', 'watch', id, filename]
+                                                let idPart: string | null = null;
+                                                let filenamePart: string | null = null;
+                                                if (p.length >= 4 && p[1] === 'images' && p[2] !== 'watch') {
+                                                  idPart = p[2];
+                                                  filenamePart = p.slice(3).join('/');
+                                                } else if (p.length >= 5 && p[1] === 'images' && p[2] === 'watch') {
+                                                  idPart = p[3];
+                                                  filenamePart = p.slice(4).join('/');
+                                                }
+                                                if (idPart && filenamePart) {
+                                                  filenamePart = filenamePart.split('?')[0];
+                                                  const token = urlObj.searchParams.get('token');
+                                                  // Build ordered fallbacks
+                                                  const watchUrl = `${urlObj.protocol}//${urlObj.host}/images/watch/${idPart}/${filenamePart}` + (token ? `?token=${encodeURIComponent(token)}` : '');
+                                                  const staticUrl = `${urlObj.protocol}//${urlObj.host}/uploads/WatchPic/${idPart}/${filenamePart}`;
+                                                  imgEl.setAttribute('data-fallback-tried', '1');
+                                                  // If we were already /images/watch/, skip directly to static
+                                                  if (/\/images\/watch\//.test(origSrc)) {
+                                                    imgEl.onerror = null;
+                                                    imgEl.src = staticUrl;
+                                                  } else {
+                                                    imgEl.onerror = () => {
+                                                      imgEl.onerror = null;
+                                                      imgEl.src = staticUrl;
+                                                    };
+                                                    imgEl.src = watchUrl;
+                                                  }
+                                                }
+                                              }
+                                            }
+                                          } catch {/* ignore */ }
+                                        }}
+                                      />
+                                    );
+                                  }
+                                  return (
+                                    <Box
+                                      sx={{
+                                        width: "100%",
+                                        height: 140,
+                                        border: "1px dashed #ccc",
+                                        borderRadius: 2,
+                                        display: "flex",
+                                        alignItems: "center",
+                                        justifyContent: "center",
+                                        color: "#aaa",
+                                        fontSize: 12,
+                                      }}
+                                    >
+                                      No Image
+                                    </Box>
+                                  );
+                                })()
                               )}
                             </Box>
 
@@ -1992,10 +2475,7 @@ function getMaxTotalByType(typeStr: string) {
                                 color: "primary.main",
                               }}
                             >
-                              {prix_vente_remise}{" "}
-                              {d.typeSupplier?.toLowerCase().includes("gold")
-                                ? "LYD"
-                                : "USD"}
+                              {resolvedPriceLabel}
                             </Typography>
 
                             {/* Details */}
@@ -2047,12 +2527,12 @@ function getMaxTotalByType(typeStr: string) {
               mt: 1.5,
               display: "flex",
               alignItems: "center",
-              justifyContent: "space-between",
+              justifyContent: "flex-end",
               gap: 1,
               flexWrap: "wrap",
             }}
           >
-            {/* Left: Return to cart (ghost) */}
+            {/* Left: Return to cart (ghost) 
             <Box>
               {isAdmin && numFactAction && (
                 <Button
@@ -2066,7 +2546,7 @@ function getMaxTotalByType(typeStr: string) {
                   {isReturning ? "Returning..." : "Return to cart"}
                 </Button>
               )}
-            </Box>
+            </Box>*/}
 
             {/* Right: Confirm Order (solid) */}
             <Box>
@@ -2075,6 +2555,7 @@ function getMaxTotalByType(typeStr: string) {
                 color="primary"
                 sx={{ padding: "6px 14px", fontSize: 12, fontWeight: 700 }}
                 onClick={() => {
+
                   setSelectedInvoice(row);
                   setPrintDialogOpen(true);
                 }}
@@ -2101,21 +2582,32 @@ function getMaxTotalByType(typeStr: string) {
             flexWrap: "wrap",
           }}
         >
-          <FormControl size="small" sx={{ minWidth: 140 }}>
+          <FormControl size="small" sx={{ minWidth: 180 }}>
             <InputLabel id="type-select-label">Type</InputLabel>
             <Select
               labelId="type-select-label"
-              value={type}
+              multiple
+              value={selectedTypes}
               label="Type"
               onChange={(e) =>
-                setType(e.target.value as "all" | "gold" | "diamond" | "watch")
+                setSelectedTypes(
+                  typeof e.target.value === "string"
+                    ? e.target.value.split(",")
+                    : (e.target.value as string[])
+                )
               }
+              renderValue={(selected) => (
+                <Box sx={{ display: "flex", flexWrap: "wrap", gap: 0.5 }}>
+                  {(selected as string[]).map((value) => (
+                    <Chip key={value} label={typeOptions.find(o => o.value === value)?.label || value} size="small" />
+                  ))}
+                </Box>
+              )}
             >
-              {typeOptions.map((opt) => (
-                <MenuItem key={opt.value} value={opt.value}>
-                  {opt.label}
-                </MenuItem>
-              ))}
+              <MenuItem value="all">All</MenuItem>
+              <MenuItem value="gold">Gold</MenuItem>
+              <MenuItem value="diamond">Diamond</MenuItem>
+              <MenuItem value="watch">Watch</MenuItem>
             </Select>
           </FormControl>
           <FormControl size="small" sx={{ minWidth: 220 }}>
@@ -2164,34 +2656,7 @@ function getMaxTotalByType(typeStr: string) {
               ))}
             </Select>
           </FormControl>
-          {/* Product types multi-select */}
-          <FormControl size="small" sx={{ minWidth: 220 }}>
-            <InputLabel id="prod-type-label">Product types</InputLabel>
-            <Select
-              labelId="prod-type-label"
-              multiple
-              value={productTypes}
-              label="Product types"
-              onChange={(e) =>
-                setProductTypes(
-                  typeof e.target.value === "string"
-                    ? e.target.value.split(",")
-                    : (e.target.value as string[])
-                )
-              }
-              renderValue={(selected) => (
-                <Box sx={{ display: "flex", flexWrap: "wrap", gap: 0.5 }}>
-                  {(selected as string[]).map((value) => (
-                    <Chip key={value} label={value} size="small" />
-                  ))}
-                </Box>
-              )}
-            >
-              <MenuItem value="Gold">Gold</MenuItem>
-              <MenuItem value="Diamond">Diamond</MenuItem>
-              <MenuItem value="Watch">Watch</MenuItem>
-            </Select>
-          </FormControl>
+
           <TextField
             label="From"
             type="date"
@@ -2319,37 +2784,30 @@ function getMaxTotalByType(typeStr: string) {
           }}
         >
           <Typography variant="subtitle2" sx={{ fontWeight: "bold", ml: 2 }}>
-            Invoice Count: {sortedData.length}
+            Invoice Count: {summaryStats.invoiceCount}
           </Typography>
           <Typography variant="subtitle2" sx={{ fontWeight: "bold", ml: 2 }}>
             Item Count:{" "}
-            {sortedData.reduce(
-              (sum, row) =>
-                sum +
-                (Array.isArray(row._productDetails)
-                  ? row._productDetails.length
-                  : 0),
-              0
-            )}
+            {summaryStats.itemCount}
           </Typography>
-          {totalWeight !== 0 && (
+          {summaryStats.totalWeight !== 0 && (
             <Typography variant="subtitle1" sx={{ fontWeight: "bold", ml: 2 }}>
-              Total Weight (gram): {formatNumber(totalWeight)}
+              Total Weight (gram): {formatNumber(summaryStats.totalWeight)}
             </Typography>
           )}
-          {totalGold !== 0 && (
+          {summaryStats.totalGold !== 0 && (
             <Typography variant="subtitle2" sx={{ fontWeight: "bold", ml: 2 }}>
-              Total (gold): {formatNumber(totalGold)} LYD
+              Total (gold): {formatNumber(summaryStats.totalGold)} LYD
             </Typography>
           )}
-          {totalDiamond !== 0 && (
+          {summaryStats.totalDiamond !== 0 && (
             <Typography variant="subtitle2" sx={{ fontWeight: "bold", ml: 2 }}>
-              Total (diamond): {formatNumber(totalDiamond)} USD
+              Total (diamond): {formatNumber(summaryStats.totalDiamond)} USD
             </Typography>
           )}
-          {totalWatch !== 0 && (
+          {summaryStats.totalWatch !== 0 && (
             <Typography variant="subtitle2" sx={{ fontWeight: "bold", ml: 2 }}>
-              Total (watches): {formatNumber(totalWatch)} USD
+              Total (watches): {formatNumber(summaryStats.totalWatch)} USD
             </Typography>
           )}
         </Box>
@@ -2562,9 +3020,40 @@ function getMaxTotalByType(typeStr: string) {
               }
             >
               {confirmTargetNum !== null &&
-              returningIds.includes(String(confirmTargetNum))
+                returningIds.includes(String(confirmTargetNum))
                 ? "Returning..."
                 : "Confirm"}
+            </Button>
+          </DialogActions>
+        </Dialog>
+
+        {/* Edit Seller Dialog */}
+        <Dialog open={editSellerOpen} onClose={() => setEditSellerOpen(false)} maxWidth="xs" fullWidth>
+          <DialogTitle>Edit "Sold by"</DialogTitle>
+          <DialogContent sx={{ minWidth: 300 }}>
+            <FormControl fullWidth size="small" sx={{ mt: 1 }}>
+              <InputLabel id="edit-seller-select">Select User</InputLabel>
+              <Select
+                labelId="edit-seller-select"
+                label="Select User"
+                value={editSellerSelectedUserId ?? ""}
+                onChange={(e) => {
+                  const val: any = e.target.value;
+                  setEditSellerSelectedUserId(val === "" ? null : Number(val));
+                }}
+              >
+                {(Array.isArray(users) ? users : []).map((u: any) => (
+                  <MenuItem key={String(u.id_user)} value={Number(u.id_user)}>
+                    {u.name_user}
+                  </MenuItem>
+                ))}
+              </Select>
+            </FormControl>
+          </DialogContent>
+          <DialogActions>
+            <Button onClick={() => setEditSellerOpen(false)}>Cancel</Button>
+            <Button variant="contained" onClick={handleConfirmEditSeller} disabled={!editSellerSelectedUserId}>
+              Save
             </Button>
           </DialogActions>
         </Dialog>

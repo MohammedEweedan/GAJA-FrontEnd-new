@@ -15,6 +15,18 @@ interface CalendarLogParams {
   status?: string;                    // e.g. 'pending' or 'Pending,Approved'
 }
 
+export const previewLeaveDays = async (params: {
+  startDate: string;
+  endDate: string;
+  leaveType: string | number; // TS_Codes.code or int_can
+}) => {
+  const response = await axios.get(`${baseUrl()}/leave/leave-days/preview`, {
+    params,
+    headers: await getAuthHeader(),
+  });
+  return response.data;
+};
+
 // ---------- Leave Balance ----------
 export const getLeaveBalance = async (employeeId: string) => {
   const res = await axios.get(`${baseUrl()}/leave/leave-balance/${employeeId}`, {
@@ -22,27 +34,38 @@ export const getLeaveBalance = async (employeeId: string) => {
   });
   const d = res.data || {};
 
-  // normalize
-  const total = d.annualEntitlement ?? d.totalLeaves ?? 0;
-  const used  = d.used ?? d.usedLeaves ?? 0;
+  // normalize - use new carry-forward fields from backend
+  const total = d.annualEntitlement ?? d.entitlement ?? d.totalLeaves ?? 0;
+  const used  = d.deductedToDate ?? d.used ?? d.usedLeaves ?? 0;
   const rem   = d.remaining ?? d.remainingLeaves ?? Math.max(0, total - used);
+  
+  // New carry-forward fields
+  const accruedToDate = d.accruedToDate ?? total;
+  const carryForward = d.carryForward ?? 0;
+  const currentYearAccrued = d.currentYearAccrued ?? total;
 
-  const rawHistory = Array.isArray(d.leaveHistory)
-    ? d.leaveHistory
-    : (Array.isArray(d.leaves) ? d.leaves : []);
+  const rawHistory = Array.isArray(d.deductionEntries)
+    ? d.deductionEntries
+    : (Array.isArray(d.leaveHistory) ? d.leaveHistory : (Array.isArray(d.leaves) ? d.leaves : []));
   const history = rawHistory.map((x: any) => ({
     id: x.ID_LEAVE ?? x.int_con ?? x.id,
     type: x.LEAVE_TYPE ?? x.leaveTypeName ?? x.leaveTypeCode ?? x.type ?? 'annual',
     startDate: x.DATE_START ?? x.startDate ?? x.date_depart,
     endDate:   x.DATE_END   ?? x.endDate   ?? x.date_end,
-    days: x.NUM_DAYS ?? x.nbr_jour ?? x.days ?? 0,
-    status: (x.STATUS ?? x.state ?? x.status ?? 'pending').toLowerCase(),
+    days: x.NUM_DAYS ?? x.nbr_jour ?? x.days ?? x.deducted ?? 0,
+    effectiveDays: x.effectiveDays ?? x.effective_days ?? x.effective_days_count ?? undefined,
+    excluded: x.excluded ?? undefined,
+    status: (x.STATUS ?? x.state ?? x.status ?? 'approved').toLowerCase(),
   }));
 
   return {
     entitlement: total,
     used,
     remaining: rem,
+    accruedToDate,
+    carryForward,
+    currentYearAccrued,
+    monthlyRate: d.monthlyRate ?? 0,
     lastUpdated: d.lastUpdated ?? d.LAST_LEAVE_CALCULATION ?? null,
     leaveHistory: history,
   };
@@ -60,6 +83,8 @@ export const getLeaveRequests = async (employeeId: string | number) => {
     startDate: v.date_depart ?? v.DATE_START ?? v.startDate,
     endDate:   v.date_end    ?? v.DATE_END   ?? v.endDate,
     days: v.nbr_jour ?? v.NUM_DAYS ?? v.days ?? 0,
+    effectiveDays: v.effectiveDays ?? v.effective_days ?? undefined,
+    excluded: v.excluded ?? undefined,
     status: (v.state ?? v.STATUS ?? v.status ?? 'pending').toLowerCase(),
     submittedDate: v.date_creation ?? v.createdAt ?? v.SUBMITTED_AT ?? v.submittedDate ?? v.date_depart,
     reviewedBy: v.reviewedBy ?? undefined,
@@ -74,6 +99,7 @@ export const updateLeaveRequestFlexible = async (payload: {
   id: number | string;
   startDate: string; endDate: string;
   code: string; id_can?: string; comment?: string;
+  keepState?: boolean;
 }) => {
   const headers = await getAuthHeader();
   const id = payload.id;
@@ -85,6 +111,7 @@ export const updateLeaveRequestFlexible = async (payload: {
     code: payload.code, id_can: payload.id_can ?? payload.code,
     leaveType: payload.code,
     comment: payload.comment ?? "", COMMENT: payload.comment ?? "",
+    keepState: payload.keepState,
   };
 
   const candidates: Array<{ m:"put"|"post"|"patch"; url:string }> = [

@@ -44,6 +44,7 @@ import {
   getHolidays,
   getLeaveBalance,
   getLeaveRequests,
+  previewLeaveDays,
 } from "../../services/leaveService";
 
 /** ---------------- Types ---------------- */
@@ -174,8 +175,12 @@ const LeaveRequestScreen: React.FC<
 
   const [calculatedDays, setCalculatedDays] = useState<number>(0);
   const [daysRequested, setDaysRequested] = useState<number>(0);
+  const [previewExcluded, setPreviewExcluded] = useState<any | null>(null);
 
   const [holidaySet, setHolidaySet] = useState<Set<string>>(new Set());
+  const [holidayNameMap, setHolidayNameMap] = useState<Record<string, string>>(
+    {}
+  );
   const [remainingDays, setRemainingDays] = useState<number | null>(null);
   const [daysError, setDaysError] = useState<string | null>(null);
   const [submitLock, setSubmitLock] = useState(false);
@@ -367,16 +372,40 @@ const LeaveRequestScreen: React.FC<
     return total;
   };
 
-  // Load holidays
+  // Load holidays (use ranged query so backend expands fixed/islamic holidays)
+  const holidayRangeKeyRef = useRef<string>("");
   useEffect(() => {
     const loadHolidays = async () => {
       try {
-        const resp: any = await getHolidays();
+        const now = new Date();
+        const st = formData.startDate ?? now;
+        const en = formData.endDate ?? formData.startDate ?? now;
+        const a = new Date(st);
+        const b = new Date(en);
+        if (isNaN(a.getTime()) || isNaN(b.getTime())) return;
+
+        const minY = Math.min(a.getFullYear(), b.getFullYear()) - 1;
+        const maxY = Math.max(a.getFullYear(), b.getFullYear()) + 1;
+        const rangeStart = `${minY}-01-01`;
+        const rangeEnd = `${maxY}-12-31`;
+        const key = `${rangeStart}|${rangeEnd}`;
+        if (holidayRangeKeyRef.current === key) return;
+        holidayRangeKeyRef.current = key;
+
+        const resp: any = await getHolidays({ startDate: rangeStart, endDate: rangeEnd });
         const arr = Array.isArray(resp) ? resp : resp?.data || [];
         const set = new Set<string>();
+        const names: Record<string, string> = {};
         arr.forEach((h: any) => {
           const iso = toISO10(firstDefined(h.DATE_H, h.date, h.holiday_date));
-          if (iso) set.add(iso);
+          if (iso) {
+            set.add(iso);
+            const nm = String(
+              firstDefined(h.HOLIDAY_NAME, h.holiday_name, h.COMMENT_H, h.comment) ||
+                ""
+            ).trim();
+            if (nm) names[iso] = nm;
+          }
         });
         try {
           const raw = localStorage.getItem("custom_holidays");
@@ -387,16 +416,28 @@ const LeaveRequestScreen: React.FC<
                 const iso = toISO10(
                   firstDefined(h.DATE_H, h.date, h.holiday_date)
                 );
-                if (iso) set.add(iso);
+                if (iso) {
+                  set.add(iso);
+                  const nm = String(
+                    firstDefined(
+                      h.HOLIDAY_NAME,
+                      h.holiday_name,
+                      h.COMMENT_H,
+                      h.comment
+                    ) || ""
+                  ).trim();
+                  if (nm) names[iso] = nm;
+                }
               });
             }
           }
         } catch {}
         setHolidaySet(set);
+        setHolidayNameMap(names);
       } catch {}
     };
     loadHolidays();
-  }, []);
+  }, [formData.startDate, formData.endDate]);
 
   useEffect(() => {
     refreshBalanceAndHistory().catch(() => {
@@ -412,15 +453,6 @@ const LeaveRequestScreen: React.FC<
     return `${y}-${m}-${da}`;
   };
 
-  const computeEndDate = useCallback((start: Date, calendarDays: number) => {
-    if (!start || !Number.isFinite(calendarDays) || calendarDays <= 0)
-      return null;
-    const d = new Date(start);
-    d.setHours(0, 0, 0, 0);
-    d.setDate(d.getDate() + (calendarDays - 1));
-    return d;
-  }, []);
-
   const isHoliday = useCallback(
     (d: Date) => holidaySet.has(fmtISO(d)),
     [holidaySet]
@@ -428,6 +460,35 @@ const LeaveRequestScreen: React.FC<
   const isNonWorking = useCallback(
     (d: Date) => isFriday(d) || isHoliday(d),
     [isHoliday]
+  );
+
+  const computeEndDate = useCallback(
+    (start: Date, requestedDays: number, lt?: LeaveTypeOption | null) => {
+      if (!start || !Number.isFinite(requestedDays) || requestedDays <= 0)
+        return null;
+
+      const s = new Date(start);
+      s.setHours(0, 0, 0, 0);
+
+      // Sick leave counts calendar days (do not skip Fridays/holidays)
+      if (isSickLike(lt)) {
+        const d = new Date(s);
+        d.setDate(d.getDate() + (requestedDays - 1));
+        return d;
+      }
+
+      // For all other leave types: count working days only (skip Fridays + holidays)
+      let counted = 0;
+      const d = new Date(s);
+      while (counted < requestedDays) {
+        if (!isNonWorking(d)) counted += 1;
+        if (counted >= requestedDays) break;
+        d.setDate(d.getDate() + 1);
+        if (d.getTime() - s.getTime() > 1000 * 60 * 60 * 24 * 370) break;
+      }
+      return d;
+    },
+    [isNonWorking]
   );
 
   const uploadDoctorNote = async (requestId: number | string, file: File) => {
@@ -456,15 +517,6 @@ const LeaveRequestScreen: React.FC<
       return null;
     }
   };
-
-  const countEffectiveDays = useCallback(
-    (start: Date, end: Date, lt?: LeaveTypeOption | null): number => {
-      if (!start || !end) return 0;
-      if (isSickLike(lt)) return countCalendarDays(start, end);
-      return countWorkingDays(start, end, isNonWorking);
-    },
-    [isNonWorking]
-  );
 
   const isApprovedLike = (status?: string) => {
     const s = String(status || "").toLowerCase();
@@ -578,16 +630,6 @@ const LeaveRequestScreen: React.FC<
     return c;
   };
 
-  const countCalendarDays = (start: Date, end: Date) => {
-    const s = new Date(start);
-    s.setHours(0, 0, 0, 0);
-    const e = new Date(end);
-    e.setHours(0, 0, 0, 0);
-    return e < s
-      ? 0
-      : Math.floor((e.getTime() - s.getTime()) / (1000 * 60 * 60 * 24)) + 1;
-  };
-
   const violatesSameDayDuplicate = (startISO: string, endISO: string) => {
     const { ok } = validateNoOverlap(startISO, endISO);
     return !ok;
@@ -626,37 +668,86 @@ const LeaveRequestScreen: React.FC<
     }
 
     if (formData.startDate && daysRequested > 0) {
-      const end = computeEndDate(formData.startDate, daysRequested);
+      const end = computeEndDate(formData.startDate, daysRequested, activeLeaveType);
       setFormData((prev) => ({ ...prev, endDate: end }));
-      if (end)
-        setCalculatedDays(
-          countEffectiveDays(formData.startDate, end, activeLeaveType)
-        );
-      else setCalculatedDays(0);
+      setCalculatedDays(0);
+      setPreviewExcluded(null);
     } else {
       setFormData((prev) => ({ ...prev, endDate: null }));
       setCalculatedDays(0);
+      setPreviewExcluded(null);
     }
   }, [
     formData.startDate,
     daysRequested,
     computeEndDate,
     activeLeaveType,
-    countEffectiveDays,
     remainingDays,
     perTypeMaxDays,
     activeLeaveType?.desig_can,
     t,
   ]);
 
+  useEffect(() => {
+    (async () => {
+      try {
+        if (!formData.startDate || !formData.endDate || !activeLeaveType) {
+          setCalculatedDays(0);
+          setPreviewExcluded(null);
+          return;
+        }
+        const startISO = toISO10(formData.startDate);
+        const endISO = toISO10(formData.endDate);
+        if (!startISO || !endISO) {
+          setCalculatedDays(0);
+          setPreviewExcluded(null);
+          return;
+        }
+        const js = await previewLeaveDays({
+          startDate: startISO,
+          endDate: endISO,
+          leaveType: activeLeaveType.code || String(activeLeaveType.int_can),
+        });
+        const eff = Number(js?.effectiveDays ?? 0);
+        setCalculatedDays(Number.isFinite(eff) ? eff : 0);
+        setPreviewExcluded(js?.excluded ?? null);
+      } catch {
+        setCalculatedDays(0);
+        setPreviewExcluded(null);
+      }
+    })();
+  }, [formData.startDate, formData.endDate, activeLeaveType]);
+
   const startISOForLive = formData.startDate ? toISO10(formData.startDate) : "";
   const endISOForLive = formData.endDate
     ? toISO10(formData.endDate)
     : startISOForLive;
+  const liveOverlapResult = useMemo(() => {
+    if (!startISOForLive || !endISOForLive)
+      return { ok: true, conflicts: [] as typeof leaveHistory };
+    return validateNoOverlap(startISOForLive, endISOForLive);
+  }, [startISOForLive, endISOForLive, validateNoOverlap]);
+
   const liveOverlap =
-    !!startISOForLive &&
-    !!endISOForLive &&
-    !validateNoOverlap(startISOForLive, endISOForLive).ok;
+    !!startISOForLive && !!endISOForLive && !liveOverlapResult.ok;
+
+  const liveApprovedConflicts = useMemo(() => {
+    return (liveOverlapResult.conflicts || []).filter((c) =>
+      isApprovedLike((c as any)?.status)
+    );
+  }, [liveOverlapResult]);
+
+  const liveHolidayISOList = useMemo(() => {
+    const hols = previewExcluded?.holidays;
+    if (!Array.isArray(hols)) return [] as string[];
+    return hols.map((h: any) => String(h?.date || '').slice(0, 10)).filter(Boolean);
+  }, [previewExcluded]);
+
+  const liveFridayISOList = useMemo(() => {
+    const fr = previewExcluded?.fridays;
+    if (!Array.isArray(fr)) return [] as string[];
+    return fr.map((x: any) => String(x).slice(0, 10)).filter(Boolean);
+  }, [previewExcluded]);
 
   const handleChange = (e: any) => {
     const { name, value } = e.target;
@@ -688,29 +779,43 @@ const LeaveRequestScreen: React.FC<
         : null;
       const inRange = !!s0 && !!e0 && dayDate >= s0 && dayDate <= e0;
       const nonWorking = isNonWorking(dayDate);
+      const iso = fmtISO(dayDate);
+      const isHol = holidaySet.has(iso);
+      const markNonWorkingInRange =
+        inRange && nonWorking && !isSickLike(activeLeaveType);
       const disable = nonWorking && !isSickLike(activeLeaveType);
+
+      const outOfRangeNonWorkingBg =
+        !inRange && disable ? "rgba(158,158,158,0.18)" : undefined;
+      const inRangeBg = markNonWorkingInRange
+        ? "rgba(244,67,54,0.18)"
+        : "rgba(33,150,243,0.18)";
+      const inRangeBorder = markNonWorkingInRange
+        ? "1px solid #f44336"
+        : "1px solid #b7a27d";
+
       return (
         <PickersDay
           {...props}
           disabled={disable}
           sx={{
-            bgcolor: inRange
-              ? nonWorking
-                ? "rgba(244,67,54,0.18)"
-                : "rgba(33,150,243,0.18)"
-              : undefined,
-            border: inRange
-              ? nonWorking
-                ? "1px solid #f44336"
-                : "1px solid #b7a27d"
-              : undefined,
+            bgcolor: inRange ? inRangeBg : outOfRangeNonWorkingBg,
+            border: inRange ? inRangeBorder : undefined,
             borderRadius: 1.2,
-            opacity: nonWorking ? 0.6 : 1,
+            opacity: !inRange && nonWorking ? 0.6 : 1,
+            color: !inRange && isHol ? "text.disabled" : undefined,
+
+            "&.Mui-disabled": {
+              opacity: !inRange && nonWorking ? 0.6 : 1,
+              color: !inRange && isHol ? "rgba(0,0,0,0.38)" : undefined,
+              backgroundColor: inRange ? inRangeBg : outOfRangeNonWorkingBg,
+              border: inRange ? inRangeBorder : undefined,
+            },
           }}
         />
       );
     };
-  }, [startDateDep, endDateDep, isNonWorking, activeLeaveType]);
+  }, [startDateDep, endDateDep, isNonWorking, activeLeaveType, holidaySet, fmtISO]);
 
   const validateBusinessRules = () => {
     if (!formData.leaveCode || !formData.startDate || !daysRequested) {
@@ -765,85 +870,6 @@ const LeaveRequestScreen: React.FC<
         `Single request capped at ${MAX_SINGLE_REQUEST_CALENDAR_DAYS} days`
       );
     }
-
-    if (!isSickLike(activeLeaveType)) {
-      if (isHoliday(formData.startDate)) {
-        return t(
-          "leave.request.holidayStartBlocked",
-          "Start date falls on a public holiday. Please select dates strictly before or after the holiday."
-        );
-      }
-      if (formData.endDate && isHoliday(formData.endDate)) {
-        return t(
-          "leave.request.holidayEndBlocked",
-          "End date falls on a public holiday. Please select dates strictly before or after the holiday."
-        );
-      }
-      {
-        const offending = firstHolidayInRange(
-          formData.startDate,
-          formData.endDate ?? formData.startDate,
-          isHoliday
-        );
-        if (offending) {
-          const dd = toDMY(offending);
-          return t(
-            "leave.request.holidayInsideBlocked",
-            `Your request includes a public holiday (${dd}). Choose a range entirely before or entirely after the holiday.`
-          );
-        }
-      }
-      if (isNonWorking(formData.startDate)) {
-        return t(
-          "leave.request.validation.startNonWorking",
-          "Start date cannot be a Friday or holiday."
-        );
-      }
-    }
-
-    if (!formData.leaveCode || !formData.startDate || !daysRequested) {
-      return t(
-        "leave.request.validation.required",
-        "Please complete all required fields."
-      );
-    }
-    if (remainingDays != null && daysRequested > remainingDays) {
-      return t("leave.request.maxReached", "Exceeds remaining balance");
-    }
-    if (!formData.endDate || formData.startDate > formData.endDate) {
-      return t(
-        "leave.request.validation.invalidDateRange",
-        "Invalid date range."
-      );
-    }
-
-    if (isHoliday(formData.startDate)) {
-      return t(
-        "leave.request.holidayStartBlocked",
-        "Start date falls on a public holiday. Please select dates strictly before or after the holiday."
-      );
-    }
-    if (formData.endDate && isHoliday(formData.endDate)) {
-      return t(
-        "leave.request.holidayEndBlocked",
-        "End date falls on a public holiday. Please select dates strictly before or after the holiday."
-      );
-    }
-    {
-      const offending = firstHolidayInRange(
-        formData.startDate,
-        formData.endDate ?? formData.startDate,
-        isHoliday
-      );
-      if (offending) {
-        const dd = toDMY(offending);
-        return t(
-          "leave.request.holidayInsideBlocked",
-          `Your request includes a public holiday (${dd}). Choose a range entirely before or entirely after the holiday.`
-        );
-      }
-    }
-
     if (isNonWorking(formData.startDate)) {
       return t(
         "leave.request.validation.startNonWorking",
@@ -924,16 +950,14 @@ const LeaveRequestScreen: React.FC<
       }
 
       const payload: any = {
-        employeeId: String(employeeId ?? ""),
-        leaveType:
-          leaveTypes.find((lt) => lt.int_can === Number(formData.leaveCode))
-            ?.code ?? String(formData.leaveCode),
+        employeeId: String(employeeId),
         leaveCode: Number(formData.leaveCode),
+        leaveType: activeLeaveType?.code || undefined,
         startDate: startISO,
         endDate: endISO,
         reason: formData.reason?.trim?.() || undefined,
         contactNumber: formData.contactNumber?.trim(),
-        days: calculatedDays > 0 ? calculatedDays : undefined,
+        days: undefined,
         clientDedupKey: `${employeeId || ""}:${startISO}:${endISO}:${formData.leaveCode}`,
       };
 
@@ -1180,7 +1204,41 @@ const LeaveRequestScreen: React.FC<
                   />
                   <StatTile
                     title={t("leave.request.effective", "Net Vacation")}
-                    value={calculatedDays || 0}
+                    value={(() => {
+                      const holidayLabel = (iso: string) => {
+                        const m = Array.isArray(previewExcluded?.holidays)
+                          ? (previewExcluded.holidays as any[]).find((h) => String(h?.date).slice(0, 10) === iso)
+                          : null;
+                        const nm = String(m?.name || holidayNameMap[iso] || '').trim();
+                        return nm ? `${iso} — ${nm}` : iso;
+                      };
+                      const reasons: string[] = [];
+                      if (liveFridayISOList.length)
+                        reasons.push(`Fridays: ${liveFridayISOList.join(", ")}`);
+                      if (liveHolidayISOList.length)
+                        reasons.push(
+                          `Public holidays: ${liveHolidayISOList
+                            .map(holidayLabel)
+                            .join(", ")}`
+                        );
+                      const tip =
+                        reasons.length > 0
+                          ? reasons.join("\n")
+                          : "No excluded non-working days in selected range.";
+                      const excluded = liveFridayISOList.length + liveHolidayISOList.length;
+                      return (
+                        <Tooltip title={<pre style={{ margin: 0 }}>{tip}</pre>} arrow>
+                          <Box sx={{ display: "inline-flex", flexDirection: "column" }}>
+                            <Box component="span">{calculatedDays || 0}</Box>
+                            {excluded > 0 ? (
+                              <Typography variant="caption" color="text.secondary">
+                                -{excluded} excluded
+                              </Typography>
+                            ) : null}
+                          </Box>
+                        </Tooltip>
+                      );
+                    })()}
                   />
                   <StatTile
                     title={t("leave.request.endDate", "End date")}
@@ -1224,6 +1282,26 @@ const LeaveRequestScreen: React.FC<
                   )}
                 </Box>
               </Box>
+
+              {(liveApprovedConflicts?.length || 0) > 0 && (
+                <Alert severity="warning" sx={{ mt: 2 }}>
+                  {t(
+                    "leave.request.approvedOverlapNote",
+                    "Note: This employee already has an approved vacation/leave overlapping these dates."
+                  )}
+                </Alert>
+              )}
+
+              {(liveHolidayISOList?.length || 0) > 0 && (
+                <Alert severity="warning" sx={{ mt: 2 }}>
+                  {t(
+                    "leave.request.holidayConflictResolved",
+                    "This request includes public holiday date(s). Holidays will not be counted in Net Vacation."
+                  )}
+                  {" "}
+                  {liveHolidayISOList.map((iso) => toDMY(iso)).join(", ")}
+                </Alert>
+              )}
 
               {/* Form fields */}
               <Box
@@ -1500,8 +1578,7 @@ const LeaveRequestScreen: React.FC<
                         calculatedDays === 0 ||
                         !formData.startDate ||
                         !formData.leaveCode ||
-                        !!daysError ||
-                        liveOverlap
+                        !!daysError
                       }
                       startIcon={
                         submitting ? (

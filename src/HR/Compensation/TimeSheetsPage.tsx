@@ -1816,6 +1816,68 @@ useEffect(() => {
           return ""; // don't force AL as a fallback
         };
 
+        const isApprovedLike = (status: any): boolean => {
+          const s = String(status || "")
+            .trim()
+            .toLowerCase();
+          if (!s) return false;
+          return [
+            "approved",
+            "accepted",
+            "validated",
+            "approuved",
+            "approuvé",
+            "validé",
+            "approved by hr",
+            "approved_by_hr",
+          ].some((tk) => s.includes(tk));
+        };
+
+        const ymd10 = (v: any): string => {
+          if (!v) return "";
+          // Use the same robust parser used elsewhere in this file.
+          // This correctly handles DD/MM/YYYY, YYYY-MM-DD, and mixed inputs.
+          const d = parseStartDateLocal(v);
+          return d && d.isValid() ? d.format("YYYY-MM-DD") : "";
+        };
+
+        const normalizeExcludedISOSet = (excluded: any): Set<string> => {
+          const set = new Set<string>();
+          if (!excluded) return set;
+
+          // Backend shape: { fridays: string[], holidays: [{date,name}] }
+          if (!Array.isArray(excluded) && typeof excluded === "object") {
+            const fr = Array.isArray((excluded as any).fridays)
+              ? (excluded as any).fridays
+              : [];
+            const hol = Array.isArray((excluded as any).holidays)
+              ? (excluded as any).holidays
+              : [];
+            for (const x of fr) {
+              const iso = String(x || "").slice(0, 10);
+              if (iso) set.add(iso);
+            }
+            for (const x of hol) {
+              const iso = String((x as any)?.date ?? (x as any)?.iso ?? x ?? "").slice(0, 10);
+              if (iso) set.add(iso);
+            }
+            return set;
+          }
+
+          // Frontend/legacy shapes: array<string> or array<{iso,date}>
+          const arr = Array.isArray(excluded) ? excluded : [];
+          for (const x of arr) {
+            if (!x) continue;
+            if (typeof x === "string") {
+              set.add(x.slice(0, 10));
+              continue;
+            }
+            const iso = String((x as any).iso ?? (x as any).date ?? "").slice(0, 10);
+            if (iso) set.add(iso);
+          }
+          return set;
+        };
+
         const next = new Map<number, Map<string, string>>();
 
         await Promise.all(
@@ -1825,8 +1887,7 @@ useEffect(() => {
               const map = new Map<string, string>();
 
               for (const lr of reqs || []) {
-                const status = String(lr.status || "").toLowerCase();
-                if (status !== "approved") continue;
+                if (!isApprovedLike((lr as any).status ?? (lr as any).state)) continue;
 
                 // Prefer numeric ID → lookup table
                 const idCanRaw =
@@ -1859,17 +1920,29 @@ useEffect(() => {
 
                 if (!code) continue; // unrecognized — don't mislabel as AL
 
+                const isSick = String(code || "").toUpperCase() === "SL";
+                const excludedSet = normalizeExcludedISOSet((lr as any).excluded);
+
                 // Date span clamp to the visible month
-                const s = dayjs(lr.startDate || lr.date_depart || lr.from);
-                const e = dayjs(
-                  lr.endDate || lr.date_end || lr.to || lr.startDate
-                );
+                const sISO = ymd10((lr as any).startDate || (lr as any).date_depart || (lr as any).from);
+                const eISO = ymd10((lr as any).endDate || (lr as any).date_end || (lr as any).to || (lr as any).startDate);
+                if (!sISO || !eISO) continue;
+                const s = dayjs(sISO);
+                const e = dayjs(eISO);
+                if (!s.isValid() || !e.isValid()) continue;
                 const first = s.isAfter(monthStart) ? s : monthStart;
                 const last = e.isBefore(monthEnd) ? e : monthEnd;
 
                 let cur = first;
                 while (!cur.isAfter(last, "day")) {
-                  map.set(cur.format("YYYY-MM-DD"), code);
+                  const ymd = cur.format("YYYY-MM-DD");
+                  const isFri = cur.day() === 5;
+                  const isHol = holidaysSet.has(ymd);
+                  // effective-day rule: do not count leave on Fri/holidays (except sick leave)
+                  const isExcluded = excludedSet.has(ymd);
+                  if (isSick || (!isFri && !isHol && !isExcluded)) {
+                    map.set(ymd, code);
+                  }
                   cur = cur.add(1, "day");
                 }
               }
@@ -1887,7 +1960,7 @@ useEffect(() => {
         setLeavesByEmp(new Map());
       }
     })();
-  }, [rangeFrom, rangeResults, leaveCodeByIntCan]);
+  }, [rangeFrom, rangeResults, leaveCodeByIntCan, holidaysSet]);
 
   const getPsParam = (val: string) => {
     if (val === "ALL" || !val) return null;
@@ -2213,22 +2286,50 @@ useEffect(() => {
     tsd?: TimesheetDay,
     rec?: { j?: string }
   ): string {
-    const rangeRaw =
+    const isFri = dayjs(ymd).day() === 5;
+    const dayRaw0 =
       (rec as any)?.j ??
       (rec as any)?.code ??
       (rec as any)?.leaveCode ??
       (rec as any)?.leave_type ??
+      tsd?.code ??
+      tsd?.reason ??
       "";
-    const rangeCode = normalizeLeaveCode(rangeRaw);
-    if (rangeCode) return rangeCode;
+    const dayCode0 = normalizeLeaveCode(dayRaw0);
+    const dayUp0 = String(dayCode0 || "").toUpperCase();
+    const isHol =
+      Boolean((tsd as any)?.isHoliday) ||
+      Boolean((rec as any)?.isHoliday) ||
+      holidaysSet.has(ymd) ||
+      dayUp0 === "PH" ||
+      dayUp0 === "PHF";
 
+    // Day-level attendance codes must win over overlays (PH/PHF/PT/PL).
+    const dayRaw =
+      (rec as any)?.j ??
+      (rec as any)?.code ??
+      (rec as any)?.leaveCode ??
+      (rec as any)?.leave_type ??
+      tsd?.code ??
+      tsd?.reason ??
+      "";
+    const dayCode = normalizeLeaveCode(dayRaw);
+    if (dayCode && ["PH", "PHF", "PT", "PL"].includes(String(
+      dayCode
+    ).toUpperCase())) {
+      return String(dayCode).toUpperCase();
+    }
+
+    // Prefer leave-request overlay (authoritative span) over any daily-coded data.
+    // This prevents the grid from showing AL beyond the actual request end date.
     const overlayRaw = leavesByEmp.get(empId)?.get(ymd) || "";
     const overlayCode = normalizeLeaveCode(overlayRaw);
-    if (overlayCode) return overlayCode;
-
-    const tsRaw = tsd?.code ?? tsd?.reason ?? "";
-    const tsCode = normalizeLeaveCode(tsRaw);
-    if (tsCode) return tsCode;
+    if (overlayCode) {
+      const up = String(overlayCode).toUpperCase();
+      const isSick = up === "SL";
+      if (!isSick && (isFri || isHol)) return "";
+      return up;
+    }
 
     return "";
   }
@@ -2510,19 +2611,6 @@ useEffect(() => {
       // 3) Totals for summary
       const aTaken = countIf(isAbsentUnexcused);
       const phTaken = countPublicHolidays();
-
-      // Compute approved days in period from leave requests (exclude Fridays and configured holidays)
-      function businessDaysInclusive(from: dayjs.Dayjs, to: dayjs.Dayjs): number {
-        let cnt = 0;
-        let d = from.startOf("day");
-        const end = to.startOf("day");
-        while (!d.isAfter(end)) {
-          const ymd = d.format("YYYY-MM-DD");
-          if (d.day() !== 5 && !holidaysSet.has(ymd)) cnt++;
-          d = d.add(1, "day");
-        }
-        return cnt;
-      }
 
       // Period-limited values (kept for period label, but not used for 'Consumed')
       let approvedInPeriodDays = 0;
@@ -3410,9 +3498,18 @@ useEffect(() => {
     const isToday = cellDate.isSame(today, "day");
 
     const ymd = cellDate.format("YYYY-MM-DD");
+    const safeISO10 = (v: any): string => {
+      if (!v) return "";
+      const s = String(v).trim();
+      if (/^\d{4}-\d{2}-\d{2}/.test(s)) return s.slice(0, 10);
+      const d = parseStartDateLocal(s);
+      return d && d.isValid() ? d.format("YYYY-MM-DD") : "";
+    };
+
     const onVacation = (vacations || []).find((v) => {
-      const start = dayjs(v.date_depart).format("YYYY-MM-DD");
-      const end = dayjs(v.date_end).format("YYYY-MM-DD");
+      const start = safeISO10(v.date_depart);
+      const end = safeISO10(v.date_end);
+      if (!start || !end) return false;
       const stateLower = (v.state || "").toLowerCase();
       const isValidState =
         stateLower === "approved" ||
@@ -3421,15 +3518,16 @@ useEffect(() => {
       return ymd >= start && ymd <= end && isValidState;
     });
 
+    const rawCode = String((overlay?.j ?? rec?.code ?? "") || "").trim().toUpperCase();
     const present = !!rec?.present || rec?.code === "P" || !!overlay?.E;
-    const isHoliday = !!rec?.isHoliday;
+    const isHoliday = Boolean(rec?.isHoliday) || holidaysSet.has(ymd) || rawCode === "PH" || rawCode === "PHF";
     const isAbsent = (overlay?.j || rec?.code || "") === "A" && !onVacation;
     const isLate =
       (rec?.deltaMin != null && rec.deltaMin < 0) || overlay?.R === "L";
 
     const displayJ = (() => {
       const recJ = (overlay?.j ?? rec?.code) || "";
-      if (onVacation && recJ !== "P" && !isFriday) {
+      if (onVacation && recJ !== "P" && !isFriday && !isHoliday) {
         return onVacation.type || "V";
       }
       if (isFriday && !(recJ && recJ !== "A")) return t("off") || "Off";
@@ -4141,7 +4239,13 @@ useEffect(() => {
                       const hasES = hasE && hasS;
 
                       const isFri = d.day() === 5;
-                      const isHolidayDate = holidaysSet.has(ymd);
+                      const rawUp = String(rawMerged || "").toUpperCase();
+                      const isHolidayByCode = rawUp === "PH" || rawUp === "PHF";
+                      const isHolidayDate =
+                        holidaysSet.has(ymd) ||
+                        Boolean((tsd as any)?.isHoliday) ||
+                        Boolean((rec as any)?.isHoliday) ||
+                        isHolidayByCode;
                       const todayStart = dayjs().startOf("day");
                       // Treat today as not finished: only days strictly before today are "past"
                       const isFutureOrToday = !d.isBefore(todayStart, "day");
@@ -4152,6 +4256,30 @@ useEffect(() => {
                         tsd,
                         rec as any
                       );
+
+                      const safeISO10 = (v: any): string => {
+                        if (!v) return "";
+                        const s = String(v).trim();
+                        if (/^\d{4}-\d{2}-\d{2}/.test(s)) return s.slice(0, 10);
+                        const dd = parseStartDateLocal(s);
+                        return dd && dd.isValid() ? dd.format("YYYY-MM-DD") : "";
+                      };
+
+                      const onVacation = (() => {
+                        const arr = vacationsByEmp.get(row.id_emp) || [];
+                        for (const v of arr) {
+                          const st = safeISO10((v as any).date_depart);
+                          const en = safeISO10((v as any).date_end);
+                          if (!st || !en) continue;
+                          const stateLower = String((v as any).state || "").toLowerCase();
+                          const ok =
+                            stateLower === "approved" ||
+                            stateLower === "pending" ||
+                            stateLower === "موافق عليه";
+                          if (ok && ymd >= st && ymd <= en) return v as any;
+                        }
+                        return null;
+                      })();
 
                       let workMin: number | null = null;
                       const eHM = tsd?.entry
@@ -4195,28 +4323,18 @@ useEffect(() => {
 
                       const attCode = (() => {
                         const allowed = new Set([
+                          // Pure attendance / holiday-work codes only; leave codes are handled via overlay
                           "P",
                           "A",
                           "PT",
                           "PL",
                           "PH",
                           "PHF",
-                          // Exception codes
+                          // Exception / special status codes
                           "NI",
                           "NO",
                           "MO",
                           "IP",
-                          // Leave codes
-                          "AL",
-                          "SL",
-                          "EL",
-                          "UL",
-                          "ML",
-                          "XL",
-                          "B1",
-                          "B2",
-                          "HL",
-                          "BM",
                         ]);
                         return allowed.has(rawMerged) ? rawMerged : "";
                       })();
@@ -4225,10 +4343,22 @@ useEffect(() => {
                         hasES && (deltaMin == null || deltaMin >= 0);
 
                       let centerCode = "";
-                      if ((isHolidayDate || isFri) && hasES) {
+                      // Holiday wins over everything (including leave/vacation): never paint AL over PH/PHF.
+                      if (isHolidayDate) {
+                        if (isHolidayByCode) {
+                          centerCode = rawUp;
+                        } else if (hasES) {
+                          centerCode = workedFullDay ? "PHF" : "PH";
+                        } else {
+                          // Pure holiday (no punches, no explicit PH/PHF): colored column, empty code
+                          centerCode = "";
+                        }
+                      } else if (isFri && hasES) {
                         centerCode = workedFullDay ? "PHF" : "PH";
                       } else if (leaveCodeFinal) {
                         centerCode = leaveCodeFinal;
+                      } else if (onVacation && !isFri) {
+                        centerCode = String((onVacation as any)?.type || "V").toUpperCase();
                       } else if (hasES) {
                         // Presence overrides raw 'A'; keep explicit PT/PL if provided
                         centerCode = attCode && attCode !== "A" ? attCode : "P";
@@ -4654,7 +4784,13 @@ useEffect(() => {
                                 tsd,
                                 rec as any
                               );
-                              const isHoliday = holidaysSet.has(ymd);
+                              const dayUp = String((rec as any)?.j ?? tsd?.code ?? "").toUpperCase();
+                              const isHoliday =
+                                holidaysSet.has(ymd) ||
+                                Boolean((tsd as any)?.isHoliday) ||
+                                Boolean((rec as any)?.isHoliday) ||
+                                dayUp === "PH" ||
+                                dayUp === "PHF";
                               const isSick = /^(SL)$/i.test(finalCode || "");
 
                               if (finalCode) {

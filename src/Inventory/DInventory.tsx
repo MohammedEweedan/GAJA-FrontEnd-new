@@ -29,23 +29,24 @@ import {
 // ExcelJS was previously used for embedding images; we now use MHTML export similar to SalesReportsTable
 import { useAuth } from "../contexts/AuthContext";
 // Export image settings (mirrors SalesReportsTable approach for compatibility)
-const EXPORT_IMG_SIZE = 55; // px size for exported thumbnails
-const EXPORT_IMG_QUALITY = 0.7; // jpeg quality
+// Increased size/quality for sharper images in Excel exports
+const EXPORT_IMG_SIZE = 160; // px size for exported thumbnails (was 55)
 const EXPORT_MAX_IMAGES = 800; // global cap across export
-const EXPORT_FALLBACK_COLOR = "#f0f0f0";
+// (quality and canvas fallback removed with new base64 approach)
 
-// Utility: fetch image URL (already tokenized) and downscale to fixed size JPEG base64 to reduce XLS size
-// `quality` is optional and defaults to `EXPORT_IMG_QUALITY`.
+// (removed) previously used canvas-based downscale function to build base64; replaced by a more robust fetch-only approach
+
+// Downscale an image to fixed square and return data URL (JPEG) like SalesReportsTable
+const EXPORT_IMG_QUALITY = 0.92; // higher base JPEG quality for clarity (was 0.7)
+const EXPORT_FALLBACK_COLOR = "#f0f0f0";
 async function fetchAndDownscaleToBase64(
   rawUrl: string,
-  size: number,
-  quality?: number
+  size: number
 ): Promise<string | null> {
   try {
     const resp = await fetch(rawUrl, { method: "GET" });
     if (!resp.ok) return null;
     const blob = await resp.blob();
-    // If already small just convert to base64
     if (blob.size < 3500) {
       return await new Promise<string>((resolve, reject) => {
         const r = new FileReader();
@@ -65,7 +66,9 @@ async function fetchAndDownscaleToBase64(
     canvas.height = size;
     const ctx = canvas.getContext("2d");
     if (!ctx) return null;
-    // object-fit: cover
+    // Improve resampling quality
+    (ctx as any).imageSmoothingEnabled = true;
+    (ctx as any).imageSmoothingQuality = "high";
     const ratio = Math.max(size / img.width, size / img.height);
     const nw = img.width * ratio;
     const nh = img.height * ratio;
@@ -74,14 +77,13 @@ async function fetchAndDownscaleToBase64(
     ctx.fillStyle = EXPORT_FALLBACK_COLOR;
     ctx.fillRect(0, 0, size, size);
     ctx.drawImage(img, dx, dy, nw, nh);
-    const q = typeof quality === "number" ? quality : EXPORT_IMG_QUALITY;
-    let dataUrl = canvas.toDataURL("image/jpeg", q);
     URL.revokeObjectURL(img.src);
-    // If the produced base64 blob is very large, progressively lower quality as fallback.
-    if (dataUrl.length > 60000)
-      dataUrl = canvas.toDataURL("image/jpeg", Math.min(0.85, q));
+    let dataUrl = canvas.toDataURL("image/jpeg", EXPORT_IMG_QUALITY);
+    // Gentle fallback compression only if very large
     if (dataUrl.length > 120000)
-      dataUrl = canvas.toDataURL("image/jpeg", Math.min(0.6, q));
+      dataUrl = canvas.toDataURL("image/jpeg", 0.85);
+    if (dataUrl.length > 200000)
+      dataUrl = canvas.toDataURL("image/jpeg", 0.75);
     return dataUrl;
   } catch {
     try {
@@ -119,8 +121,7 @@ async function fetchImageListForExport(id: number): Promise<string[]> {
           .map((u: string) => {
             if (typeof u !== "string") return "";
             if (
-              u.startsWith("https://system.gaja.ly") ||
-              u.startsWith("http://system.gaja.ly")
+              u.startsWith("https://system.gaja.ly")
             ) {
               u =
                 "https://system.gaja.ly" +
@@ -135,7 +136,7 @@ async function fetchImageListForExport(id: number): Promise<string[]> {
               try {
                 const after = u.substring("http://".length);
                 u = "https://" + after;
-              } catch {}
+              } catch { }
             }
             if (token) {
               try {
@@ -163,6 +164,7 @@ type InventoryItem = {
   desig_art: string;
   qty: number;
   qty_difference: number;
+  ps?: number | string | null;
   Fournisseur: {
     client_name: string;
     code_supplier: string;
@@ -185,43 +187,45 @@ export const DIAMOND_FIELDS_ORDER: {
   label: string;
   format?: (v: any) => string;
 }[] = [
-  { key: "id_achat", label: " System ID." },
-  { key: "CODE_EXTERNAL", label: "  Ref Code" },
-  { key: "comment_edit", label: "  Sales Code" },
-  { key: "reference_number", label: "  Ref." },
-  { key: "serial_number", label: "  Serial No." },
-  { key: "carat", label: "  Carat", format: (v) => `${v}` },
-  { key: "shape", label: " Shape" },
-  { key: "color", label: " Color" },
-  { key: "clarity", label: " Clarity" },
-  { key: "cut", label: " Cut" },
-  { key: "polish", label: " Polish" },
-  { key: "symmetry", label: " Symmetry" },
-  { key: "fluorescence", label: " Fluor." },
-  { key: "measurements", label: " Measurements" },
-  { key: "depth_percent", label: " Depth %", format: (v) => `${v}` },
-  { key: "table_percent", label: " Table %", format: (v) => `${v}` },
-  { key: "girdle", label: " Girdle" },
-  { key: "culet", label: " Culet" },
-  { key: "certificate_number", label: " Cert #" },
-  { key: "certificate_lab", label: " Lab" },
-  { key: "certificate_url", label: " Cert URL" },
-  { key: "laser_inscription", label: " Laser Inscription" },
-  { key: "price_per_carat", label: " Item Cost", format: (v) => `${v}` },
-  { key: "origin_country", label: " Origin" },
-  { key: "Brand", label: " Brand Name" },
-  {
-    key: "Rate",
-    label: " Rate",
-    format: (v) => {
-      const n = Number(v);
-      return isNaN(n) ? String(v ?? "") : n.toFixed(2);
+    { key: "id_achat", label: " System ID." },
+    { key: "CODE_EXTERNAL", label: "  Ref. Code" },
+    { key: "comment_edit", label: "  Sales Code" },
+    { key: "reference_number", label: "  Ref." },
+    { key: "serial_number", label: "  Serial No." },
+    { key: "carat", label: "  Carat", format: (v) => `${v}` },
+    { key: "shape", label: " Shape" },
+    { key: "color", label: " Color" },
+    { key: "clarity", label: " Clarity" },
+    { key: "cut", label: " Cut" },
+    { key: "polish", label: " Polish" },
+    { key: "symmetry", label: " Symmetry" },
+    { key: "fluorescence", label: " Fluor." },
+    { key: "measurements", label: " Measurements" },
+    { key: "depth_percent", label: " Depth %", format: (v) => `${v}` },
+    { key: "table_percent", label: " Table %", format: (v) => `${v}` },
+    { key: "girdle", label: " Girdle" },
+    { key: "culet", label: " Culet" },
+    { key: "certificate_number", label: " Cert #" },
+    { key: "certificate_lab", label: " Lab" },
+    { key: "certificate_url", label: " Cert URL" },
+    { key: "laser_inscription", label: " Laser Inscription" },
+    { key: "price_per_carat", label: " Item Cost", format: (v) => `${v}` },
+    { key: "origin_country", label: " Origin" },
+    { key: "Brand", label: " Brand Name" },
+    {
+      key: "Rate",
+      label: " Rate",
+      format: (v) => {
+        const n = Number(v);
+        return isNaN(n) ? String(v ?? "") : n.toFixed(2);
+      },
     },
-  },
-  { key: "Total_Price_LYD", label: " Total (LYD)", format: (v) => `${v}` },
-  { key: "Design_art", label: " Product Name" },
-  { key: "SellingPrice", label: " Selling Price", format: (v) => `${v}` },
-];
+    { key: "Total_Price_LYD", label: " Total (LYD)", format: (v) => `${v}` },
+    { key: "Design_art", label: " Product Name" },
+    { key: "SellingPrice", label: " Selling Price", format: (v) => `${v}` },
+    // Synthetic/export-only field: Point of Sale label
+    { key: "PS", label: " PS" },
+  ];
 
 const getDiamondFromRow = (row: InventoryItem): any => {
   const dp: any = row.DistributionPurchase;
@@ -230,7 +234,17 @@ const getDiamondFromRow = (row: InventoryItem): any => {
   else if (dp && typeof dp === "object") diamond = dp.OriginalAchatDiamond;
   if (!diamond) return undefined;
   // Inject supplier brand so it appears in Details as 'Brand Name'
-  return { ...diamond, Brand: row.Fournisseur?.client_name };
+  // Also ensure Ref. Code (CODE_EXTERNAL) falls back to id_fact when empty.
+  const hasRef =
+    diamond.CODE_EXTERNAL !== undefined &&
+    diamond.CODE_EXTERNAL !== null &&
+    String(diamond.CODE_EXTERNAL).trim() !== "";
+  const refCode = hasRef ? diamond.CODE_EXTERNAL : row.id_fact;
+  return {
+    ...diamond,
+    Brand: row.Fournisseur?.client_name,
+    CODE_EXTERNAL: refCode,
+  };
 };
 
 const API_BASEImage = "/images";
@@ -395,57 +409,54 @@ const DInventory: React.FC<Props> = ({ Type = "" }) => {
     };
     fetchFamilleList();
   }, []);
-  const { user } = useAuth();
-  const isAdmin = React.useMemo(() => {
-    // 1) Prefer Prvilege from localStorage (backend Users.Roles)
-    try {
-      const u = localStorage.getItem("user");
-      if (u) {
-        const obj = JSON.parse(u);
-        const prv = obj?.Prvilege;
-        const list: string[] = Array.isArray(prv)
-          ? prv.map((r: any) =>
-              typeof r === "string"
-                ? r
-                : String(r?.name || r?.role || r?.value || r)
-            )
-          : typeof prv === "string"
-            ? prv.split(/[\s,;|]+/)
-            : prv
-              ? [String(prv?.name || prv?.role || prv?.value || prv)]
-              : [];
-        if (
-          list.some(
-            (s) =>
-              String(s).toUpperCase().includes("ROLE_ADMIN") ||
-              String(s).toUpperCase() === "ADMIN"
-          )
-        )
-          return true;
+  const [isAdmin, setIsAdmin] = React.useState(false);
+  const [canChangePs, setCanChangePs] = React.useState(false);
+
+  // Permission to see Item Cost (price_per_carat) controlled by /me -> Action_user containing 'Show Cost'.
+  React.useEffect(() => {
+    let cancelled = false;
+
+    const loadRoles = async () => {
+      try {
+        const res = await axios.get(`/me`);
+        const payload = res?.data;
+        const u = (payload as any) || {};
+        const roles = u?.Action_user;
+
+        let next = false;
+        let canPs = false;
+        const hasShowCost = (val: string) =>
+          val.toLowerCase().includes("show cost");
+        const hasChangePs = (val: string) =>
+          val.toLowerCase().includes("change ps of product");
+
+        if (Array.isArray(roles)) {
+          next = roles.some((r: any) => hasShowCost(String(r)));
+          canPs = roles.some((r: any) => hasChangePs(String(r)));
+        } else if (typeof roles === "string") {
+          next = hasShowCost(roles);
+          canPs = hasChangePs(roles);
+        }
+
+        if (!cancelled) {
+          setIsAdmin(next);
+          setCanChangePs(canPs);
+        }
+      } catch {
+        // If /me fails, keep current isAdmin value.
       }
-    } catch {}
-    // 2) Fallback to roles from AuthContext
-    const candidates: string[] = [];
-    if (user?.role) candidates.push(String(user.role));
-    const rs: any = (user as any)?.roles;
-    if (Array.isArray(rs)) {
-      rs.forEach((r: any) =>
-        candidates.push(
-          typeof r === "string"
-            ? r
-            : String((r && (r.name || r.role || r.value)) ?? r)
-        )
-      );
-    } else if (typeof rs === "string") {
-      rs.split(/[\s,;]+/).forEach((s: string) => s && candidates.push(s));
-    } else if (rs) {
-      candidates.push(String((rs && (rs.name || rs.role || rs.value)) ?? rs));
-    }
-    return candidates.some((s) => {
-      const up = String(s).toUpperCase();
-      return up.includes("ROLE_ADMIN") || up === "ADMIN";
-    });
-  }, [user]);
+    };
+
+    // initial load
+    loadRoles();
+
+    // refresh every 10 seconds so DB changes are reflected
+    const id = setInterval(loadRoles, 10000);
+    return () => {
+      cancelled = true;
+      clearInterval(id as unknown as number);
+    };
+  }, []);
   // session: PS filter state.
   // NOTE: We prefill the Autocomplete input from localStorage (`ps`) but
   // do NOT apply it as the active filter on first load. The user must
@@ -476,6 +487,17 @@ const DInventory: React.FC<Props> = ({ Type = "" }) => {
   const [imageDialogOpen, setImageDialogOpen] = React.useState(false);
   const [dialogImages, setDialogImages] = React.useState<string[]>([]);
   const [dialogIndex, setDialogIndex] = React.useState(0);
+  // Change PS dialog state (mirrors WInventory/GInventory)
+  const [psOptionsDetailed, setPsOptionsDetailed] = React.useState<
+    { id: string; label: string }[]
+  >([]);
+  const [psDialogOpen, setPsDialogOpen] = React.useState(false);
+  const [psDialogItem, setPsDialogItem] = React.useState<InventoryItem | null>(
+    null
+  );
+  const [psSelection, setPsSelection] = React.useState("");
+  const [psDialogError, setPsDialogError] = React.useState("");
+  const [psSaving, setPsSaving] = React.useState(false);
   // Auto-select rename type based on filename
   React.useEffect(() => {
     if (!imageDialogOpen || !dialogImages.length) return;
@@ -517,6 +539,7 @@ const DInventory: React.FC<Props> = ({ Type = "" }) => {
   const [costMax, setCostMax] = React.useState<string>("");
   const [refCode, setRefCode] = React.useState<string>("");
   const [salesCode, setSalesCode] = React.useState<string>("");
+  const [idFilter, setIdFilter] = React.useState<string>("");
   // zoom & pan state for dialog image
   const [zoom, setZoom] = React.useState(1);
   const [offset, setOffset] = React.useState({ x: 0, y: 0 });
@@ -536,6 +559,112 @@ const DInventory: React.FC<Props> = ({ Type = "" }) => {
   React.useEffect(() => {
     if (imageDialogOpen) resetZoom();
   }, [imageDialogOpen, dialogIndex, resetZoom]);
+
+  // Load PS options once (same source as W/G inventory)
+  React.useEffect(() => {
+    const token = localStorage.getItem("token");
+    if (!token) return;
+    const load = async () => {
+      try {
+        const res = await axios.get("/ps/all", {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        const rows = Array.isArray(res.data) ? res.data : [];
+        const opts = rows
+          .map((r: any) => {
+            const id =
+              r.Id_point ??
+              r.ID_POINT ??
+              r.id_point ??
+              r.id ??
+              r.code ??
+              null;
+            const name =
+              r.name_point ??
+              r.NAME_POINT ??
+              r.name ??
+              r.label ??
+              r.Email ??
+              "";
+            if (id == null) return null;
+            return {
+              id: String(id),
+              label: String(name || id),
+            };
+          })
+          .filter(Boolean) as { id: string; label: string }[];
+        setPsOptions(opts.map((o) => o.label));
+        setPsOptionsDetailed(opts);
+      } catch (e) {
+        console.error("Failed to load PS options for DInventory", e);
+      }
+    };
+    load();
+  }, []);
+
+  const handleOpenChangePsDialog = React.useCallback(
+    (item: InventoryItem) => {
+      setPsDialogItem(item);
+      const current =
+        item.ps != null
+          ? String(item.ps)
+          : psOptionsDetailed.length
+            ? psOptionsDetailed[0].id
+            : "";
+      setPsSelection(current);
+      setPsDialogError("");
+      setPsDialogOpen(true);
+    },
+    [psOptionsDetailed]
+  );
+
+  const handleClosePsDialog = () => {
+    if (psSaving) return;
+    setPsDialogOpen(false);
+    setPsDialogItem(null);
+    setPsSelection("");
+    setPsDialogError("");
+  };
+
+  const handleSavePsChange = React.useCallback(async () => {
+    if (!psDialogItem) return;
+    if (!psSelection) {
+      setPsDialogError("Please select a point of sale");
+      return;
+    }
+    const token = localStorage.getItem("token");
+    if (!token) {
+      setPsDialogError("Missing auth token");
+      return;
+    }
+    setPsSaving(true);
+    setPsDialogError("");
+    try {
+      const payloadPs = isNaN(Number(psSelection))
+        ? psSelection
+        : Number(psSelection);
+      await axios.put(
+        `/purchases/Update/${psDialogItem.id_fact}`,
+        { ps: payloadPs },
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+      setData((prev) =>
+        prev.map((row) =>
+          row.id_fact === psDialogItem.id_fact ? { ...row, ps: payloadPs } : row
+        )
+      );
+      setPsDialogOpen(false);
+      setPsDialogItem(null);
+      setPsSelection("");
+    } catch (e: any) {
+      console.error("Failed to update PS for diamond inventory", e);
+      const msg =
+        e?.response?.data?.message || "Failed to update point of sale";
+      setPsDialogError(msg);
+    } finally {
+      setPsSaving(false);
+    }
+  }, [psDialogItem, psSelection]);
 
   const handleWheel = (e: React.WheelEvent) => {
     e.preventDefault();
@@ -719,11 +848,11 @@ const DInventory: React.FC<Props> = ({ Type = "" }) => {
       let p: any = null;
       if (Array.isArray(dpAny)) {
         for (const d of dpAny) {
-          p = d?.ps ?? d?.PS ?? d?.Id_point ?? d?.ps_id;
+          p = d?.ps;
           if (p != null) break;
         }
       } else if (dpAny && typeof dpAny === "object") {
-        p = dpAny?.ps ?? dpAny?.PS ?? dpAny?.Id_point ?? dpAny?.ps_id;
+        p = dpAny?.ps;
       }
       if (p == null) return "";
       const key = String(p);
@@ -894,9 +1023,9 @@ const DInventory: React.FC<Props> = ({ Type = "" }) => {
                 return u.includes("token=")
                   ? u
                   : u +
-                      (u.includes("?") ? "&" : "?") +
-                      "token=" +
-                      encodeURIComponent(token);
+                  (u.includes("?") ? "&" : "?") +
+                  "token=" +
+                  encodeURIComponent(token);
               });
             }
             {
@@ -1055,9 +1184,9 @@ const DInventory: React.FC<Props> = ({ Type = "" }) => {
                 return u.includes("token=")
                   ? u
                   : u +
-                      (u.includes("?") ? "&" : "?") +
-                      "token=" +
-                      encodeURIComponent(token);
+                  (u.includes("?") ? "&" : "?") +
+                  "token=" +
+                  encodeURIComponent(token);
               });
             }
             {
@@ -1189,7 +1318,40 @@ const DInventory: React.FC<Props> = ({ Type = "" }) => {
         },
       },
       {
-        header: "Ref Code",
+        header: "PS",
+        id: "ps_column",
+        size: 120,
+        Cell: ({ row }) => {
+          const label = getPsLabelFromRow(row.original) || "-";
+          return (
+            <Typography variant="body2" sx={{ whiteSpace: "nowrap" }}>
+              {label}
+            </Typography>
+          );
+        },
+      },
+      {
+        header: "Actions",
+        id: "actions",
+        size: 140,
+        Cell: ({ row }) => (
+          <Box sx={{ display: "flex", gap: 1 }}>
+            {canChangePs && (
+              <Button
+                variant="outlined"
+                size="small"
+                onClick={() => handleOpenChangePsDialog(row.original)}
+                disabled={!psOptionsDetailed.length}
+                sx={{ textTransform: "none" }}
+              >
+                Change PS
+              </Button>
+            )}
+          </Box>
+        ),
+      },
+      {
+        header: "Ref. Code",
         id: "ref_code",
         size: 140,
         Cell: ({ row }) => {
@@ -1329,7 +1491,16 @@ const DInventory: React.FC<Props> = ({ Type = "" }) => {
         },
       },
     ],
-    [images, imageUrls, fieldsToShow, data, imageTypeFilter]
+    [
+      images,
+      imageUrls,
+      fieldsToShow,
+      data,
+      imageTypeFilter,
+      canChangePs,
+      handleOpenChangePsDialog,
+      psOptionsDetailed.length,
+    ]
   );
 
   // small usage so 'columns' isn't considered unused (we render a flat list instead of the table)
@@ -1341,12 +1512,18 @@ const DInventory: React.FC<Props> = ({ Type = "" }) => {
   const filteredData = React.useMemo(() => {
     const brandQ = brandFilter.trim().toLowerCase();
     const nameQ = productName.trim().toLowerCase();
+    const idQ = idFilter.trim();
     const refQ = refCode.trim().toLowerCase();
     const salesQ = salesCode.trim().toLowerCase();
     const min = costMin ? Number(costMin) : null;
     const max = costMax ? Number(costMax) : null;
     return data.filter((row) => {
       const diamond = getDiamondFromRow(row) || {};
+      // id_fact filter
+      if (idQ) {
+        const idStr = String(row.id_fact ?? "");
+        if (!idStr.includes(idQ)) return false;
+      }
       // PS filter: if set, ensure at least one DistributionPurchase entry matches the PS id
       if (psFilter && psFilter.trim() !== "") {
         const psVal = psFilter.trim();
@@ -1402,6 +1579,7 @@ const DInventory: React.FC<Props> = ({ Type = "" }) => {
     data,
     brandFilter,
     productName,
+    idFilter,
     refCode,
     salesCode,
     costMin,
@@ -1410,160 +1588,7 @@ const DInventory: React.FC<Props> = ({ Type = "" }) => {
     psFilter,
   ]);
 
-  // Helper to fetch base64 image for export by fetching the image blob (appending token if needed)
-  // and converting to a data URL. This avoids canvas CORS issues and mirrors how images are
-  // displayed in the table (token as query param).
-  const getBase64FromUrl = async (
-    url: string
-  ): Promise<{ base64: string | null; ext?: string; contentType?: string }> => {
-    try {
-      if (!url) return { base64: null };
-      // If already a data URL, return stripped base64
-      if (url.startsWith("data:")) {
-        const idx = url.indexOf(",");
-        const header = url.substring(5, idx);
-        const mime = header.split(";")[0];
-        let ext = "png";
-        if (mime === "image/jpeg" || mime === "image/jpg") ext = "jpeg";
-        else if (mime === "image/gif") ext = "gif";
-        return { base64: idx === -1 ? url : url.substring(idx + 1), ext };
-      }
-      let fetchUrl = url;
-      const token = localStorage.getItem("token");
-
-      const arrayBufferToBase64 = (buffer: ArrayBuffer) => {
-        const bytes = new Uint8Array(buffer);
-        let binary = "";
-        const chunkSize = 0x8000;
-        for (let i = 0; i < bytes.length; i += chunkSize) {
-          const slice = bytes.subarray(i, i + chunkSize);
-          binary += String.fromCharCode.apply(null, Array.from(slice) as any);
-        }
-        return btoa(binary);
-      };
-
-      // 0) Optional same-origin proxy attempt. This requires a backend endpoint that
-      // proxies an external image and returns the raw bytes with correct CORS headers.
-      // If you add such endpoint (e.g. GET /images/proxy?url=...) this will attempt it first.
-      try {
-        const u = new URL(fetchUrl, window.location.href);
-        const isCrossOrigin = u.origin !== window.location.origin;
-        if (isCrossOrigin) {
-          try {
-            const proxyPaths = [
-              "/images/proxy",
-              "/api/images/proxy",
-              "/proxy-image",
-            ];
-            for (const p of proxyPaths) {
-              try {
-                const proxyUrl = `${window.location.origin}${p}?url=${encodeURIComponent(fetchUrl)}`;
-                const pr = await fetch(proxyUrl, { method: "GET" });
-                if (pr.ok) {
-                  const contentType = pr.headers.get("content-type") || "";
-                  const buffer = await pr.arrayBuffer();
-                  const base64 = arrayBufferToBase64(buffer);
-                  let ext = "png";
-                  if (/jpeg|jpg/.test(contentType)) ext = "jpeg";
-                  else if (/gif/.test(contentType)) ext = "gif";
-                  return { base64, ext, contentType };
-                }
-              } catch (e) {
-                // ignore per-proxy attempt errors
-              }
-            }
-          } catch (e) {
-            // ignore proxy attempt errors
-          }
-        }
-      } catch (e) {
-        // ignore URL parsing errors
-      }
-
-      // FIRST attempt: try fetching with token as query param (simple GET — sometimes avoids preflight)
-      try {
-        if (fetchUrl.startsWith("/"))
-          fetchUrl = window.location.origin + fetchUrl;
-        let fetchUrlWithToken = fetchUrl;
-        try {
-          const u2 = new URL(fetchUrl);
-          if (token && !u2.searchParams.has("token"))
-            u2.searchParams.set("token", token);
-          fetchUrlWithToken = u2.toString();
-        } catch (e) {
-          if (token && !fetchUrlWithToken.includes("token="))
-            fetchUrlWithToken =
-              fetchUrlWithToken +
-              (fetchUrlWithToken.includes("?") ? "&" : "?") +
-              "token=" +
-              encodeURIComponent(token || "");
-        }
-        const res = await fetch(fetchUrlWithToken);
-        if (res.ok) {
-          const contentType = res.headers.get("content-type") || "";
-          const buffer = await res.arrayBuffer();
-          const base64 = arrayBufferToBase64(buffer);
-          let ext = "png";
-          if (/jpeg|jpg/.test(contentType)) ext = "jpeg";
-          else if (/gif/.test(contentType)) ext = "gif";
-          return { base64, ext, contentType };
-        }
-      } catch (err) {
-        console.debug(
-          "getBase64FromUrl: fetch with token-as-query failed or blocked (preflight avoided). Will try Authorization header next.",
-          err
-        );
-      }
-
-      // SECOND attempt: try fetch with Authorization header (may trigger preflight)
-      try {
-        const resAuth = await fetch(fetchUrl, {
-          headers: token ? { Authorization: `Bearer ${token}` } : undefined,
-        });
-        if (resAuth.ok) {
-          const contentType = resAuth.headers.get("content-type") || "";
-          const buffer = await resAuth.arrayBuffer();
-          const base64 = arrayBufferToBase64(buffer);
-          let ext = "png";
-          if (/jpeg|jpg/.test(contentType)) ext = "jpeg";
-          else if (/gif/.test(contentType)) ext = "gif";
-          return { base64, ext, contentType };
-        }
-      } catch (err) {
-        console.debug(
-          "getBase64FromUrl: fetch with Authorization header failed",
-          err
-        );
-      }
-
-      // FINAL fallback: use axios with arraybuffer (some servers behave differently)
-      try {
-        const axiosRes = await axios.get(fetchUrl, {
-          responseType: "arraybuffer",
-          headers: token ? { Authorization: `Bearer ${token}` } : undefined,
-        });
-        if (axiosRes && axiosRes.status === 200 && axiosRes.data) {
-          const buffer = axiosRes.data as ArrayBuffer;
-          const base64 = arrayBufferToBase64(buffer);
-          const contentType =
-            (axiosRes.headers && axiosRes.headers["content-type"]) || "";
-          let ext3 = "png";
-          if (/jpeg|jpg/.test(contentType)) ext3 = "jpeg";
-          else if (/gif/.test(contentType)) ext3 = "gif";
-          return { base64, ext: ext3, contentType };
-        }
-      } catch (err) {
-        console.debug(
-          "getBase64FromUrl: axios arraybuffer fallback failed",
-          err
-        );
-      }
-
-      return { base64: null };
-    } catch (err) {
-      return { base64: null };
-    }
-  };
+  // (removed) getBase64FromUrl — no longer needed with CID downscale approach
 
   // Excel export with all fields + image (first image per item)
   // Excel export dialog state
@@ -1590,6 +1615,76 @@ const DInventory: React.FC<Props> = ({ Type = "" }) => {
   const [exportSelectedFields, setExportSelectedFields] =
     React.useState<string[]>(defaultSelected);
 
+  // Selection for grouping (per item id_fact)
+  const [selectedIds, setSelectedIds] = React.useState<Set<number>>(new Set());
+  const toggleSelectId = (id: number) =>
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  const clearSelection = () => setSelectedIds(new Set());
+  // Grouping dialog state (choose General_Comment and confirm)
+  const [groupingDialogOpen, setGroupingDialogOpen] = React.useState(false);
+  const [groupingSaving, setGroupingSaving] = React.useState(false);
+  const [groupingError, setGroupingError] = React.useState<string>("");
+  const [groupingComment, setGroupingComment] = React.useState<string>("");
+  const groupingOptions = React.useMemo(() => ["توينز", "طاقم", "سيت"], []);
+  const openGroupingDialog = () => {
+    setGroupingError("");
+    setGroupingComment("");
+    setGroupingDialogOpen(true);
+  };
+  const handleSaveGrouping = async () => {
+    if (!selectedIds.size) return;
+    setGroupingSaving(true);
+    setGroupingError("");
+    try {
+      const allIdsSorted = Array.from(selectedIds)
+        .map((v) => Number(v))
+        .filter((v) => Number.isFinite(v))
+        .sort((a, b) => a - b);
+      const uniteStr = `{${allIdsSorted.join(',')}}`;
+      const token = localStorage.getItem("token");
+      if (!token) throw new Error("Missing auth token");
+      const headers = { Authorization: `Bearer ${token}` } as any;
+      const payload = (gc: string) =>
+        gc && gc.trim().length > 0
+          ? { Unite: uniteStr, General_Comment: gc }
+          : { Unite: uniteStr };
+      await Promise.all(
+        allIdsSorted.map((id) =>
+          axios.put(`/purchases/Update/${id}`, payload(groupingComment), {
+            headers,
+          })
+        )
+      );
+      // Reflect updates locally
+      setData((prev) =>
+        prev.map((it) =>
+          selectedIds.has(it.id_fact)
+            ? {
+              ...it,
+              Unite: uniteStr,
+              ...(groupingComment
+                ? { General_Comment: groupingComment }
+                : {}),
+            }
+            : it
+        )
+      );
+      setGroupingDialogOpen(false);
+      clearSelection();
+      // Refresh inventory to ensure consistency
+      await fetchData();
+    } catch (e: any) {
+      setGroupingError(e?.message || "Failed to save group");
+    } finally {
+      setGroupingSaving(false);
+    }
+  };
+
   // Export all data directly from fetched data
   const handleExportExcel = async () => {
     setExportDialogOpen(true);
@@ -1597,6 +1692,12 @@ const DInventory: React.FC<Props> = ({ Type = "" }) => {
     setExportProgress(0);
     setExportError("");
     setExportDiagnostics([]);
+    try {
+      console.info("[Export] Starting export…", {
+        filteredCount: filteredData.length,
+        filterType: exportFilterType,
+      });
+    } catch { }
     // Filter data based on export filter (same as before)
     let exportData = filteredData;
     if (exportFilterType === "brand" && exportBrand) {
@@ -1613,8 +1714,10 @@ const DInventory: React.FC<Props> = ({ Type = "" }) => {
       );
     }
     try {
-      // Generate MHTML (Excel-friendly .xls) with embedded images using cid parts
-      // `fieldsToExport` is an array of diamond field keys (from exportSelectedFields)
+      // First try: generate native .xlsx with embedded images via ExcelJS
+      // (removed) ExcelJS path — using MHTML (CID) to match SalesReportsTable
+
+      // Fallback/Primary: Generate MHTML (Excel-friendly .xls) with embedded images using CID like SalesReportsTable
       const generateExportMhtml = async (
         rows: any[],
         fieldsToExport: string[]
@@ -1624,10 +1727,11 @@ const DInventory: React.FC<Props> = ({ Type = "" }) => {
         ): { mime: string; base64: string } | null => {
           const match = dataUrl.match(/^data:(.*?);base64,(.*)$/);
           if (!match) return null;
-          return { mime: match[1] || "image/png", base64: match[2] };
+          return { mime: match[1] || "image/jpeg", base64: match[2] };
         };
 
-        const picintToCidImages: Record<
+        // Map key -> [{ cid, mime, base64 }]
+        const keyToCidImages: Record<
           string,
           { cid: string; mime: string; base64: string }[]
         > = {};
@@ -1649,14 +1753,20 @@ const DInventory: React.FC<Props> = ({ Type = "" }) => {
           if (imageKey) neededKeys.add(String(imageKey));
         });
 
-        // Choose an image size for Excel export and make row height match it
-        const excelImgSize = Math.max(EXPORT_IMG_SIZE, 110); // px image size for Excel export
-        const rowHeight = excelImgSize; // make row height equal to the image size
+        const excelImgSize = EXPORT_IMG_SIZE;
+        // Default row height equals one image height; will expand per row if more images.
+        const defaultRowHeight = excelImgSize;
 
         for (const key of Array.from(neededKeys)) {
           if (truncated) break;
           const pic = Number(key);
-          let candidateUrls: string[] = imageUrls[key] || [];
+          let candidateUrls: string[] = [];
+          const preFetched = images[key];
+          if (Array.isArray(preFetched) && preFetched.length) {
+            candidateUrls = preFetched.slice();
+          } else {
+            candidateUrls = imageUrls[key] ? imageUrls[key].slice() : [];
+          }
           if ((!candidateUrls || !candidateUrls.length) && pic) {
             try {
               candidateUrls = await fetchImageListForExport(pic);
@@ -1664,21 +1774,27 @@ const DInventory: React.FC<Props> = ({ Type = "" }) => {
               candidateUrls = [];
             }
           }
-          const limited = candidateUrls.slice(0, 2);
+          // Previously limited to 2 images; now include ALL available images for each item.
+          const limited = candidateUrls;
           const parts: { cid: string; mime: string; base64: string }[] = [];
-          for (const raw of limited) {
+          for (const rawUrl of limited) {
             if (globalImageCount >= EXPORT_MAX_IMAGES) {
               truncated = true;
               break;
             }
             try {
-              // Use a larger size and higher quality for Excel exports so images look sharp.
-              const exportQuality = 0.9; // higher JPEG quality for Excel export
-              const down = await fetchAndDownscaleToBase64(
-                raw,
-                excelImgSize || EXPORT_IMG_SIZE,
-                exportQuality
-              );
+              let url = ensureHttpsSystemGaja(rawUrl);
+              const token = localStorage.getItem("token");
+              if (token && !/^blob:|^data:/i.test(url)) {
+                try {
+                  const u = new URL(url, window.location.origin);
+                  if (!u.searchParams.has("token")) u.searchParams.set("token", token);
+                  url = u.toString();
+                } catch {
+                  url = url + (url.includes("?") ? "&" : "?") + "token=" + encodeURIComponent(token);
+                }
+              }
+              const down = await fetchAndDownscaleToBase64(url, EXPORT_IMG_SIZE);
               if (!down) continue;
               const parsed = parseDataUrl(down);
               if (!parsed) continue;
@@ -1688,21 +1804,19 @@ const DInventory: React.FC<Props> = ({ Type = "" }) => {
               allImages.push(part);
               globalImageCount++;
             } catch {
-              /* skip */
+              // skip
             }
           }
-          picintToCidImages[key] = parts;
+          keyToCidImages[key] = parts;
         }
 
-        // Build HTML table using selected fields
         const fieldDefs = DIAMOND_FIELDS_ORDER;
         const headerCols = (fieldsToExport || []).map((k) => {
           const fd = fieldDefs.find((f) => f.key === k);
           return fd ? fd.label : k;
         });
-        // We'll always append an Images column at the end
-        let html =
-          `
+
+        let html = `
         <html>
         <head>
           <meta charset="utf-8" />
@@ -1720,9 +1834,7 @@ const DInventory: React.FC<Props> = ({ Type = "" }) => {
           <h2 style="margin-left:12px;color:#1976d2">Diamond Inventory</h2>
           <table>
             <thead>
-              <tr>` +
-          headerCols.map((h) => `<th>${h}</th>`).join("") +
-          `<th>Images</th></tr>
+              <tr>${headerCols.map((h) => `<th>${h}</th>`).join("")}<th>Images</th></tr>
             </thead>
             <tbody>`;
 
@@ -1742,55 +1854,65 @@ const DInventory: React.FC<Props> = ({ Type = "" }) => {
             let raw: any = undefined;
             if (fd) raw = (diamond as any)[fd.key];
             if (raw === undefined) raw = (row as any)[k];
+            // Special case: synthetic PS field computed from row's DistributionPurchase
+            if (fd && fd.key === "PS") {
+              raw = (() => {
+                try {
+                  const dpAny: any = (row as any).DistributionPurchase;
+                  let p: any = null;
+                  if (Array.isArray(dpAny)) {
+                    for (const d of dpAny) {
+                      p = d?.ps ?? d?.PS ?? d?.Id_point ?? d?.ps_id;
+                      if (p != null) break;
+                    }
+                  } else if (dpAny && typeof dpAny === "object") {
+                    p = dpAny?.ps ?? dpAny?.PS ?? dpAny?.Id_point ?? dpAny?.ps_id;
+                  }
+                  const key = p != null ? String(p) : "";
+                  return psIdToLabelRef.current[key] || key;
+                } catch {
+                  return "";
+                }
+              })();
+            }
             if (fd && fd.format) {
-              try {
-                return fd.format(raw);
-              } catch {
-                return String(raw ?? "");
-              }
+              try { return fd.format(raw); } catch { return String(raw ?? ""); }
             }
             return raw == null ? "" : String(raw);
           });
 
-          const imgs = picintToCidImages[key] || [];
+          const imgs = keyToCidImages[key] || [];
           let imagesHtml = "";
           if (imgs.length > 0) {
-            const visible = imgs.slice(0, 2);
-            const extra = imgs.length - visible.length;
+            // Stack all images vertically so Excel shows every one.
             imagesHtml =
-              `<div class='img-row'>` +
-              visible
+              `<div class='img-stack' style='display:flex;flex-direction:column;gap:4px;'>` +
+              imgs
                 .map(
                   (p) =>
-                    `<img src='cid:${p.cid}' alt='img' width='${excelImgSize}' height='${excelImgSize}' style='width:${excelImgSize}px;height:${excelImgSize}px;object-fit:cover;border-radius:4px;border:1px solid #eee;mso-width-source:userset;mso-height-source:userset;' />`
+                    `<img src='cid:${p.cid}' alt='img' width='${excelImgSize}' height='${excelImgSize}' style='display:block;width:${excelImgSize}px;height:${excelImgSize}px;object-fit:cover;border-radius:4px;border:1px solid #eee;mso-width-source:userset;mso-height-source:userset;' />`
                 )
                 .join("") +
-              (extra > 0
-                ? `<div style='width:${excelImgSize}px;height:${excelImgSize}px;display:flex;align-items:center;justify-content:center;background:#f5f5f5;border:1px solid #e0e0e0;border-radius:4px;font-weight:700;'>+${extra}</div>`
-                : "") +
               `</div>`;
           } else {
             imagesHtml = `<span style='color:#9e9e9e'>No Image</span>`;
           }
 
-          // Build the row HTML
-          html +=
-            `<tr style="height:${rowHeight}px; mso-height-source:userset;">` +
+
+          const dynamicHeight = defaultRowHeight;
+          html += `<tr style="height:${dynamicHeight}px; mso-height-source:userset;">` +
             cellValues.map((v) => `<td>${String(v)}</td>`).join("") +
             `<td>${imagesHtml}</td></tr>`;
         }
 
         html += `</tbody></table><div style="margin:12px;font-size:12px;color:#666">Generated on ${new Date().toLocaleString()}</div></body></html>`;
 
-        // Assemble MHTML
+        // Assemble MHTML with CID parts
         const boundary = "----=_NextPart_000_0000";
         const EOL = "\r\n";
         let mhtml = "";
         mhtml += "MIME-Version: 1.0" + EOL;
-        mhtml +=
-          `Content-Type: multipart/related; boundary="${boundary}"; type="text/html"` +
-          EOL +
-          EOL;
+        mhtml += `Content-Type: multipart/related; boundary="${boundary}"; type="text/html"` + EOL + EOL;
 
         // HTML part
         mhtml += `--${boundary}` + EOL;
@@ -1811,20 +1933,19 @@ const DInventory: React.FC<Props> = ({ Type = "" }) => {
           mhtml += EOL;
         });
 
-        // Closing boundary
         mhtml += `--${boundary}--` + EOL;
-        return {
-          mhtml,
-          diagnostics: { imageCount: globalImageCount, truncated },
-        };
+        return { mhtml, diagnostics: { imageCount: globalImageCount, truncated } };
       };
 
       setExportProgress(10);
-      const fieldsToExport =
+      const fieldsToExportX =
         exportSelectedFields && exportSelectedFields.length
           ? exportSelectedFields
           : DIAMOND_FIELDS_ORDER.map((f) => f.key);
-      const result = await generateExportMhtml(exportData, fieldsToExport);
+
+
+      // Use MHTML (CID) approach as primary, matching SalesReportsTable
+      const result = await generateExportMhtml(exportData, fieldsToExportX);
       setExportProgress(90);
       const blob = new Blob([result.mhtml], {
         type: "application/vnd.ms-excel;charset=utf-8;",
@@ -1843,7 +1964,10 @@ const DInventory: React.FC<Props> = ({ Type = "" }) => {
       URL.revokeObjectURL(url);
       setExportProgress(100);
       setExporting(false);
-      setExportDiagnostics([result.diagnostics]);
+      setExportDiagnostics([result.diagnostics, { mode: "mhtml-cid" }]);
+      try {
+        console.info("[Export] MHTML (CID) export done", result.diagnostics);
+      } catch { }
     } catch (e: any) {
       setExportError(e?.message || "Export failed");
       setExporting(false);
@@ -2132,17 +2256,17 @@ const DInventory: React.FC<Props> = ({ Type = "" }) => {
                 prev.map((item) =>
                   item.id_fact === editItem.id_fact
                     ? {
-                        ...item,
-                        DistributionPurchase: {
-                          ...item.DistributionPurchase,
-                          OriginalAchatDiamond: {
-                            ...((item.DistributionPurchase &&
-                              item.DistributionPurchase.OriginalAchatDiamond) ||
-                              {}),
-                            Design_art: editDesignArt,
-                          },
+                      ...item,
+                      DistributionPurchase: {
+                        ...item.DistributionPurchase,
+                        OriginalAchatDiamond: {
+                          ...((item.DistributionPurchase &&
+                            item.DistributionPurchase.OriginalAchatDiamond) ||
+                            {}),
+                          Design_art: editDesignArt,
                         },
-                      }
+                      },
+                    }
                     : item
                 )
               );
@@ -2161,7 +2285,7 @@ const DInventory: React.FC<Props> = ({ Type = "" }) => {
                     { headers: { Authorization: `Bearer ${token}` } }
                   );
                 }
-              } catch (e) {}
+              } catch (e) { }
               // Update OriginalAchatDiamonds (id_achat)
               try {
                 if (diamond.id_achat) {
@@ -2172,7 +2296,7 @@ const DInventory: React.FC<Props> = ({ Type = "" }) => {
                     { headers: { Authorization: `Bearer ${token}` } }
                   );
                 }
-              } catch (e) {}
+              } catch (e) { }
               // Refresh inventory data
               try {
                 await fetchData();
@@ -2541,6 +2665,57 @@ const DInventory: React.FC<Props> = ({ Type = "" }) => {
           </Button>
         </DialogActions>
       </Dialog>
+      {/* Change PS Dialog */}
+      <Dialog open={psDialogOpen} onClose={handleClosePsDialog} maxWidth="xs" fullWidth>
+        <DialogTitle>Change Point of Sale</DialogTitle>
+        <DialogContent>
+          {psDialogItem && (
+            <Box sx={{ mb: 1 }}>
+              <Typography variant="body2">
+                Updating item #{psDialogItem.id_fact} ({psDialogItem.desig_art || "Product"})
+              </Typography>
+              <Typography variant="caption" color="text.secondary">
+                Current: {getPsLabelFromRow(psDialogItem) || "-"}
+              </Typography>
+            </Box>
+          )}
+          <TextField
+            select
+            fullWidth
+            margin="normal"
+            label="Point of Sale"
+            value={psSelection}
+            onChange={(e) => {
+              setPsSelection(e.target.value);
+              setPsDialogError("");
+            }}
+            disabled={psSaving || !psOptionsDetailed.length}
+            size="small"
+          >
+            {psOptionsDetailed.map((opt) => (
+              <MenuItem key={opt.id} value={opt.id}>
+                {opt.label}
+              </MenuItem>
+            ))}
+          </TextField>
+          {psDialogError && (
+            <Typography color="error" variant="body2">
+              {psDialogError}
+            </Typography>
+          )}
+          {!psOptionsDetailed.length && (
+            <Typography variant="caption" color="text.secondary">
+              No points of sale available.
+            </Typography>
+          )}
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={handleClosePsDialog} disabled={psSaving}>Cancel</Button>
+          <Button onClick={handleSavePsChange} disabled={psSaving || !psSelection} variant="contained">
+            {psSaving ? "Saving..." : "Save"}
+          </Button>
+        </DialogActions>
+      </Dialog>
       <Box sx={{ display: "flex", justifyContent: "space-between", mb: 2 }}>
         <Box sx={{ display: "flex", alignItems: "center", gap: 2 }}>
           <Typography variant="h5" sx={{ fontWeight: "bold" }}>
@@ -2596,239 +2771,257 @@ const DInventory: React.FC<Props> = ({ Type = "" }) => {
             Show Groups Only
           </Button>
 
-          {isAdmin && (
-            <>
-              <Button
-                variant="contained"
-                color="primary"
-                onClick={() => setExportDialogOpen(true)}
-                sx={{
-                  borderRadius: 3,
-                  textTransform: "none",
-                  fontWeight: "bold",
-                  px: 3,
-                  py: 1,
-                }}
-              >
-                Export Excel
-              </Button>
-              {/* Export Excel Dialog with filter options */}
-              <Dialog
-                open={exportDialogOpen}
-                onClose={() => setExportDialogOpen(false)}
-                maxWidth="sm"
-                fullWidth
-              >
-                <DialogTitle>Export Excel</DialogTitle>
-                <DialogContent>
-                  <Box
-                    sx={{
-                      py: 2,
-                      display: "flex",
-                      flexDirection: "column",
-                      gap: 2,
-                    }}
-                  >
-                    <Typography variant="body2">
-                      Choose export filter:
-                    </Typography>
-                    <Box sx={{ display: "flex", gap: 2, alignItems: "center" }}>
-                      <Button
-                        variant={
-                          exportFilterType === "all" ? "contained" : "outlined"
-                        }
-                        onClick={() => setExportFilterType("all")}
-                      >
-                        All
-                      </Button>
-                      <Button
-                        variant={
-                          exportFilterType === "brand"
-                            ? "contained"
-                            : "outlined"
-                        }
-                        onClick={() => setExportFilterType("brand")}
-                      >
-                        By Brand
-                      </Button>
-                      <Button
-                        variant={
-                          exportFilterType === "name" ? "contained" : "outlined"
-                        }
-                        onClick={() => setExportFilterType("name")}
-                      >
-                        By Product Name
-                      </Button>
-                    </Box>
-                    {exportFilterType === "brand" && (
-                      <TextField
-                        select
-                        label="Brand"
-                        value={exportBrand}
-                        onChange={(e) => setExportBrand(e.target.value)}
-                        fullWidth
-                      >
-                        <MenuItem value="">Select Brand</MenuItem>
-                        {distinctBrands.map((b) => (
-                          <MenuItem key={b} value={b}>
-                            {b}
-                          </MenuItem>
-                        ))}
-                      </TextField>
-                    )}
-                    {exportFilterType === "name" && (
-                      <TextField
-                        label="Product Name Contains"
-                        value={exportName}
-                        onChange={(e) => setExportName(e.target.value)}
-                        fullWidth
-                        placeholder="e.g. خاتم"
-                      />
-                    )}
-                    {/* Fields checklist */}
-                    <Box>
-                      <Typography variant="body2" sx={{ fontWeight: 700 }}>
-                        Fields to export
+          {
+            (
+              <>
+                {/* Group Selected Button */}
+                <Button
+                  variant="contained"
+                  color="success"
+                  onClick={openGroupingDialog}
+                  disabled={selectedIds.size === 0}
+                  sx={{
+                    borderRadius: 3,
+                    textTransform: "none",
+                    fontWeight: "bold",
+                    px: 3,
+                    py: 1,
+                  }}
+                >
+                  Group Selected
+                </Button>
+                <Button
+                  variant="contained"
+                  color="primary"
+                  onClick={() => setExportDialogOpen(true)}
+                  sx={{
+                    borderRadius: 3,
+                    textTransform: "none",
+                    fontWeight: "bold",
+                    px: 3,
+                    py: 1,
+                  }}
+                >
+                  Export Excel
+                </Button>
+                {/* Export Excel Dialog with filter options */}
+                <Dialog
+                  open={exportDialogOpen}
+                  onClose={() => setExportDialogOpen(false)}
+                  maxWidth="sm"
+                  fullWidth
+                >
+                  <DialogTitle>Export Excel</DialogTitle>
+                  <DialogContent>
+                    <Box
+                      sx={{
+                        py: 2,
+                        display: "flex",
+                        flexDirection: "column",
+                        gap: 2,
+                      }}
+                    >
+                      <Typography variant="body2">
+                        Choose export filter:
                       </Typography>
-                      <Box
-                        sx={{
-                          display: "flex",
-                          gap: 1,
-                          alignItems: "center",
-                          mt: 1,
-                        }}
-                      >
+                      <Box sx={{ display: "flex", gap: 2, alignItems: "center" }}>
                         <Button
-                          size="small"
-                          onClick={() =>
-                            setExportSelectedFields(defaultSelected)
+                          variant={
+                            exportFilterType === "all" ? "contained" : "outlined"
                           }
+                          onClick={() => setExportFilterType("all")}
                         >
-                          Select All
+                          All
                         </Button>
                         <Button
-                          size="small"
-                          onClick={() => setExportSelectedFields([])}
+                          variant={
+                            exportFilterType === "brand"
+                              ? "contained"
+                              : "outlined"
+                          }
+                          onClick={() => setExportFilterType("brand")}
                         >
-                          Clear
+                          By Brand
+                        </Button>
+                        <Button
+                          variant={
+                            exportFilterType === "name" ? "contained" : "outlined"
+                          }
+                          onClick={() => setExportFilterType("name")}
+                        >
+                          By Product Name
                         </Button>
                       </Box>
-                      <FormGroup
-                        row
-                        sx={{ mt: 1, maxHeight: 200, overflow: "auto" }}
-                      >
-                        {DIAMOND_FIELDS_ORDER.map((f) => (
-                          <FormControlLabel
-                            key={f.key}
-                            control={
-                              <Checkbox
-                                size="small"
-                                checked={exportSelectedFields.includes(f.key)}
-                                onChange={(e) => {
-                                  setExportSelectedFields((prev) =>
-                                    e.target.checked
-                                      ? Array.from(new Set([...prev, f.key]))
-                                      : prev.filter((x) => x !== f.key)
-                                  );
-                                }}
-                              />
+                      {exportFilterType === "brand" && (
+                        <TextField
+                          select
+                          label="Brand"
+                          value={exportBrand}
+                          onChange={(e) => setExportBrand(e.target.value)}
+                          fullWidth
+                        >
+                          <MenuItem value="">Select Brand</MenuItem>
+                          {distinctBrands.map((b) => (
+                            <MenuItem key={b} value={b}>
+                              {b}
+                            </MenuItem>
+                          ))}
+                        </TextField>
+                      )}
+                      {exportFilterType === "name" && (
+                        <TextField
+                          label="Product Name Contains"
+                          value={exportName}
+                          onChange={(e) => setExportName(e.target.value)}
+                          fullWidth
+                          placeholder="e.g. خاتم"
+                        />
+                      )}
+                      {/* Fields checklist */}
+                      <Box>
+                        <Typography variant="body2" sx={{ fontWeight: 700 }}>
+                          Fields to export
+                        </Typography>
+                        <Box
+                          sx={{
+                            display: "flex",
+                            gap: 1,
+                            alignItems: "center",
+                            mt: 1,
+                          }}
+                        >
+                          <Button
+                            size="small"
+                            onClick={() =>
+                              setExportSelectedFields(defaultSelected)
                             }
-                            label={f.label}
-                          />
-                        ))}
-                      </FormGroup>
-                    </Box>
-                    <Button
-                      variant="contained"
-                      color="primary"
-                      onClick={handleExportExcel}
-                      disabled={
-                        exporting ||
-                        (exportFilterType === "brand" && !exportBrand) ||
-                        (exportFilterType === "name" && !exportName)
-                      }
-                      sx={{ mt: 2 }}
-                    >
-                      Export
-                    </Button>
-                    <Box sx={{ width: "100%", mt: 2 }}>
-                      <Box
-                        sx={{
-                          width: `${exportProgress}%`,
-                          height: 24,
-                          bgcolor: "#eee",
-                          borderRadius: 2,
-                          overflow: "hidden",
-                        }}
+                          >
+                            Select All
+                          </Button>
+                          <Button
+                            size="small"
+                            onClick={() => setExportSelectedFields([])}
+                          >
+                            Clear
+                          </Button>
+                        </Box>
+                        <FormGroup
+                          row
+                          sx={{ mt: 1, maxHeight: 200, overflow: "auto" }}
+                        >
+                          {DIAMOND_FIELDS_ORDER.map((f) => (
+                            <FormControlLabel
+                              key={f.key}
+                              control={
+                                <Checkbox
+                                  size="small"
+                                  checked={exportSelectedFields.includes(f.key)}
+                                  onChange={(e) => {
+                                    setExportSelectedFields((prev) =>
+                                      e.target.checked
+                                        ? Array.from(new Set([...prev, f.key]))
+                                        : prev.filter((x) => x !== f.key)
+                                    );
+                                  }}
+                                />
+                              }
+                              label={f.label}
+                            />
+                          ))}
+                        </FormGroup>
+                      </Box>
+                      <Button
+                        variant="contained"
+                        color="primary"
+                        onClick={handleExportExcel}
+                        disabled={
+                          exporting ||
+                          (exportFilterType === "brand" && !exportBrand) ||
+                          (exportFilterType === "name" && !exportName)
+                        }
+                        sx={{ mt: 2 }}
                       >
+                        Export
+                      </Button>
+                      <Box sx={{ width: "100%", mt: 2 }}>
                         <Box
                           sx={{
                             width: `${exportProgress}%`,
-                            height: "100%",
-                            bgcolor: "primary.main",
-                            transition: "width 0.3s",
+                            height: 24,
+                            bgcolor: "#eee",
+                            borderRadius: 2,
+                            overflow: "hidden",
                           }}
-                        />
-                      </Box>
-                      <Typography variant="caption" sx={{ mt: 1 }}>
-                        {exportProgress}%
-                      </Typography>
-                    </Box>
-                    {exportError && (
-                      <Typography color="error" sx={{ mt: 2 }}>
-                        {exportError}
-                      </Typography>
-                    )}
-                    {exportDiagnostics && exportDiagnostics.length > 0 && (
-                      <Box sx={{ mt: 2 }}>
-                        <Typography
-                          variant="subtitle2"
-                          sx={{ fontWeight: 700 }}
                         >
-                          Image export diagnostics ({exportDiagnostics.length})
-                        </Typography>
-                        <Box sx={{ maxHeight: 160, overflow: "auto", mt: 1 }}>
-                          {exportDiagnostics.map((d, idx) => {
-                            const last =
-                              d.attempts && d.attempts.length
-                                ? d.attempts[d.attempts.length - 1]
-                                : null;
-                            const statusText = last
-                              ? last.ok
-                                ? "embedded"
-                                : last.error || last.status || "failed"
-                              : "no attempts";
-                            const authText =
-                              d.authStrategy ||
-                              (d.attempts &&
-                                d.attempts[0] &&
-                                d.attempts[0].method) ||
-                              "unknown";
-                            const displayUrl = d.fetchUrl || d.url;
-                            return (
-                              <Box key={idx} sx={{ mb: 0.5 }}>
-                                <Typography variant="caption">
-                                  {displayUrl} — {statusText} [{authText}]
-                                </Typography>
-                              </Box>
-                            );
-                          })}
+                          <Box
+                            sx={{
+                              width: `${exportProgress}%`,
+                              height: "100%",
+                              bgcolor: "primary.main",
+                              transition: "width 0.3s",
+                            }}
+                          />
                         </Box>
+                        <Typography variant="caption" sx={{ mt: 1 }}>
+                          {exportProgress}%
+                        </Typography>
                       </Box>
-                    )}
-                  </Box>
-                </DialogContent>
-                <DialogActions>
-                  <Button
-                    onClick={() => setExportDialogOpen(false)}
-                    disabled={exporting}
-                  >
-                    Close
-                  </Button>
-                </DialogActions>
-              </Dialog>
-            </>
-          )}
+                      {exportError && (
+                        <Typography color="error" sx={{ mt: 2 }}>
+                          {exportError}
+                        </Typography>
+                      )}
+                      {exportDiagnostics && exportDiagnostics.length > 0 && (
+                        <Box sx={{ mt: 2 }}>
+                          <Typography
+                            variant="subtitle2"
+                            sx={{ fontWeight: 700 }}
+                          >
+                            Image export diagnostics ({exportDiagnostics.length})
+                          </Typography>
+                          <Box sx={{ maxHeight: 160, overflow: "auto", mt: 1 }}>
+                            {exportDiagnostics.map((d, idx) => {
+                              const last =
+                                d.attempts && d.attempts.length
+                                  ? d.attempts[d.attempts.length - 1]
+                                  : null;
+                              const statusText = last
+                                ? last.ok
+                                  ? "embedded"
+                                  : last.error || last.status || "failed"
+                                : "no attempts";
+                              const authText =
+                                d.authStrategy ||
+                                (d.attempts &&
+                                  d.attempts[0] &&
+                                  d.attempts[0].method) ||
+                                "unknown";
+                              const displayUrl = d.fetchUrl || d.url;
+                              return (
+                                <Box key={idx} sx={{ mb: 0.5 }}>
+                                  <Typography variant="caption">
+                                    {displayUrl} — {statusText} [{authText}]
+                                  </Typography>
+                                </Box>
+                              );
+                            })}
+                          </Box>
+                        </Box>
+                      )}
+                    </Box>
+                  </DialogContent>
+                  <DialogActions>
+                    <Button
+                      onClick={() => setExportDialogOpen(false)}
+                      disabled={exporting}
+                    >
+                      Close
+                    </Button>
+                  </DialogActions>
+                </Dialog>
+              </>
+            )
+          }
         </Box>
       </Box>
       {/* Dialog: Counts by Product Name */}
@@ -2983,7 +3176,7 @@ const DInventory: React.FC<Props> = ({ Type = "" }) => {
                     setPsFilter("");
                     try {
                       localStorage.removeItem("ps");
-                    } catch {}
+                    } catch { }
                   } else {
                     setPsInput(String(v));
                     // Map label -> id when possible; otherwise send label
@@ -2992,7 +3185,7 @@ const DInventory: React.FC<Props> = ({ Type = "" }) => {
                     setPsFilter(String(mapped));
                     try {
                       localStorage.setItem("ps", String(mapped));
-                    } catch {}
+                    } catch { }
                   }
                 }}
               >
@@ -3044,13 +3237,13 @@ const DInventory: React.FC<Props> = ({ Type = "" }) => {
               placeholder="e.g. خاتم"
             />
           </Box>
-          {/* Ref Code */}
+          {/* Ref. Code */}
           <Box>
             <Typography
               variant="caption"
               sx={{ fontWeight: 700, display: "block", mb: 0.5 }}
             >
-              Ref Code
+              Ref. Code
             </Typography>
             <TextField
               size="small"
@@ -3058,6 +3251,22 @@ const DInventory: React.FC<Props> = ({ Type = "" }) => {
               value={refCode}
               onChange={(e) => setRefCode(e.target.value)}
               placeholder="e.g., HP123"
+            />
+          </Box>
+          {/* ID (id_fact) */}
+          <Box>
+            <Typography
+              variant="caption"
+              sx={{ fontWeight: 700, display: "block", mb: 0.5 }}
+            >
+              ID (id_fact)
+            </Typography>
+            <TextField
+              size="small"
+              fullWidth
+              value={idFilter}
+              onChange={(e) => setIdFilter(e.target.value)}
+              placeholder="e.g., 12345"
             />
           </Box>
           {/* Sales Code */}
@@ -3189,6 +3398,7 @@ const DInventory: React.FC<Props> = ({ Type = "" }) => {
               setSalesCode("");
               setCostMin("");
               setCostMax("");
+              setIdFilter("");
               setGroupFilterMode("all");
             }}
             sx={{ fontWeight: 700 }}
@@ -3245,14 +3455,14 @@ const DInventory: React.FC<Props> = ({ Type = "" }) => {
                   const displayImgRaw = groupImgs.length
                     ? groupImgs[0]
                     : urls.find(
-                        (u) => !/PIC/i.test(u.split("/").pop() || "")
-                      ) || urls[0];
+                      (u) => !/PIC/i.test(u.split("/").pop() || "")
+                    ) || urls[0];
                   const displayImg =
                     displayImgRaw && token && !displayImgRaw.includes("token=")
                       ? displayImgRaw +
-                        (displayImgRaw.includes("?") ? "&" : "?") +
-                        "token=" +
-                        encodeURIComponent(token)
+                      (displayImgRaw.includes("?") ? "&" : "?") +
+                      "token=" +
+                      encodeURIComponent(token)
                       : displayImgRaw;
                   // Compute total price and brand(s)
                   let total = 0;
@@ -3263,11 +3473,11 @@ const DInventory: React.FC<Props> = ({ Type = "" }) => {
                       typeof d.SellingPrice === "number"
                         ? d.SellingPrice
                         : Number(
-                            String(d.SellingPrice || "").replace(
-                              /[^0-9.-]/g,
-                              ""
-                            )
-                          );
+                          String(d.SellingPrice || "").replace(
+                            /[^0-9.-]/g,
+                            ""
+                          )
+                        );
                     if (!isNaN(p)) total += p;
                     if (r.Fournisseur?.client_name)
                       brands.add(r.Fournisseur.client_name);
@@ -3345,9 +3555,9 @@ const DInventory: React.FC<Props> = ({ Type = "" }) => {
                                   const out =
                                     tokenLocal && !u.includes("token=")
                                       ? u +
-                                        (u.includes("?") ? "&" : "?") +
-                                        "token=" +
-                                        encodeURIComponent(tokenLocal)
+                                      (u.includes("?") ? "&" : "?") +
+                                      "token=" +
+                                      encodeURIComponent(tokenLocal)
                                       : u;
                                   return ensureHttpsSystemGaja(out);
                                 });
@@ -3472,6 +3682,7 @@ const DInventory: React.FC<Props> = ({ Type = "" }) => {
                               }}
                             >
                               {items.slice(0, 12).map((r: any) => {
+
                                 const d = getDiamondFromRow(r) || {};
                                 const ref =
                                   d?.CODE_EXTERNAL ||
@@ -3528,7 +3739,14 @@ const DInventory: React.FC<Props> = ({ Type = "" }) => {
                           </Button>
                         </Box>
                       </Box>
+
+
+
+
+
                       {expanded && (
+
+
                         <Box
                           sx={{
                             display: "flex",
@@ -3537,6 +3755,8 @@ const DInventory: React.FC<Props> = ({ Type = "" }) => {
                             p: 1,
                           }}
                         >
+
+
                           {items.map((row: any) => {
                             const diamond = getDiamondFromRow(row) || {};
                             let imageKey2: any;
@@ -3585,9 +3805,9 @@ const DInventory: React.FC<Props> = ({ Type = "" }) => {
                                   return u.includes("token=")
                                     ? u
                                     : u +
-                                        (u.includes("?") ? "&" : "?") +
-                                        "token=" +
-                                        encodeURIComponent(token);
+                                    (u.includes("?") ? "&" : "?") +
+                                    "token=" +
+                                    encodeURIComponent(token);
                                 });
                               }
                               {
@@ -3681,7 +3901,18 @@ const DInventory: React.FC<Props> = ({ Type = "" }) => {
                                     variant="caption"
                                     color="text.secondary"
                                   >
-                                    PS: {getPsLabelFromRow(row) || "-"}
+                                    {' '} PS: {getPsLabelFromRow(row) || "-"}
+                                    {canChangePs && (
+                                      <Button
+                                        variant="outlined"
+                                        size="small"
+                                        onClick={() => handleOpenChangePsDialog(row as any)}
+                                        disabled={!psOptionsDetailed.length}
+                                        sx={{ ml: 1, textTransform: 'none' }}
+                                      >
+                                        Change PS
+                                      </Button>
+                                    )}
                                   </Typography>
                                   {(() => {
                                     const raw = diamond?.SellingPrice;
@@ -3828,9 +4059,9 @@ const DInventory: React.FC<Props> = ({ Type = "" }) => {
                       return u.includes("token=")
                         ? u
                         : u +
-                            (u.includes("?") ? "&" : "?") +
-                            "token=" +
-                            encodeURIComponent(token);
+                        (u.includes("?") ? "&" : "?") +
+                        "token=" +
+                        encodeURIComponent(token);
                     });
                   }
                   {
@@ -3859,6 +4090,14 @@ const DInventory: React.FC<Props> = ({ Type = "" }) => {
                       borderColor: "divider",
                     }}
                   >
+                    {/* Selection checkbox */}
+                    <Box sx={{ display: "flex", alignItems: "center" }}>
+                      <Checkbox
+                        checked={selectedIds.has(row.id_fact)}
+                        onChange={() => toggleSelectId(row.id_fact)}
+                        size="small"
+                      />
+                    </Box>
                     <Box
                       sx={{
                         width: 88,
@@ -3909,6 +4148,17 @@ const DInventory: React.FC<Props> = ({ Type = "" }) => {
                       </Typography>
                       <Typography variant="caption" color="text.secondary">
                         PS: {getPsLabelFromRow(row) || "-"}
+                        {canChangePs && (
+                          <Button
+                            variant="outlined"
+                            size="small"
+                            onClick={() => handleOpenChangePsDialog(row as any)}
+                            disabled={!psOptionsDetailed.length}
+                            sx={{ ml: 1, textTransform: 'none' }}
+                          >
+                            Change PS
+                          </Button>
+                        )}
                       </Typography>
                       {/* Selling Price shown with Ref & Brand to keep key info together */}
                       {(() => {
@@ -4072,6 +4322,57 @@ const DInventory: React.FC<Props> = ({ Type = "" }) => {
               />
             )}
           </React.Suspense>
+
+          {/* Grouping Selected Dialog */}
+          <Dialog
+            open={groupingDialogOpen}
+            onClose={() => {
+              if (!groupingSaving) setGroupingDialogOpen(false);
+            }}
+            maxWidth="xs"
+            fullWidth
+          >
+            <DialogTitle>Group Selected Items</DialogTitle>
+            <DialogContent>
+              <Typography variant="body2" sx={{ mb: 1 }}>
+                Selected: {selectedIds.size} item(s)
+              </Typography>
+              <TextField
+                select
+                fullWidth
+                label="Group Name"
+                value={groupingComment}
+                onChange={(e) => setGroupingComment(e.target.value)}
+                placeholder="Optional"
+                sx={{ mt: 1 }}
+              >
+                <MenuItem value="">(None)</MenuItem>
+                {groupingOptions.map((opt) => (
+                  <MenuItem key={opt} value={opt}>
+                    {opt}
+                  </MenuItem>
+                ))}
+              </TextField>
+              {groupingError && (
+                <Typography color="error" sx={{ mt: 1 }}>
+                  {groupingError}
+                </Typography>
+              )}
+            </DialogContent>
+            <DialogActions>
+              <Button onClick={() => setGroupingDialogOpen(false)} disabled={groupingSaving}>
+                Cancel
+              </Button>
+              <Button
+                onClick={handleSaveGrouping}
+                disabled={groupingSaving || selectedIds.size === 0}
+                variant="contained"
+                color="success"
+              >
+                {groupingSaving ? "Saving…" : "Save Group"}
+              </Button>
+            </DialogActions>
+          </Dialog>
         </Box>
       </Box>
     </Box>

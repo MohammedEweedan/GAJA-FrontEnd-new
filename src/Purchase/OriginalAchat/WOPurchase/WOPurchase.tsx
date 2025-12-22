@@ -1,4 +1,4 @@
-import { useEffect, useState, useMemo, forwardRef } from "react";
+import { useEffect, useState, useMemo, forwardRef, useCallback } from "react";
 import axios from "../../../api";
 import { useNavigate, useLocation } from "react-router-dom";
 import {
@@ -194,6 +194,9 @@ const initialWatchState: WatchPurchase = {
   warranty: "",
   discount_by_vendor: 0,
   common_local_brand: "", // New field to indicate if it's a common local brand
+  MakingCharge: 0,
+  ShippingCharge: 0,
+  TravelExpesenes: 0,
 };
 
 const Alert = forwardRef<HTMLDivElement, AlertProps>((props, ref) => (
@@ -272,17 +275,7 @@ const WOPurchase = () => {
     open: false,
     row: null,
   });
-  const [costDialog, setCostDialog] = useState<{
-    open: boolean;
-    row: WatchPurchase | null;
-  }>({ open: false, row: null });
-  const [costFields, setCostFields] = useState<{
-    MakingCharge?: number;
-    ShippingCharge?: number;
-    TravelExpesenes?: number;
-    Rate?: number;
-    Total_Price_LYD?: number;
-  }>({});
+  // ...removed costDialog and costFields state
   const [imgDialogOpen, setImgDialogOpen] = useState(false);
   const [imgDialogIdAchat, setImgDialogIdAchat] = useState<number | null>(null);
   const navigate = useNavigate();
@@ -402,7 +395,7 @@ const WOPurchase = () => {
     fetchAllDistributions();
   }, [data]);
 
-  const handleEdit = (row: WatchPurchase) => {
+  const handleEdit = useCallback((row: WatchPurchase) => {
     setEditOPurchase({
       ...row,
       supplier: suppliers.find((s) => s.id_client === row.Brand) || null,
@@ -410,7 +403,7 @@ const WOPurchase = () => {
     });
     setIsEditMode(true);
     setOpenDialog(true);
-  };
+  }, [suppliers, vendors]);
 
   const handleAddNew = () => {
     setEditOPurchase(initialWatchState);
@@ -546,15 +539,9 @@ const WOPurchase = () => {
     setConfirmDelete({ open: true, row });
   };
 
-  const formatAmount = (value?: number) =>
-    typeof value === "number"
-      ? value.toLocaleString(undefined, {
-          minimumFractionDigits: 2,
-          maximumFractionDigits: 2,
-        })
-      : "";
+  // ...removed unused formatAmount function
 
-  const handleRequestApproval = async (row: WatchPurchase) => {
+  const handleRequestApproval = useCallback(async (row: WatchPurchase) => {
     const token = localStorage.getItem("token");
     const userStr = localStorage.getItem("user");
     let userName = "";
@@ -647,7 +634,7 @@ const WOPurchase = () => {
       setEmailProgress(0);
       setSendingEmail(false);
     }
-  };
+  }, [Cuser, suppliers]);
 
   const formatDate = (dateStr?: string) => {
     if (!dateStr) return null;
@@ -979,7 +966,7 @@ const WOPurchase = () => {
 
       {
         accessorKey: "retail_price",
-        header: "Retail Price / Discount",
+        header: "Cost / Discount",
         size: 120,
         Cell: ({ row }) => {
           const retail = row.original.retail_price;
@@ -1150,29 +1137,7 @@ const WOPurchase = () => {
           </Box>
         ),
       },
-      {
-        header: "Edit Cost",
-        id: "edit_cost",
-        size: 80,
-        Cell: ({ row }) => (
-          <Button
-            variant="outlined"
-            size="small"
-            onClick={() => {
-              setCostDialog({ open: true, row: row.original });
-              setCostFields({
-                MakingCharge: row.original.MakingCharge ?? 0,
-                ShippingCharge: row.original.ShippingCharge ?? 0,
-                TravelExpesenes: row.original.TravelExpesenes ?? 0,
-                Rate: row.original.Rate ?? 0,
-                Total_Price_LYD: row.original.Total_Price_LYD ?? 0,
-              });
-            }}
-          >
-            Edit
-          </Button>
-        ),
-      },
+      // ...removed Edit Cost button column
 
       {
         header: "SharePoint",
@@ -1316,7 +1281,12 @@ const WOPurchase = () => {
               setLoading(true);
               const token = localStorage.getItem("token");
               try {
-                const res = await axios.get(`/images/list/${id_achat}`, {
+                // Use explicit backend base to avoid hitting the front-end dev server origin (e.g. localhost:3000)
+                // when running locally. Falls back to production base. Keep trailing segment off.
+                const apiBaseRaw = (process.env.REACT_APP_API_BASE_URL || process.env.REACT_APP_API_IP || "https://system.gaja.ly/api").replace(/\/+$/,'');
+                // Build full URL; server strips optional /api prefix internally.
+                const listUrl = `${apiBaseRaw}/images/list/${id_achat}`;
+                const res = await axios.get(listUrl, {
                   headers: { Authorization: `Bearer ${token}` },
                 });
                 let images = res.data;
@@ -1335,6 +1305,10 @@ const WOPurchase = () => {
                   // If not absolute, prepend API base
                   if (!/^https?:\/\//i.test(imgUrl)) {
                     imgUrl = `/images/${imgUrl}`;
+                  }
+                  // Force HTTPS (avoid insecure http) for any absolute http URL
+                  if (/^http:\/\//i.test(imgUrl)) {
+                    imgUrl = imgUrl.replace(/^http:\/\//i, "https://");
                   }
                   // Always append token as query param
                   if (token) {
@@ -1357,9 +1331,7 @@ const WOPurchase = () => {
             };
           }, [id_achat]);
           // Log the image URL for debugging
-          if (thumb) {
-            console.log("WOPurchase image thumb URL:", thumb);
-          }
+          
           return (
             <IconButton
               onClick={() => {
@@ -1388,13 +1360,43 @@ const WOPurchase = () => {
                       thumb,
                       e
                     );
+                    // Attempt fallback to static /uploads/WatchPic path if secure /images path fails
+                    const target = e.currentTarget as HTMLImageElement;
+                    if (thumb && /\/images\//.test(thumb)) {
+                      try {
+                        const urlObj = new URL(thumb, window.location.origin);
+                        const parts = urlObj.pathname.split('/');
+                        // Possible shapes:
+                        // ['', 'images', id_achat, filename]
+                        // ['', 'images', 'watch', id_achat, filename]
+                        let idAchatPart = null;
+                        let filenamePart = null;
+                        if (parts.length >= 4 && parts[1] === 'images' && parts[2] !== 'watch') {
+                          // legacy generic watch route
+                          idAchatPart = parts[2];
+                          filenamePart = parts.slice(3).join('/').split('?')[0];
+                        } else if (parts.length >= 5 && parts[1] === 'images' && parts[2] === 'watch') {
+                          // new watch alias route
+                          idAchatPart = parts[3];
+                          filenamePart = parts.slice(4).join('/').split('?')[0];
+                        }
+                        if (idAchatPart && filenamePart) {
+                          const fallback = `${urlObj.protocol}//${urlObj.host}/uploads/WatchPic/${idAchatPart}/${filenamePart}`;
+                          console.warn('[WOPurchase] Retrying image with fallback:', fallback);
+                          target.onerror = null; // prevent infinite loop
+                          target.src = fallback;
+                          return;
+                        }
+                      } catch (err) {
+                        console.warn('[WOPurchase] Fallback URL build failed:', err);
+                      }
+                    }
+                    // Final inline placeholder
+                    target.src =
+                      'data:image/svg+xml;utf8,' +
+                      encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" width="160" height="120" viewBox="0 0 160 120" role="img" aria-label="Image unavailable"><rect width="160" height="120" fill="#f3f3f3"/><text x="50%" y="50%" dominant-baseline="middle" text-anchor="middle" font-size="12" fill="#888">No Image</text></svg>`);
                   }}
-                  onLoad={() => {
-                    console.log(
-                      "[WOPurchase] Image loaded successfully:",
-                      thumb
-                    );
-                  }}
+                  
                   sx={{
                     width: {
                       xs: "100%",
@@ -1423,7 +1425,7 @@ const WOPurchase = () => {
         enableColumnFilter: false,
       },
     ],
-    [suppliers, distributions, psList]
+    [suppliers, distributions, psList, vendors, handleEdit, handleRequestApproval]
   );
 
   // Filtered data for table
@@ -2865,7 +2867,7 @@ const WOPurchase = () => {
                       color: errors.retail_price ? "#d32f2f" : undefined,
                     }}
                   >
-                    Retail Price
+                    Cost
                   </span>
                 }
                 type="number"
@@ -2893,13 +2895,7 @@ const WOPurchase = () => {
                       }
                     : {}),
                 }}
-                helperText={
-                  errors.retail_price
-                    ? errors.retail_price
-                    : editOPurchase?.retail_price
-                      ? `Formatted: ${formatUSD(editOPurchase.retail_price)}`
-                      : "The official retail price of the watch, expressed in USD."
-                }
+                
               />
 
               <TextField
@@ -2937,13 +2933,7 @@ const WOPurchase = () => {
                       }
                     : {}),
                 }}
-                helperText={
-                  errors.discount_by_vendor
-                    ? errors.discount_by_vendor
-                    : editOPurchase?.discount_by_vendor
-                      ? `Formatted: ${formatUSD(editOPurchase.discount_by_vendor)}`
-                      : "The official retail price of the watch, expressed in USD."
-                }
+                
               />
             </Box>
 
@@ -2990,7 +2980,7 @@ const WOPurchase = () => {
                   <span
                     style={{ color: errors.reaRetail ? "#d32f2f" : undefined }}
                   >
-                    Rate Retail
+                    Rate
                   </span>
                 }
                 type="number"
@@ -3089,6 +3079,53 @@ const WOPurchase = () => {
               fullWidth
               sx={{ flex: 1, minWidth: 180 }}
             />
+            {/* Making, Shipping, Travel charges */}
+            <Box sx={{ display: "flex", gap: 2 }}>
+              <TextField
+                label="Making Charge"
+                type="number"
+                fullWidth
+                value={editOPurchase?.MakingCharge ?? 0}
+                onChange={(e) =>
+                  setEditOPurchase({
+                    ...editOPurchase!,
+                    MakingCharge: Number(e.target.value),
+                  })
+                }
+                inputProps={{ min: 0, step: 0.01 }}
+                sx={{ flex: 1 }}
+              />
+
+              <TextField
+                label="Shipping Charge"
+                type="number"
+                fullWidth
+                value={editOPurchase?.ShippingCharge ?? 0}
+                onChange={(e) =>
+                  setEditOPurchase({
+                    ...editOPurchase!,
+                    ShippingCharge: Number(e.target.value),
+                  })
+                }
+                inputProps={{ min: 0, step: 0.01 }}
+                sx={{ flex: 1 }}
+              />
+
+              <TextField
+                label="Travel Expenses"
+                type="number"
+                fullWidth
+                value={editOPurchase?.TravelExpesenes ?? 0}
+                onChange={(e) =>
+                  setEditOPurchase({
+                    ...editOPurchase!,
+                    TravelExpesenes: Number(e.target.value),
+                  })
+                }
+                inputProps={{ min: 0, step: 0.01 }}
+                sx={{ flex: 1 }}
+              />
+            </Box>
             {/* Manufacture Date */}
             <TextField
               label={
@@ -3508,241 +3545,7 @@ const WOPurchase = () => {
         </Alert>
       </Snackbar>
 
-      {/* --- Edit Cost Dialog --- */}
-      <Dialog
-        open={costDialog.open}
-        onClose={() => setCostDialog({ open: false, row: null })}
-        maxWidth="md"
-        fullWidth
-      >
-        <DialogTitle>Edit Cost Details</DialogTitle>
-        <DialogContent>
-          <Box
-            sx={{
-              display: "flex",
-              flexDirection: { xs: "column", md: "row" },
-              gap: 3,
-              mt: 1,
-            }}
-          >
-            {/* Fields on the left */}
-            <Box
-              sx={{
-                flex: 1,
-                minWidth: 240,
-                maxWidth: 400,
-                display: "flex",
-                flexDirection: "column",
-                gap: 2,
-              }}
-            >
-              <Typography
-                variant="h6"
-                sx={{ mb: 0.75, fontWeight: "bold", color: "primary.main" }}
-              >
-                Charges :
-                <Divider sx={{ my: 1, borderBottomWidth: 2 }} />
-              </Typography>
-              <TextField
-                label="Making Charge"
-                type="number"
-                value={costFields.MakingCharge ?? ""}
-                onChange={(e) =>
-                  setCostFields((f) => ({
-                    ...f,
-                    MakingCharge: Number(e.target.value),
-                  }))
-                }
-                fullWidth
-              />
-              <TextField
-                label="Shipping Charge"
-                type="number"
-                value={costFields.ShippingCharge ?? ""}
-                onChange={(e) =>
-                  setCostFields((f) => ({
-                    ...f,
-                    ShippingCharge: Number(e.target.value),
-                  }))
-                }
-                fullWidth
-              />
-              <TextField
-                label="Travel Expenses"
-                type="number"
-                value={costFields.TravelExpesenes ?? ""}
-                onChange={(e) =>
-                  setCostFields((f) => ({
-                    ...f,
-                    TravelExpesenes: Number(e.target.value),
-                  }))
-                }
-                fullWidth
-              />
-              <TextField
-                label="Rate"
-                type="number"
-                value={costFields.Rate ?? ""}
-                onChange={(e) =>
-                  setCostFields((f) => ({ ...f, Rate: Number(e.target.value) }))
-                }
-                fullWidth
-              />
-            </Box>
-            {/* Totals Box on the right */}
-            <Box
-              sx={{
-                mt: { xs: 2, md: 0 },
-                p: 4,
-                minWidth: 340,
-                maxWidth: 420,
-                fontSize: 18,
-                border: "2px solid rgba(76, 175, 80, 0.3)",
-                color: "inherit",
-                backgroundColor: "rgba(76, 175, 80, 0.10)",
-                borderRadius: 3,
-                mx: "auto",
-                flex: 1,
-                alignSelf: "flex-start",
-              }}
-            >
-              <Typography variant="h5">
-                Sale Price:{" "}
-                <b>
-                  {costDialog.row?.sale_price
-                    ? costDialog.row.sale_price.toLocaleString(undefined, {
-                        style: "currency",
-                        currency: "USD",
-                      })
-                    : "0 USD"}
-                </b>
-              </Typography>
-              <Divider sx={{ my: 1, borderBottomWidth: 2 }} />
-              <Typography variant="body2" sx={{ mt: 1 }}>
-                <b>Total Price (USD):</b>{" "}
-                {costDialog.row?.sale_price
-                  ? costDialog.row.sale_price.toLocaleString(undefined, {
-                      style: "currency",
-                      currency: "USD",
-                    })
-                  : "0 USD"}
-              </Typography>
-              <Typography variant="body2">
-                <b>Total Price (LYD):</b>{" "}
-                {(costDialog.row?.sale_price ?? 0) * (costFields.Rate ?? 0)
-                  ? (
-                      (costDialog.row?.sale_price ?? 0) * (costFields.Rate ?? 0)
-                    ).toLocaleString(undefined, {
-                      style: "currency",
-                      currency: "LYD",
-                    })
-                  : "0 LYD"}
-              </Typography>
-              <Divider sx={{ my: 1, borderBottomWidth: 2 }} />
-              <Typography variant="body2" sx={{ fontWeight: "bold", mb: 1 }}>
-                Add Charges:
-              </Typography>
-              {[
-                { label: "Making Charge", value: costFields.MakingCharge },
-                { label: "Shipping Charge", value: costFields.ShippingCharge },
-                { label: "Travel Expenses", value: costFields.TravelExpesenes },
-              ].map((item) => (
-                <Typography variant="body2" key={item.label} sx={{ ml: 1 }}>
-                  {item.label}: {formatAmount(item.value)} USD ×{" "}
-                  {formatAmount(costFields.Rate)} ={" "}
-                  {formatAmount((item.value ?? 0) * (costFields.Rate ?? 0))} LYD
-                </Typography>
-              ))}
-              <Divider sx={{ my: 1, borderBottomWidth: 2 }} />
-              <Typography
-                variant="body2"
-                sx={{ fontWeight: "bold", color: "primary.main" }}
-              >
-                Grand Total (USD):{" "}
-                {(
-                  (costDialog.row?.sale_price ?? 0) +
-                  (costFields.MakingCharge ?? 0) +
-                  (costFields.ShippingCharge ?? 0) +
-                  (costFields.TravelExpesenes ?? 0)
-                ).toLocaleString(undefined, {
-                  style: "currency",
-                  currency: "USD",
-                })}
-              </Typography>
-              <Typography
-                variant="body2"
-                sx={{ fontWeight: "bold", color: "primary.main" }}
-              >
-                Grand Total (LYD):{" "}
-                {(
-                  ((costDialog.row?.sale_price ?? 0) +
-                    (costFields.MakingCharge ?? 0) +
-                    (costFields.ShippingCharge ?? 0) +
-                    (costFields.TravelExpesenes ?? 0)) *
-                  (costFields.Rate ?? 0)
-                ).toLocaleString(undefined, {
-                  style: "currency",
-                  currency: "LYD",
-                })}
-              </Typography>
-              <Divider sx={{ my: 1, borderBottomWidth: 2 }} />
-              <Button
-                sx={{ position: "revert" }}
-                variant="contained"
-                onClick={() => {
-                  /* TODO: handle generate journal */
-                }}
-                color="success"
-              >
-                Generate Journal
-              </Button>
-            </Box>
-          </Box>
-        </DialogContent>
-        <DialogActions>
-          <Button
-            onClick={() => setCostDialog({ open: false, row: null })}
-            color="secondary"
-          >
-            Cancel
-          </Button>
-          <Button
-            onClick={async () => {
-              if (!costDialog.row) return;
-              const token = localStorage.getItem("token");
-              try {
-                await axios.put(
-                  `${apiUrl}/Update/${costDialog.row.id_achat}`,
-                  {
-                    ...costDialog.row,
-                    ...costFields,
-                  },
-                  {
-                    headers: { Authorization: `Bearer ${token}` },
-                  }
-                );
-                setSnackbar({
-                  open: true,
-                  message: "Cost updated",
-                  severity: "success",
-                });
-                await fetchData();
-              } catch {
-                setSnackbar({
-                  open: true,
-                  message: "Failed to update cost",
-                  severity: "error",
-                });
-              }
-              setCostDialog({ open: false, row: null });
-            }}
-            color="primary"
-            variant="contained"
-          >
-            Save
-          </Button>
-        </DialogActions>
-      </Dialog>
+      {/* --- Edit Cost Dialog removed --- */}
 
       {/* --- Image Dialog --- */}
     </Box>

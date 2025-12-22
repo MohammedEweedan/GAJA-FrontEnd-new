@@ -31,7 +31,6 @@ import {} from "@mui/icons-material";
 import { format } from "date-fns";
 import axios from "axios";
 import { getAuthHeader } from "../../utils/auth";
-import { isActiveEmployee } from "../../api/employees";
 import {
   getLeaveRequests,
   getLeaveTypes,
@@ -216,7 +215,7 @@ const LeaveStatusScreen: React.FC<{ employeeId?: number | string }> = ({
           const msg =
             (e as any)?.response?.data?.message ||
             (e as any)?.message ||
-            t("leave.delegate.emailFailed", "Delegation email failed");
+            "Delegation email failed";
           setActionError(msg);
           if (/No delegate found/i.test(String(msg)))
             setShowDelegatePicker(true);
@@ -230,9 +229,7 @@ const LeaveStatusScreen: React.FC<{ employeeId?: number | string }> = ({
       }
     } catch (e: any) {
       setActionError(
-        e?.response?.data?.message ||
-          e?.message ||
-          t("leave.status.actionFailed", "Action failed")
+        e?.response?.data?.message || e?.message || "Action failed"
       );
     } finally {
       setActionLoading(false);
@@ -265,7 +262,7 @@ const LeaveStatusScreen: React.FC<{ employeeId?: number | string }> = ({
       setActionError(
         e?.response?.data?.message ||
           e?.message ||
-          t("leave.delegate.sendError", "Failed to send delegation email")
+          "Failed to send delegation email"
       );
       if (
         /No delegate found/i.test(
@@ -288,10 +285,9 @@ const LeaveStatusScreen: React.FC<{ employeeId?: number | string }> = ({
           API_URL && API_URL.trim() ? API_URL : inferredBase
         ).replace(/\/+$/, "");
         const headers = await getAuthHeader();
-        const res = await axios.get(`${base}/employees`, { headers, params: { state: true } });
-        const raw = Array.isArray(res.data) ? res.data : res.data?.data || [];
-        const active = raw.filter(isActiveEmployee);
-        setEmployees(active);
+        const res = await axios.get(`${base}/employees`, { headers });
+        const arr = Array.isArray(res.data) ? res.data : res.data?.data || [];
+        setEmployees(arr);
       } catch {
         setEmployees([]);
       } finally {

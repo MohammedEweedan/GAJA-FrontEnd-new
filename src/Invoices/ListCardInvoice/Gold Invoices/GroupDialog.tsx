@@ -90,7 +90,20 @@ const GroupDialog: React.FC<GroupDialogProps> = ({
                   let imageUrl = "";
                   let arr: string[] = [];
                   if (imageUrls && item?.id_fact) {
-                    arr = imageUrls[String(item.id_fact)] || [];
+                    const idStr = String(item.id_fact);
+                    // Try namespaced keys first, then fallback to legacy
+                    const candidates = [
+                      `gold:${idStr}`,
+                      `diamond:${idStr}`,
+                      `watch:${idStr}`,
+                      idStr,
+                    ];
+                    for (const k of candidates) {
+                      if (imageUrls[k] && imageUrls[k]!.length) {
+                        arr = imageUrls[k]!;
+                        break;
+                      }
+                    }
                   }
                   arr = arr.length ? arr : item?.imageUrls || [];
                   if (
@@ -265,7 +278,8 @@ const GroupDialog: React.FC<GroupDialogProps> = ({
                   const item = items[0];
                   let groupImages: string[] = [];
                   if (imageUrls && item?.id_fact) {
-                    const arr = imageUrls[String(item.id_fact)];
+                    const idStr = String(item.id_fact);
+                    const arr = imageUrls[`gold:${idStr}`] || imageUrls[`diamond:${idStr}`] || imageUrls[`watch:${idStr}`] || imageUrls[idStr];
                     if (arr && arr.length > 0)
                       groupImages = arr.filter((u: string) => {
                         const filename =

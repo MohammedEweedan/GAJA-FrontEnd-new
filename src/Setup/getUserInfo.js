@@ -18,5 +18,24 @@ export function getUserInfo() {
 // Check if the role contains a specific value
 export function hasRole(param) {
   const { role } = getUserInfo();
-  return typeof role === 'string' && role.includes(param);
+
+  const needle = String(param || '').toLowerCase();
+  if (!needle) return false;
+
+  if (typeof role === 'string') return role.toLowerCase().includes(needle);
+
+  // Some accounts store roles as an array (or object). Normalize to a string.
+  if (Array.isArray(role)) {
+    return role.some((r) => String(r || '').toLowerCase().includes(needle));
+  }
+
+  if (role && typeof role === 'object') {
+    try {
+      return JSON.stringify(role).toLowerCase().includes(needle);
+    } catch {
+      return false;
+    }
+  }
+
+  return false;
 }

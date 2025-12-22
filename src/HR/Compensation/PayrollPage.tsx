@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import {
   Box,
   Card,
@@ -27,6 +27,8 @@ import {
   Checkbox,
   IconButton,
   Avatar,
+  Snackbar,
+  Alert,
 } from "@mui/material";
 import { useTranslation } from "react-i18next";
 import dayjs from "dayjs";
@@ -90,8 +92,73 @@ export default function PayrollPage() {
   const [adjOpen, setAdjOpen] = React.useState(false);
   const [adjLoading, setAdjLoading] = React.useState(false);
   const [adjEmpId, setAdjEmpId] = React.useState<number | null>(null);
-  const [adjRows, setAdjRows] = React.useState<Array<{ type: string; amount: number; currency: string; note?: string; ts?: string }>>([]);
-  const [adjForm, setAdjForm] = React.useState<{ type: string; amount: string; currency: string; note: string }>({ type: "bonus", amount: "", currency: "LYD", note: "" });
+  const [adjRows, setAdjRows] = React.useState<
+    Array<{
+      id?: number;
+      type: string;
+      label?: string;
+      direction?: string;
+      recurring?: boolean;
+      startYear?: number;
+      startMonth?: number;
+      endYear?: number;
+      endMonth?: number;
+      amount: number;
+      currency: string;
+      note?: string;
+      ts?: string;
+    }>
+  >([]);
+  const [adjForm, setAdjForm] = React.useState<{
+    type: string;
+    label: string;
+    direction: 'ADD' | 'DEDUCT';
+    recurring: boolean;
+    startYear: number;
+    startMonth: number;
+    endYear: string;
+    endMonth: string;
+    amount: string;
+    currency: string;
+    note: string;
+  }>({
+    type: 'bonus',
+    label: 'Bonus',
+    direction: 'ADD',
+    recurring: false,
+    startYear: y,
+    startMonth: m,
+    endYear: '',
+    endMonth: '',
+    amount: '',
+    currency: 'LYD',
+    note: '',
+  });
+  const [adjEditId, setAdjEditId] = React.useState<number | null>(null);
+  const [adjCurrencyFilter, setAdjCurrencyFilter] = React.useState<'ALL' | 'LYD' | 'USD'>('ALL');
+  const [adjDeleteOpen, setAdjDeleteOpen] = React.useState(false);
+  const [adjDeleteId, setAdjDeleteId] = React.useState<number | null>(null);
+
+  const adjUsdEligible = React.useMemo(() => {
+    if (!adjEmpId) return false;
+    const emp = (result?.employees || []).find((x: any) => Number(x.id_emp) === Number(adjEmpId));
+    const vr = (v2Rows || []).find((x: any) => Number(x.id_emp) === Number(adjEmpId)) || {};
+    const usd = Number(
+      (emp as any)?.basic_salary_usd ??
+        (emp as any)?.base_salary_usd ??
+        (emp as any)?.baseSalaryUsd ??
+        (vr as any)?.basic_salary_usd ??
+        (vr as any)?.base_salary_usd ??
+        0
+    );
+    return Number.isFinite(usd) && usd > 0;
+  }, [adjEmpId, result, v2Rows]);
+
+  React.useEffect(() => {
+    if (!adjUsdEligible && adjForm.currency === 'USD') {
+      setAdjForm((f) => ({ ...f, currency: 'LYD' }));
+    }
+  }, [adjUsdEligible, adjForm.currency]);
 
   // Adjustment types and behavior (limited set per requirements)
   const adjTypeOptions: Array<{ value: string; label: string }> = [
@@ -99,12 +166,14 @@ export default function PayrollPage() {
     { value: 'deduction', label: 'Deduction' },
     { value: 'eid_bonus', label: 'Eid Bonus' },
     { value: 'ramadan_bonus', label: 'Ramadan Bonus' },
+    { value: 'custom', label: 'Custom' },
   ];
   const adjLydOnlyTypes = new Set([
     'bonus',
     'deduction',
     'eid_bonus',
     'ramadan_bonus',
+    'custom',
   ]);
 
   const [bdOpen, setBdOpen] = React.useState(false);
@@ -153,7 +222,7 @@ export default function PayrollPage() {
   const [advMap, setAdvMap] = React.useState<Record<number, number>>({});
   const [adjSumsByEmp, setAdjSumsByEmp] = React.useState<Record<number, { earnLyd: number; earnUsd: number; dedLyd: number; dedUsd: number }>>({});
   const [nameMap, setNameMap] = React.useState<Record<number, string>>({});
-  const [leaveTypeMap, setLeaveTypeMap] = useState<Record<string, { code: string; name: string }>>({});
+  const [leaveTypeMap, setLeaveTypeMap] = useState<Record<string, { code: string; name: string; color: string }>>({});
   const [leaveRequestsCache, setLeaveRequestsCache] = useState<Record<number, any[]>>({});
   const [contractStartMap, setContractStartMap] = React.useState<Record<number, string | null>>({});
   const [hrEmails, setHrEmails] = React.useState<string>(() => {
@@ -166,6 +235,13 @@ export default function PayrollPage() {
   const [employeesByTitle, setEmployeesByTitle] = React.useState<Record<string, number[]>>({});
   const [sendDialogOpen, setSendDialogOpen] = React.useState(false);
   const [sendSelection, setSendSelection] = React.useState<Record<number, boolean>>({});
+
+  const [uiErrorOpen, setUiErrorOpen] = React.useState(false);
+  const [uiErrorMessage, setUiErrorMessage] = React.useState<string>('');
+  const showUiError = (msg: string) => {
+    setUiErrorMessage(String(msg || ''));
+    setUiErrorOpen(true);
+  };
 
   // Loan & Salary Advance rule settings (persisted in localStorage)
   const [loanMaxMultiple, setLoanMaxMultiple] = React.useState<number>(() => {
@@ -300,43 +376,36 @@ const computePPhPhf = (e: Payslip): PPhPhfVals => {
       (x: any) => Number(x.id_emp) === Number(e.id_emp)
     ) || ({} as any);
 
-  // --- 1) Daily base rate from BASIC SALARY only ---
-  const W = Math.max(1, Number(e.workingDays || vr.workingDays || 0) || 1);
+  const agg = tsAgg?.[Number(e.id_emp)];
 
-  const baseLyd =
-    Number(e.baseSalary ?? vr.base_salary_lyd ?? 0) || 0;
-  const baseUsd =
-    Number((e as any).baseSalaryUsd ?? vr.base_salary_usd ?? 0) || 0;
+  // Always compute using a fixed 30-day month and timesheet-derived day counts
+  const FIXED_MONTH_DAYS = 30;
+  const baseLyd = Number(e.baseSalary ?? vr.base_salary_lyd ?? 0) || 0;
+  const baseUsd = Number((e as any).baseSalaryUsd ?? vr.base_salary_usd ?? 0) || 0;
+  const baseDailyLyd = baseLyd / FIXED_MONTH_DAYS;
+  const baseDailyUsd = baseUsd / FIXED_MONTH_DAYS;
 
-  const baseDailyLyd = baseLyd / W;
-  const baseDailyUsd = baseUsd / W;
+  const pDays = Number(agg?.presentP ?? (vr as any).p_days ?? e.presentWorkdays ?? 0) || 0;
+  const phDays = Number(agg?.phPartDays ?? (vr as any).ph_days ?? 0) || 0;
+  const phfDays = Number(agg?.phFullDays ?? (vr as any).phf_days ?? 0) || 0;
 
-  // --- 2) Number of days for each type ---
-  const pDays =
-    Number((vr as any).p_days ?? e.presentWorkdays ?? 0) || 0;
-  const phDays = Number((vr as any).ph_days ?? 0) || 0;
-  const phfDays = Number((vr as any).phf_days ?? 0) || 0;
-
-  // --- 3) Food per working day (for PHF) ---
-  let foodPerDay = Number(
-    (e as any).FOOD || (e as any).FOOD_ALLOWANCE || vr.food_per_day_lyd || 0
-  );
+  // Food per day for PHF
+  let foodPerDay = Number((e as any).FOOD || (e as any).FOOD_ALLOWANCE || vr.food_per_day_lyd || 0);
   if (!foodPerDay) {
     const totalFoodLyd = Number((vr as any).wd_food_lyd || 0);
-    // FOOD is per working day (not per present day)
+    const W = Math.max(1, Number(e.workingDays || vr.workingDays || 0) || 1);
     foodPerDay = totalFoodLyd && W ? totalFoodLyd / W : 0;
   }
 
-  // --- 4) P / PH / PHF amounts ---
   // P = normal daily rate
   const pLyd = pDays * baseDailyLyd;
   const pUsd = pDays * baseDailyUsd;
 
-  // PH = double daily rate (no extra food)
+  // PH = double daily rate (no food)
   const phLyd = phDays * (baseDailyLyd * 2);
   const phUsd = phDays * (baseDailyUsd * 2);
 
-  // PHF = double daily rate + normal food allowance
+  // PHF = double daily rate + food allowance
   const phfLyd = phfDays * (baseDailyLyd * 2 + foodPerDay);
   const phfUsd = phfDays * (baseDailyUsd * 2);
 
@@ -377,7 +446,7 @@ const computePPhPhf = (e: Payslip): PPhPhfVals => {
     const defaultPer = Number((emp as any).FOOD || (emp as any).FOOD_ALLOWANCE || 0);
     let perDay = defaultPer;
     if (!perDay) perDay = workingDaysFood > 0 ? foodTotal / workingDaysFood : 0;
-    const paidDaysRaw = Number((v2 as any).p_days ?? emp.presentWorkdays ?? 0) || 0;
+    const paidDaysRaw = Number((v2 as any).p_days ?? tsAgg?.[Number(emp.id_emp)]?.presentP ?? emp.presentWorkdays ?? 0) || 0;
     const paidDays = workingDaysFood > 0 ? Math.min(paidDaysRaw, workingDaysFood) : paidDaysRaw;
     const allowance = Number((perDay * paidDays).toFixed(2));
     return { allowance, perDay, paidDays };
@@ -386,23 +455,21 @@ const computePPhPhf = (e: Payslip): PPhPhfVals => {
   function getPhAmounts(id_emp: number, opts?: { emp?: Payslip | null; v2?: any; workingDays?: number; baseLyd?: number; baseUsd?: number }) {
     try {
       const resolved = resolvePayEntities(id_emp);
-      const emp = opts?.emp ?? resolved.emp;
       const v2 = opts?.v2 ?? resolved.v2;
-      const agg = tsAgg[id_emp];
-      const workingDaysRaw = opts?.workingDays ?? emp?.workingDays ?? ((v2 as any).workingDays ?? 0);
-      const W = Math.max(1, Number(workingDaysRaw) || 1);
-      const baseLydRaw = opts?.baseLyd ?? ((v2 as any).base_salary_lyd ?? emp?.baseSalary ?? 0);
-      const baseUsdRaw = opts?.baseUsd ?? ((v2 as any).base_salary_usd ?? (emp as any)?.baseSalaryUsd ?? 0);
-      const base = Math.max(0, Number(baseLydRaw) || 0);
-      const baseUsd = Math.max(0, Number(baseUsdRaw) || 0);
-      const dailyLyd = base / W;
-      const dailyUsd = baseUsd / W;
-      const phUnits = Math.max(0, agg?.phUnits || 0);
-      const phAggLyd = phUnits > 0 ? Number((dailyLyd * phUnits).toFixed(2)) : 0;
-      const phAggUsd = phUnits > 0 ? Number((dailyUsd * phUnits).toFixed(2)) : 0;
-      const phLyd = phAggLyd > 0 ? phAggLyd : Math.max(0, Number((v2 as any).ph_lyd || 0));
-      const phUsd = phAggUsd > 0 ? phAggUsd : Math.max(0, Number((v2 as any).ph_usd || 0));
-      return { lyd: phLyd, usd: phUsd };
+      
+      // Use backend-calculated PH values directly (already uses correct formula: dailyRate * 2 * phDays)
+      const phLyd = Math.max(0, Number((v2 as any).ph_lyd || 0));
+      const phUsd = Math.max(0, Number((v2 as any).ph_usd || 0));
+      
+      // Also include PHF values
+      const phfLyd = Math.max(0, Number((v2 as any).phf_lyd || 0));
+      const phfUsd = Math.max(0, Number((v2 as any).phf_usd || 0));
+      
+      // Return combined PH + PHF for total paid holiday amount
+      return { 
+        lyd: Number((phLyd + phfLyd).toFixed(2)), 
+        usd: Number((phUsd + phfUsd).toFixed(2)) 
+      };
     } catch {
       return { lyd: 0, usd: 0 };
     }
@@ -515,67 +582,111 @@ const computePPhPhf = (e: Payslip): PPhPhfVals => {
     else { setSortKey(key); setSortDir('asc'); }
   };
 
+  const safeISO10 = (v: any): string => {
+    if (!v) return "";
+    const s = String(v).trim();
+    if (!s) return "";
+    if (/^\d{4}-\d{2}-\d{2}/.test(s)) return s.slice(0, 10);
+    // Common backend/UI formats: DD/MM/YYYY or DD-MM-YYYY (optionally with time)
+    const m1 = s.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})/);
+    if (m1) {
+      const dd = String(m1[1]).padStart(2, '0');
+      const mm = String(m1[2]).padStart(2, '0');
+      const yy = String(m1[3]);
+      return `${yy}-${mm}-${dd}`;
+    }
+    const d = dayjs(s);
+    return d.isValid() ? d.format('YYYY-MM-DD') : '';
+  };
+
   // Classify attendance badge for a day
+  // PRIORITY ORDER:
+  // 1. Backend-provided code from timesheet (includes manual overrides from j_* columns)
+  // 2. Approved leave/vacation codes
+  // 3. Computed from punch data (fallback)
   function codeBadge(day?: any, schStartMin?: number | null, schEndMin?: number | null, empId?: number): string {
     // If there is no timesheet day at all, do not force an Absent code.
-    // TimesheetsPage treats absence based on explicit codes / lack of presence on working days.
     if (!day) return '';
     
-    // Check if this day falls within any approved leave period for this employee
+    // PRIORITY 1: Backend-provided code from timesheet (respects manual overrides)
+    // The backend timesheetController reads j_* columns which contain manual codes
+    const rawCode = String(day.code || day.badge || '').toUpperCase();
+    const knownCodes = ['P','A','PT','PL','PH','PHF','AL','SL','EL','ML','UL','HL','BM','XL','B1','B2','NI','NO','MO','IP','LI','EO','W','H','PP'];
+    if (rawCode && knownCodes.includes(rawCode)) {
+      return rawCode;
+    }
+    
+    // PRIORITY 2: Check if this day falls within any approved leave period
     if (empId && leaveRequestsCache[empId]) {
       const dayDate = new Date(day.date || `${year}-${String(month).padStart(2, '0')}-${String(day.day || 1).padStart(2, '0')}`);
       dayDate.setHours(0, 0, 0, 0);
+
+      const dayNum = Number(day?.day || 1);
+      const ymd = String(day?.date || `${year}-${String(month).padStart(2, '0')}-${String(dayNum).padStart(2, '0')}`).slice(0, 10);
       
       for (const leave of leaveRequestsCache[empId]) {
         const status = String(leave.status || leave.state || '').toLowerCase();
-        if (!status.includes('approved') && !status.includes('موافق')) continue;
+        if (!status.includes('approved') && !status.includes('موافق') && !status.includes('accepted')) continue;
         
         const st = leave.startDate || leave.DATE_START || leave.date_depart;
         const en = leave.endDate || leave.DATE_END || leave.date_end;
         if (!st || !en) continue;
         
-        const startDate = new Date(st);
-        startDate.setHours(0, 0, 0, 0);
-        const endDate = new Date(en);
-        endDate.setHours(23, 59, 59, 999);
-        
-        // Check if current day is within leave period
-        if (dayDate >= startDate && dayDate <= endDate) {
-          // Map leave type to code
-          const typeCode = leave.typeCode || leave.id_can || leave.code;
-          const idKey = typeCode != null ? String(typeCode) : undefined;
-          const lt = idKey ? leaveTypeMap[idKey] : undefined;
-          const code = (lt?.code || String(typeCode || '')).toUpperCase();
+        const stYmd = safeISO10(st);
+        const enYmd = safeISO10(en);
+        if (!stYmd || !enYmd) continue;
+
+        // Check if current day is within leave period (timezone-safe)
+        if (ymd >= stYmd && ymd <= enYmd) {
+          // Determine leave code first
+          let leaveCode = '';
           
-          // Return specific leave codes
-          if (code === 'AL' || code.includes('ANNUAL')) return 'AL';
-          if (code === 'SL' || code.includes('SICK')) return 'SL';
-          if (code === 'EL' || code.includes('EMERGENCY')) return 'EL';
-          if (code === 'ML' || code.includes('MATERNITY')) return 'ML';
-          if (code === 'UL' || code.includes('UNPAID')) return 'UL';
-          if (code === 'HL' || code.includes('HALF')) return 'HL';
-          if (code === 'B1' || code.includes('BEREAVEMENT 1')) return 'B1';
-          if (code === 'B2' || code.includes('BEREAVEMENT 2')) return 'B2';
-          if (code === 'BM' || code.includes('BEREAVEMENT')) return 'BM';
-          if (code === 'XL' || code.includes('EXAM') || code.includes('EXCUSE')) return 'XL';
+          // 1. Direct code field
+          const directCode = String(leave.code || leave.leaveType || leave.leaveTypeCode || '').toUpperCase();
+          if (directCode && knownCodes.includes(directCode)) {
+            leaveCode = directCode;
+          } else {
+            // 2. Look up by id_can in leaveTypeMap
+            const idCan = leave.id_can ?? leave.typeCode ?? leave.leaveCode;
+            if (idCan != null) {
+              const lt = leaveTypeMap[String(idCan)];
+              if (lt?.code) {
+                const ltCode = lt.code.toUpperCase();
+                if (knownCodes.includes(ltCode)) leaveCode = ltCode;
+              }
+            }
+          }
           
-          // If we have any leave code, return it
-          if (code) return code;
+          // 3. Check leave type name for keywords if no code yet
+          if (!leaveCode) {
+            const typeName = String(leave.typeName || leave.leaveTypeName || leave.type || '').toUpperCase();
+            if (typeName.includes('ANNUAL') || typeName.includes('سنوي')) leaveCode = 'AL';
+            else if (typeName.includes('SICK') || typeName.includes('مرض')) leaveCode = 'SL';
+            else if (typeName.includes('EMERGENCY') || typeName.includes('طارئ')) leaveCode = 'EL';
+            else if (typeName.includes('MATERNITY') || typeName.includes('أمومة')) leaveCode = 'ML';
+            else if (typeName.includes('UNPAID') || typeName.includes('بدون')) leaveCode = 'UL';
+            else if (typeName.includes('HALF')) leaveCode = 'HL';
+            else if (typeName.includes('BEREAVEMENT') || typeName.includes('عزاء')) leaveCode = 'BM';
+            else if (typeName.includes('EXAM') || typeName.includes('امتحان')) leaveCode = 'XL';
+            else if (directCode && directCode.length <= 3) leaveCode = directCode;
+            else leaveCode = 'AL'; // Fallback
+          }
           
-          // Fallback to generic leave indicator
-          return 'L';
+          // IMPORTANT: Return the leave code for DISPLAY purposes
+          // The Friday rule (not counting Fridays as working days) is handled in the backend
+          // and in working day calculations, NOT in the display logic
+          return leaveCode;
         }
       }
     }
     
-    // Original attendance logic
+    // PRIORITY 3: Compute from punch data (fallback when no backend code)
     const present = !!day.present;
-    const rawCode = String(day.code || day.badge || '').toUpperCase();
-    if (rawCode) return rawCode;
     
     const dayNum = Number(day?.day || 1);
     const ymd = String(day?.date || `${year}-${String(month).padStart(2, '0')}-${String(dayNum).padStart(2, '0')}`).slice(0, 10);
-    const isHoliday = holidaySet.has(ymd) || !!day.isHoliday || /holiday/i.test(String(day.type||day.reason||'')) || rawCode === 'PH' || rawCode === 'PHF';
+    const isHoliday = holidaySet.has(ymd) || !!day.isHoliday || /holiday/i.test(String(day.type||day.reason||''));
+    if (!present && isHoliday) return '';
     
     const parseMin = (s: any): number | null => {
       if (!s) return null;
@@ -653,7 +764,7 @@ const computePPhPhf = (e: Payslip): PPhPhfVals => {
             ? holidaysResp
             : (holidaysResp as any)?.data || [];
           (holidaysArr || []).forEach((h: any) => {
-            const iso = String(h.DATE_H ?? h.date ?? h.holiday_date ?? '').slice(0, 10);
+            const iso = safeISO10(h.DATE_H ?? h.date ?? h.holiday_date);
             if (iso) set.add(iso);
           });
         } catch {}
@@ -663,7 +774,7 @@ const computePPhPhf = (e: Payslip): PPhPhfVals => {
             const arr = JSON.parse(raw);
             if (Array.isArray(arr)) {
               arr.forEach((h: any) => {
-                const iso = String(h.DATE_H ?? h.date ?? h.holiday_date ?? '').slice(0, 10);
+                const iso = safeISO10(h.DATE_H ?? h.date ?? h.holiday_date);
                 if (iso) set.add(iso);
               });
             }
@@ -675,16 +786,59 @@ const computePPhPhf = (e: Payslip): PPhPhfVals => {
     loadHolidays();
   }, []);
 
+  // Color palette for leave types (matching CalendarLogScreen.tsx)
+  const leaveColorPalette = useMemo(() => [
+    "#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd",
+    "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22", "#17becf",
+  ], []);
+
+  // Generate stable color from leave code (matching CalendarLogScreen.tsx)
+  const stableColorFromCode = useCallback((code: string) => {
+    const up = code.toUpperCase();
+    if (up === "AL") return "#f44336"; // Annual Leave - red
+    if (up === "SL") return "#4caf50"; // Sick Leave - green
+    if (up === "EL") return "#ff9800"; // Emergency Leave - orange
+    if (up === "ML") return "#e91e63"; // Maternity Leave - pink
+    if (up === "UL") return "#9c27b0"; // Unpaid Leave - purple
+    if (up === "HL") return "#03a9f4"; // Half Day Leave - light blue
+    if (up === "BM" || up === "B1" || up === "B2") return "#607d8b"; // Bereavement - gray
+    if (up === "XL") return "#8bc34a"; // Exam Leave - light green
+    if (up === "PH") return "#424242"; // Public Holiday - dark gray
+    // Hash-based fallback for other codes
+    let hash = 0;
+    for (let i = 0; i < up.length; i++) hash = (hash * 53 + up.charCodeAt(i)) >>> 0;
+    return leaveColorPalette[hash % leaveColorPalette.length];
+  }, [leaveColorPalette]);
+
+  const hexToRgba = (hex: string, a: number): string => {
+    try {
+      const h = String(hex || '').replace('#', '').trim();
+      const full = h.length === 3 ? h.split('').map((c) => c + c).join('') : h;
+      if (!/^[0-9a-fA-F]{6}$/.test(full)) return `rgba(0,0,0,${a})`;
+      const r = parseInt(full.slice(0, 2), 16);
+      const g = parseInt(full.slice(2, 4), 16);
+      const b = parseInt(full.slice(4, 6), 16);
+      return `rgba(${r},${g},${b},${a})`;
+    } catch {
+      return `rgba(0,0,0,${a})`;
+    }
+  };
+
   useEffect(() => {
     const loadTypes = async () => {
       try {
         const types = await getLeaveTypes();
-        const map: Record<string, { code: string; name: string }> = {};
+        const map: Record<string, { code: string; name: string; color: string }> = {};
         (Array.isArray(types) ? types : []).forEach((t: any) => {
           if (t && t.int_can != null) {
+            const code = String(t.code || "").toUpperCase();
+            const color = (t.color && /^#([0-9A-F]{3}){1,2}$/i.test(t.color))
+              ? t.color
+              : stableColorFromCode(code);
             map[String(t.int_can)] = {
-              code: String(t.code || ""),
+              code,
               name: String(t.desig_can || ""),
+              color,
             };
           }
         });
@@ -692,7 +846,77 @@ const computePPhPhf = (e: Payslip): PPhPhfVals => {
       } catch {}
     };
     loadTypes();
-  }, []);
+  }, [stableColorFromCode]);
+
+  // Helper functions for working day calculations (matching LeaveBalanceScreen.tsx and CalendarLogScreen.tsx)
+  const isFridayDate = useCallback((d: Date) => d.getDay() === 5, []);
+  const isHolidayDate = useCallback((d: Date) => {
+    const ymd = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    return holidaySet.has(ymd);
+  }, [holidaySet]);
+  const isNonWorkingDate = useCallback((d: Date) => isFridayDate(d) || isHolidayDate(d), [isFridayDate, isHolidayDate]);
+
+  // Count working days between two dates (excluding Fridays and holidays) - matching LeaveBalanceScreen.tsx
+  const countWorkingDays = useCallback((a: Date, b: Date) => {
+    const s = new Date(a);
+    s.setHours(0, 0, 0, 0);
+    const e = new Date(b);
+    e.setHours(0, 0, 0, 0);
+    let count = 0;
+    const d = new Date(s);
+    while (d <= e) {
+      if (!isNonWorkingDate(d)) count++;
+      d.setDate(d.getDate() + 1);
+    }
+    return count;
+  }, [isNonWorkingDate]);
+
+  // Split leave period into working-only segments (matching CalendarLogScreen.tsx)
+  const splitWorkingSegments = useCallback((start: Date, end: Date) => {
+    const s = new Date(start);
+    s.setHours(0, 0, 0, 0);
+    const e = new Date(end);
+    e.setHours(23, 59, 59, 999);
+
+    const segments: Array<{ start: Date; end: Date }> = [];
+    let cur: Date | null = null;
+
+    const step = new Date(s);
+    while (step <= e) {
+      const day = new Date(step);
+      const working = !isNonWorkingDate(day);
+      if (working) {
+        if (!cur) cur = new Date(day);
+      } else {
+        if (cur) {
+          const segEnd = new Date(day);
+          segEnd.setDate(segEnd.getDate() - 1);
+          segEnd.setHours(23, 59, 59, 999);
+          segments.push({ start: cur, end: segEnd });
+          cur = null;
+        }
+      }
+      step.setDate(step.getDate() + 1);
+    }
+
+    if (cur) {
+      const segEnd = new Date(e);
+      segments.push({ start: cur, end: segEnd });
+    }
+
+    return segments;
+  }, [isNonWorkingDate]);
+
+  // Get leave type metadata with color
+  const getLeaveTypeMeta = useCallback((idCan?: string | number) => {
+    if (idCan == null) return { code: '', name: '', color: '#9e9e9e' };
+    const key = String(idCan);
+    const entry = leaveTypeMap[key];
+    if (entry) return entry;
+    // Fallback: try to get color from code
+    const code = String(idCan).toUpperCase();
+    return { code, name: '', color: stableColorFromCode(code) };
+  }, [leaveTypeMap, stableColorFromCode]);
 
   // Auto-load data when tabs change
   React.useEffect(() => {
@@ -706,7 +930,7 @@ const computePPhPhf = (e: Payslip): PPhPhfVals => {
         }
         if (tab === 'advances') {
           try {
-            const url = `http://localhost:9000/hr/payroll/adjustments?year=${year}&month=${month}&employeeId=${adjEmpId}`;
+            const url = `http://192.168.3.98:9000/hr/payroll/adjustments?year=${year}&month=${month}&employeeId=${adjEmpId}`;
             const res = await fetch(url, { headers: authHeader() as unknown as HeadersInit });
             if (res.ok) {
               const js = await res.json();
@@ -718,7 +942,7 @@ const computePPhPhf = (e: Payslip): PPhPhfVals => {
         }
         try {
           const q = new URLSearchParams({ employeeId: String(adjEmpId) });
-          const res = await fetch(`http://localhost:9000/hr/payroll/history/total?${q.toString()}`, { headers: authHeader() as unknown as HeadersInit });
+          const res = await fetch(`http://192.168.3.98:9000/hr/payroll/history/total?${q.toString()}`, { headers: authHeader() as unknown as HeadersInit });
           const js = await res.json();
           if (res.ok) setHistoryPoints(Array.isArray(js?.points) ? js.points : []);
           else setHistoryPoints([]);
@@ -735,14 +959,19 @@ const computePPhPhf = (e: Payslip): PPhPhfVals => {
     }
     (async () => {
       try {
-        const url = `http://localhost:9000/hr/payroll/adjustments?year=${year}&month=${month}&employeeId=${adjEmpId}`;
+        const url = `http://192.168.3.98:9000/hr/payroll/adjustments?year=${year}&month=${month}&employeeId=${adjEmpId}`;
         const res = await fetch(url, { headers: authHeader() as unknown as HeadersInit });
         if (!res.ok) {
           setAdjRows([]);
           return;
         }
         const js = await res.json();
-        const rows = (js?.data?.[String(adjEmpId)] || []) as Array<{ type: string; amount: number; currency: string; note?: string; ts?: string }>;
+        const rawRows = (js?.data?.[String(adjEmpId)] || []) as Array<{ id?: number; type: string; label?: string; direction?: string; recurring?: boolean; startYear?: number; startMonth?: number; endYear?: number; endMonth?: number; amount: number; currency: string; note?: string; ts?: string }>;
+        // Ensure each row has an ID (generate one for legacy entries without ID)
+        const rows = rawRows.map((r, idx) => ({
+          ...r,
+          id: r.id ?? Date.now() + idx,
+        }));
         setAdjRows(rows);
       } catch {
         setAdjRows([]);
@@ -755,7 +984,7 @@ const computePPhPhf = (e: Payslip): PPhPhfVals => {
     const map: Record<string, { lyd: number; usd: number }> = {};
     (adjRows || []).forEach((r) => {
       if (!r) return;
-      const k = r.type || 'other';
+      const k = (r.label || r.type || 'other') as string;
       if (!map[k]) map[k] = { lyd: 0, usd: 0 };
       const amt = Number(r.amount || 0) || 0;
       if (!amt) return;
@@ -799,7 +1028,7 @@ const computePPhPhf = (e: Payslip): PPhPhfVals => {
   React.useEffect(() => {
   (async () => {
     try {
-      const res = await fetch(`${process.env.REACT_APP_API_IP || 'http://localhost:9000'}/jobs/jobs`, {
+      const res = await fetch(`${process.env.REACT_APP_API_IP || 'http://192.168.3.98:9000'}/jobs/jobs`, {
         headers: authHeader() as any,
       });
       if (!res.ok) return;
@@ -815,27 +1044,160 @@ const computePPhPhf = (e: Payslip): PPhPhfVals => {
   const addAdjustment = async () => {
     if (!adjEmpId) return;
     if (!adjForm.amount) { alert('Amount required'); return; }
+    if (adjForm.type === 'custom' && !String(adjForm.label || '').trim()) { alert('Label required'); return; }
     setAdjLoading(true);
     try {
-      const isLydOnly = adjLydOnlyTypes.has(adjForm.type);
+      const isLydOnly = !adjUsdEligible;
+      const endY = String(adjForm.endYear || '').trim();
+      const endM = String(adjForm.endMonth || '').trim();
+      const hasEnd = !!endY && !!endM;
       const payload = {
         year,
         month,
         employeeId: adjEmpId,
         type: adjForm.type,
+        label: String(adjForm.label || '').trim() || undefined,
+        direction: adjForm.direction,
+        recurring: !!adjForm.recurring,
+        startYear: adjForm.recurring ? Number(adjForm.startYear) : undefined,
+        startMonth: adjForm.recurring ? Number(adjForm.startMonth) : undefined,
+        endYear: adjForm.recurring && hasEnd ? Number(endY) : undefined,
+        endMonth: adjForm.recurring && hasEnd ? Number(endM) : undefined,
         amount: Number(adjForm.amount),
         currency: isLydOnly ? 'LYD' : adjForm.currency,
         note: adjForm.note,
       };
-      const res = await fetch(`http://localhost:9000/hr/payroll/adjustments`, { method: 'POST', headers: ({ 'Content-Type': 'application/json', ...authHeader() } as unknown as HeadersInit), body: JSON.stringify(payload) });
+      const res = await fetch(`http://192.168.3.98:9000/hr/payroll/adjustments`, { method: 'POST', headers: ({ 'Content-Type': 'application/json', ...authHeader() } as unknown as HeadersInit), body: JSON.stringify(payload) });
       if (!res.ok) throw new Error('Failed to add adjustment');
       const js = await res.json();
       setAdjRows(prev => [...prev, js.entry]);
-      setAdjForm({ type: 'bonus', amount: '', currency: 'LYD', note: '' });
+      setAdjForm({
+        type: 'bonus',
+        label: 'Bonus',
+        direction: 'ADD',
+        recurring: false,
+        startYear: year,
+        startMonth: month,
+        endYear: '',
+        endMonth: '',
+        amount: '',
+        currency: adjUsdEligible ? adjForm.currency : 'LYD',
+        note: '',
+      });
       await onRun();
     } catch (e: any) {
       alert(e?.message || 'Failed to add');
     } finally { setAdjLoading(false); }
+  };
+
+  const updateAdjustment = async () => {
+    if (!adjEditId || !adjEmpId) return;
+    if (!adjForm.amount) { alert('Amount required'); return; }
+    if (adjForm.type === 'custom' && !String(adjForm.label || '').trim()) { alert('Label required'); return; }
+    setAdjLoading(true);
+    try {
+      const isLydOnly = !adjUsdEligible;
+      const endY = String(adjForm.endYear || '').trim();
+      const endM = String(adjForm.endMonth || '').trim();
+      const hasEnd = !!endY && !!endM;
+      const payload = {
+        type: adjForm.type,
+        label: String(adjForm.label || '').trim() || undefined,
+        direction: adjForm.direction,
+        recurring: !!adjForm.recurring,
+        startYear: adjForm.recurring ? Number(adjForm.startYear) : undefined,
+        startMonth: adjForm.recurring ? Number(adjForm.startMonth) : undefined,
+        endYear: adjForm.recurring && hasEnd ? Number(endY) : undefined,
+        endMonth: adjForm.recurring && hasEnd ? Number(endM) : undefined,
+        amount: Number(adjForm.amount),
+        currency: isLydOnly ? 'LYD' : adjForm.currency,
+        note: adjForm.note,
+      };
+      const res = await fetch(`http://192.168.3.98:9000/hr/payroll/adjustments/${adjEditId}`, { 
+        method: 'PUT', 
+        headers: ({ 'Content-Type': 'application/json', ...authHeader() } as unknown as HeadersInit), 
+        body: JSON.stringify(payload) 
+      });
+      if (!res.ok) throw new Error('Failed to update adjustment');
+      const js = await res.json();
+      setAdjRows(prev => prev.map(r => r.id === adjEditId ? { ...r, ...js.entry } : r));
+      setAdjForm({
+        type: 'bonus',
+        label: 'Bonus',
+        direction: 'ADD',
+        recurring: false,
+        startYear: year,
+        startMonth: month,
+        endYear: '',
+        endMonth: '',
+        amount: '',
+        currency: adjUsdEligible ? adjForm.currency : 'LYD',
+        note: '',
+      });
+      setAdjEditId(null);
+      await onRun();
+    } catch (e: any) {
+      alert(e?.message || 'Failed to update');
+    } finally { setAdjLoading(false); }
+  };
+
+  const deleteAdjustment = async (id: number) => {
+    setAdjLoading(true);
+    try {
+      const res = await fetch(`http://192.168.3.98:9000/hr/payroll/adjustments/${id}`, { 
+        method: 'DELETE', 
+        headers: authHeader() as unknown as HeadersInit 
+      });
+      if (!res.ok) throw new Error('Failed to delete adjustment');
+      setAdjRows(prev => prev.filter(r => r.id !== id));
+      await onRun();
+    } catch (e: any) {
+      alert(e?.message || 'Failed to delete');
+    } finally { setAdjLoading(false); }
+  };
+
+  const requestDeleteAdjustment = (id: number) => {
+    setAdjDeleteId(id);
+    setAdjDeleteOpen(true);
+  };
+
+  const startEditAdjustment = (row: { id?: number; type: string; label?: string; direction?: string; recurring?: boolean; startYear?: number; startMonth?: number; endYear?: number; endMonth?: number; amount: number; currency: string; note?: string }) => {
+    if (!row.id) return;
+    setAdjEditId(row.id);
+    const opt = adjTypeOptions.find((o) => o.value === row.type);
+    const fallbackLabel = opt?.label || row.type;
+    const dirRaw = String(row.direction || '').toUpperCase();
+    const dir: 'ADD' | 'DEDUCT' = dirRaw === 'DEDUCT' || String(row.type || '').toLowerCase() === 'deduction' ? 'DEDUCT' : 'ADD';
+    setAdjForm({
+      type: row.type,
+      label: String(row.label || fallbackLabel || ''),
+      direction: dir,
+      recurring: !!row.recurring,
+      startYear: Number(row.startYear || year),
+      startMonth: Number(row.startMonth || month),
+      endYear: row.endYear ? String(row.endYear) : '',
+      endMonth: row.endMonth ? String(row.endMonth) : '',
+      amount: String(row.amount),
+      currency: row.currency,
+      note: row.note || '',
+    });
+  };
+
+  const cancelEditAdjustment = () => {
+    setAdjEditId(null);
+    setAdjForm({
+      type: 'bonus',
+      label: 'Bonus',
+      direction: 'ADD',
+      recurring: false,
+      startYear: year,
+      startMonth: month,
+      endYear: '',
+      endMonth: '',
+      amount: '',
+      currency: 'LYD',
+      note: '',
+    });
   };
 
   React.useEffect(() => {
@@ -868,7 +1230,7 @@ const computePPhPhf = (e: Payslip): PPhPhfVals => {
   // Fetch sales metrics for the current window
   const fetchSales = React.useCallback(async () => {
     try {
-      const url = `http://localhost:9000/hr/payroll/sales-metrics?year=${year}&month=${month}`;
+      const url = `http://192.168.3.98:9000/hr/payroll/sales-metrics?year=${year}&month=${month}`;
       const res = await fetch(url, { headers: authHeader() as unknown as HeadersInit });
       if (!res.ok) return setSales({});
       const js = await res.json();
@@ -907,7 +1269,7 @@ const computePPhPhf = (e: Payslip): PPhPhfVals => {
       setCommLoading(true);
       (async () => {
         try {
-          const res = await fetch(`http://localhost:9000/employees`, { headers: authHeader() as unknown as HeadersInit });
+          const res = await fetch(`http://192.168.3.98:9000/employees`, { headers: authHeader() as unknown as HeadersInit });
           if (res.ok) {
             const js = await res.json();
             const arr: any[] = Array.isArray(js) ? js : (Array.isArray(js?.data) ? js.data : []);
@@ -940,7 +1302,7 @@ const computePPhPhf = (e: Payslip): PPhPhfVals => {
             mp[e.id_emp] = days.filter((d: any) => !!d?.present).length;
           } catch {}
           try {
-            const r = await fetch(`http://localhost:9000/employees/${e.id_emp}`, { headers: authHeader() as unknown as HeadersInit });
+            const r = await fetch(`http://192.168.3.98:9000/employees/${e.id_emp}`, { headers: authHeader() as unknown as HeadersInit });
             if (r.ok) {
               const js = await r.json();
               const obj = js?.data ?? js;
@@ -996,7 +1358,7 @@ const computePPhPhf = (e: Payslip): PPhPhfVals => {
         let rowsAll: any[] = [];
         try {
           const qs = new URLSearchParams({ from: monthStartISO, to: monthEndISO }).toString();
-          const r = await fetch(`http://localhost:9000/invoices/allDetailsP?${qs}`, { headers: authHeader() as unknown as HeadersInit });
+          const r = await fetch(`http://192.168.3.98:9000/invoices/allDetailsP?${qs}`, { headers: authHeader() as unknown as HeadersInit });
           if (r.ok) rowsAll = await r.json();
         } catch {}
         const gramsByUser = new Map<number, number>();
@@ -1414,7 +1776,7 @@ React.useEffect(() => {
       const monthEndISO = dayjs(periodStart).endOf("month").format("YYYY-MM-DD");
       const qs = new URLSearchParams({ from: monthStartISO, to: monthEndISO }).toString();
 
-      const invRes = await fetch(`http://localhost:9000/invoices/allDetailsP?${qs}`, {
+      const invRes = await fetch(`http://192.168.3.98:9000/invoices/allDetailsP?${qs}`, {
         headers: authHeader() as unknown as HeadersInit,
       });
 
@@ -1430,7 +1792,7 @@ React.useEffect(() => {
 
           let empObj: any = null;
           try {
-            const r = await fetch(`http://localhost:9000/employees/${empId}`, {
+            const r = await fetch(`http://192.168.3.98:9000/employees/${empId}`, {
               headers: authHeader() as unknown as HeadersInit,
             });
             if (r.ok) {
@@ -1553,6 +1915,7 @@ React.useEffect(() => {
     try {
       // Always compute fresh for active employees (ignore any saved data)
       const v2 = await computePayrollV2({ year, month });
+      
       // Persist computed rows for this open month so backend tables stay in sync
       try {
         if (!v2.viewOnly && Array.isArray(v2.rows) && v2.rows.length) {
@@ -1651,7 +2014,7 @@ React.useEffect(() => {
           const hasComm = Number((empRow as any).COMMUNICATION || 0) > 0;
           if (!hasFuel || !hasComm) {
             try {
-              const res = await fetch(`http://localhost:9000/employees/${empRow.id_emp}`, { headers: authHeader() as unknown as HeadersInit });
+              const res = await fetch(`http://192.168.3.98:9000/employees/${empRow.id_emp}`, { headers: authHeader() as unknown as HeadersInit });
               if (res.ok) {
                 const payload = await res.json();
                 const obj = payload?.data ?? payload;
@@ -1676,7 +2039,7 @@ React.useEffect(() => {
           let dedUsd = 0;
           let advSum = 0;
           try {
-            const url = `http://localhost:9000/hr/payroll/adjustments?year=${v2.year}&month=${v2.month}&employeeId=${e.id_emp}`;
+            const url = `http://192.168.3.98:9000/hr/payroll/adjustments?year=${v2.year}&month=${v2.month}&employeeId=${e.id_emp}`;
             const res = await fetch(url, { headers: authHeader() as unknown as HeadersInit });
             if (res.ok) {
               const js = await res.json();
@@ -1775,14 +2138,22 @@ React.useEffect(() => {
                   phPartDays += 1;
                 }
 
-                if (c === "A") {
-                  absenceDays += 1;
-                }
-
-                // Friday absent count (kept)
+                // Count absence days matching backend logic:
+                // A and UL = 1 day, HL = 0.5 day
+                // Only count on working days (not Fridays)
                 const dayDate = dayjs(
                   `${v2.year}-${String(v2.month).padStart(2, "0")}-01`
                 ).date(i + 1);
+                const isFriday = dayDate.day() === 5;
+                if (!isFriday) {
+                  if (c === "A" || c === "UL") {
+                    absenceDays += 1;
+                  } else if (c === "HL") {
+                    absenceDays += 0.5;
+                  }
+                }
+
+                // Friday absent count (kept)
                 if (dayDate.day() === 5 && c === "A") fridayA += 1;
 
                 // Existing delta stats
@@ -1817,7 +2188,7 @@ React.useEffect(() => {
         setTsAgg(agg);
         // Keep presentDaysMap for any legacy uses (derived from presentP)
         const pd: Record<number, number> = {};
-        Object.keys(agg).forEach(k => { pd[Number(k)] = agg[Number(k)].presentStrict ?? agg[Number(k)].presentP; });
+        Object.keys(agg).forEach(k => { pd[Number(k)] = agg[Number(k)].presentP; });
         setPresentDaysMap(pd);
       } catch {}
     } catch (e: any) {
@@ -1862,7 +2233,35 @@ React.useEffect(() => {
     const margin = 36;
 
     let empProfile: any | null = null;
-    const holidaySetLocal = holidaySet;
+
+    // Ensure holidays are available even if the page-level useEffect hasn't finished yet.
+    const holidaySetLocal = new Set<string>(Array.from(holidaySet || []));
+    try {
+      const from = dayjs(`${year}-${String(month).padStart(2, '0')}-01`).format('YYYY-MM-DD');
+      const to = dayjs(`${year}-${String(month).padStart(2, '0')}-01`).endOf('month').format('YYYY-MM-DD');
+      const holidaysResp = await getHolidays({ startDate: from, endDate: to });
+      const holidaysArr = Array.isArray(holidaysResp)
+        ? holidaysResp
+        : (holidaysResp as any)?.data || [];
+      (holidaysArr || []).forEach((h: any) => {
+        const iso = safeISO10(h.DATE_H ?? h.date ?? h.holiday_date);
+        if (iso) holidaySetLocal.add(iso);
+      });
+    } catch {}
+
+    // Also merge locally stored holidays (same behavior as UI loadHolidays)
+    try {
+      const raw = localStorage.getItem('custom_holidays');
+      if (raw) {
+        const arr = JSON.parse(raw);
+        if (Array.isArray(arr)) {
+          arr.forEach((h: any) => {
+            const iso = safeISO10(h.DATE_H ?? h.date ?? h.holiday_date);
+            if (iso) holidaySetLocal.add(iso);
+          });
+        }
+      }
+    } catch {}
 
     let vacations: VacationRecord[] = [];
     try {
@@ -1882,90 +2281,140 @@ React.useEffect(() => {
       console.error('Failed to load leave requests for PDF:', e);
     }
 
-    const getLeaveCodeForDate = (dayDate: Date): string | null => {
+    const getLeaveCodeForDate = (
+      dayDate: Date,
+      opts?: { ymd?: string; isHolidayOrFri?: boolean }
+    ): string | null => {
       dayDate.setHours(0, 0, 0, 0);
+      const knownCodes = ['P','A','PT','PL','PH','PHF','AL','SL','EL','ML','UL','HL','BM','XL','B1','B2','NI','NO','MO','IP','LI','EO','W','H','PP'];
+      const ymd = opts?.ymd || dayjs(dayDate).format('YYYY-MM-DD');
+      const isHolidayOrFri = Boolean(opts?.isHolidayOrFri);
       
       for (const leave of leaveRequests) {
         const status = String(leave.status || leave.state || '').toLowerCase();
-        if (!status.includes('approved') && !status.includes('موافق')) continue;
+        if (!status.includes('approved') && !status.includes('موافق') && !status.includes('accepted')) continue;
         
         const st = leave.startDate || leave.DATE_START || leave.date_depart;
         const en = leave.endDate || leave.DATE_END || leave.date_end;
         if (!st || !en) continue;
         
-        const startDate = new Date(st);
-        startDate.setHours(0, 0, 0, 0);
-        const endDate = new Date(en);
-        endDate.setHours(23, 59, 59, 999);
-        
-        // Check if current day is within leave period
-        if (dayDate >= startDate && dayDate <= endDate) {
-          // Map leave type to code
-          const typeCode = leave.typeCode || leave.id_can || leave.code;
-          const idKey = typeCode != null ? String(typeCode) : undefined;
-          const lt = idKey ? leaveTypeMap[idKey] : undefined;
-          const code = (lt?.code || String(typeCode || '')).toUpperCase();
+        const stYmd = safeISO10(st);
+        const enYmd = safeISO10(en);
+        if (!stYmd || !enYmd) continue;
+
+        // Check if current day is within leave period (timezone-safe)
+        if (ymd >= stYmd && ymd <= enYmd) {
+          // Determine leave code first
+          let leaveCode = '';
           
-          // Return specific leave codes
-          if (code === 'AL' || code.includes('ANNUAL')) return 'AL';
-          if (code === 'SL' || code.includes('SICK')) return 'SL';
-          if (code === 'EL' || code.includes('EMERGENCY')) return 'EL';
-          if (code === 'ML' || code.includes('MATERNITY')) return 'ML';
-          if (code === 'UL' || code.includes('UNPAID')) return 'UL';
-          if (code === 'HL' || code.includes('HAJJ')) return 'HL';
-          if (code === 'BM' || code.includes('BEREAVEMENT')) return 'BM';
-          if (code === 'XL' || code.includes('EXCUSE')) return 'XL';
+          // 1. Direct code field
+          const directCode = String(leave.code || leave.leaveType || leave.leaveTypeCode || '').toUpperCase();
+          if (directCode && knownCodes.includes(directCode)) {
+            leaveCode = directCode;
+          } else {
+            // 2. Look up by id_can in leaveTypeMap
+            const idCan = leave.id_can ?? leave.typeCode ?? leave.leaveCode;
+            if (idCan != null) {
+              const lt = leaveTypeMap[String(idCan)];
+              if (lt?.code) {
+                const ltCode = lt.code.toUpperCase();
+                if (knownCodes.includes(ltCode)) leaveCode = ltCode;
+              }
+            }
+          }
           
-          // If we have any leave code, return it
-          if (code) return code;
-          
-          // Fallback to generic leave indicator
-          return 'L';
+          // 3. Check leave type name for keywords if no code yet
+          if (!leaveCode) {
+            const typeName = String(leave.typeName || leave.leaveTypeName || leave.type || '').toUpperCase();
+            if (typeName.includes('ANNUAL') || typeName.includes('سنوي')) leaveCode = 'AL';
+            else if (typeName.includes('SICK') || typeName.includes('مرض')) leaveCode = 'SL';
+            else if (typeName.includes('EMERGENCY') || typeName.includes('طارئ')) leaveCode = 'EL';
+            else if (typeName.includes('MATERNITY') || typeName.includes('أمومة')) leaveCode = 'ML';
+            else if (typeName.includes('UNPAID') || typeName.includes('بدون')) leaveCode = 'UL';
+            else if (typeName.includes('HALF')) leaveCode = 'HL';
+            else if (typeName.includes('BEREAVEMENT') || typeName.includes('عزاء')) leaveCode = 'BM';
+            else if (typeName.includes('EXAM') || typeName.includes('امتحان')) leaveCode = 'XL';
+            else if (directCode && directCode.length <= 3) leaveCode = directCode;
+            else leaveCode = 'AL'; // Fallback
+          }
+
+          // Do NOT show non-sick leave codes on public holidays / Fridays.
+          // Those days should appear as holidays (H/PH/PHF), not AL, in the PDF grid.
+          const up = String(leaveCode || '').toUpperCase();
+          const isSick = up === 'SL';
+          if (!isSick && isHolidayOrFri) continue;
+
+          return up;
         }
       }
       return null;
     };
 
     const codeBadgePDF = (day: any, idx: number, schStartMin?: number | null, schEndMin?: number | null): string => {
-      // Mirror codeBadge behavior: lack of a day record should not auto-mark as Absent.
-      if (!day) return '';
-      
-      // PRIORITY 1: Use backend-provided code (includes exception codes NI, NO, MO, IP)
-      const rawCode = String(day.code || day.badge || '').toUpperCase();
-      if (rawCode) {
-        // Validate it's a known code
-        const knownCodes = ['P','A','PT','PL','PH','PHF','AL','SL','EL','ML','UL','HL','BM','XL','B1','B2','NI','NO','MO','IP'];
-        if (knownCodes.includes(rawCode)) return rawCode;
-      }
-      
-      // PRIORITY 2: Check if this day is on approved leave
+      // IMPORTANT:
+      // - We must still show Leave/Holiday codes even if there is no timesheet day record.
+      // - We must NOT auto-mark missing records as Absent.
       const dayDate = dayjs(periodStart).date(idx + 1).toDate();
-      const leaveCode = getLeaveCodeForDate(dayDate);
-      if (leaveCode) return leaveCode;
+      const ymd = dayjs(periodStart).date(idx + 1).format('YYYY-MM-DD');
+      const isFri = dayjs(dayDate).day() === 5;
+      const rawCode = String(day?.code || day?.badge || '').toUpperCase();
+      const isHolidayByDay =
+        (holidaySetLocal?.has(ymd) || false) ||
+        !!day?.isHoliday ||
+        /holiday/i.test(String(day?.type || day?.reason || '')) ||
+        rawCode === 'PH' ||
+        rawCode === 'PHF';
+      const isHolidayOrFri = isHolidayByDay || isFri;
+
+      const normalizeNonSickLeaveOnNonWorking = (codeIn: string, present: boolean): string => {
+        const up = String(codeIn || '').toUpperCase();
+        const nonSickLeave = ['AL','EL','ML','UL','HL','BM','XL','B1','B2'].includes(up);
+        if (!nonSickLeave) return up;
+        if (isFri) return '';
+        if (isHolidayByDay) return present ? 'PH' : 'H';
+        return up;
+      };
+
+      // PRIORITY 1: Approved leave override (even if there is no day record)
+      // Important: never allow leave (AL/...) to overwrite holidays or Fridays (except SL).
+      const leaveCode = getLeaveCodeForDate(dayDate, { ymd, isHolidayOrFri });
+      if (leaveCode) return normalizeNonSickLeaveOnNonWorking(leaveCode, !!day?.present);
+
+      // PRIORITY 2: Backend-provided code (only if day record exists)
+      if (rawCode) {
+        // Only accept attendance/exception codes from the day record.
+        // Never accept leave codes here (AL/SL/...) because it causes the PDF to extend leave
+        const allowedDayCodes = ['P','A','PT','PL','PH','PHF','NI','NO','MO','IP','LI','EO','W','PP'];
+        if (allowedDayCodes.includes(rawCode)) return rawCode;
+      }
 
       // PRIORITY 3: Check vacation records
       try {
-        const ymd = dayjs(dayDate).format('YYYY-MM-DD');
+        const ymd2 = dayjs(dayDate).format('YYYY-MM-DD');
         const vac = (vacations || []).find((v) => {
-          const st = dayjs((v as any).date_depart).format('YYYY-MM-DD');
-          const en = dayjs((v as any).date_end).format('YYYY-MM-DD');
+          const st = safeISO10((v as any).date_depart);
+          const en = safeISO10((v as any).date_end);
           const stateLower = String((v as any).state || '').toLowerCase();
           const okState = stateLower === 'approved' || stateLower.includes('موافق');
-          return okState && ymd >= st && ymd <= en;
+          return okState && ymd2 >= st && ymd2 <= en;
         });
         if (vac) {
           const idKey = (vac as any).id_can != null ? String((vac as any).id_can) : undefined;
           const lt = idKey ? leaveTypeMap[idKey] : undefined;
           const codeRaw = String(lt?.code || (vac as any).type || 'V').toUpperCase();
-          if (codeRaw) return codeRaw;
+          if (codeRaw) return normalizeNonSickLeaveOnNonWorking(codeRaw, !!day?.present);
         }
       } catch {}
       
       // PRIORITY 4: Derive from timesheet data (fallback)
+      const isHoliday = isHolidayByDay;
+      if (!day) {
+        // If there's no timesheet record, still show holiday on the calendar if applicable.
+        // Mark as generic holiday 'H' so we can style it distinctly (crossed-out beige cell).
+        return isHoliday ? 'H' : '';
+      }
+
       const present = !!day.present;
-      
-      const ymd = dayjs(periodStart).date(idx + 1).format('YYYY-MM-DD');
-      const isHoliday = (holidaySetLocal?.has(ymd) || false) || !!day.isHoliday || /holiday/i.test(String(day.type||day.reason||'')) || rawCode === 'PH' || rawCode === 'PHF';
       
       const parseMin = (s: any): number | null => {
         if (!s) return null;
@@ -1987,13 +2436,17 @@ React.useEffect(() => {
       const miss = Number(day.deltaMin || 0) < 0 ? Math.abs(Number(day.deltaMin||0)) : 0;
       const tol = 5;
       
-      if (!present) return 'A';
+      if (!present) {
+        if (isFri) return '';
+        if (isHoliday) return 'H';
+        return 'A';
+      }
       if (isHoliday) {
         return (worked >= Math.max(0, expDur - tol)) ? 'PHF' : 'PH';
       }
       if (late > tol) return 'PL';
       if (miss > tol) return 'PT';
-      return 'P';
+      return normalizeNonSickLeaveOnNonWorking('P', true);
     };
 
 
@@ -2019,31 +2472,31 @@ React.useEffect(() => {
     };
     
     const drawArabicTextImage = async (text: string, fontPt: number): Promise<{ dataUrl: string; wPt: number; hPt: number } | null> => {
-    try {
-      await ensureArabicCanvasFont();
-      const fontPx = Math.max(10, Math.round(fontPt * 6.3333));
-      const cnv = document.createElement('canvas');
-      const ctxm = cnv.getContext('2d');
-      if (!ctxm) return null;
-      ctxm.direction = 'rtl';
-      ctxm.font = `${fontPx}px GajaArabicPDF, 'Noto Naskh Arabic', 'Amiri', Arial`;
-      const metrics = ctxm.measureText(text);
-      const w = Math.max(10, Math.ceil((metrics?.width || (fontPx * String(text||'').length)) + 6));
-      const h = Math.ceil(fontPx * 1.3);
-      cnv.width = w; cnv.height = h;
-      const ctx2 = cnv.getContext('2d');
-      if (!ctx2) return null;
-      ctx2.direction = 'rtl';
-      ctx2.textBaseline = 'alphabetic';
-      ctx2.fillStyle = '#000000';
-      ctx2.font = `${fontPx}px GajaArabicPDF, 'Noto Naskh Arabic', 'Amiri', Arial`;
-      ctx2.fillText(text, w - 2, Math.ceil(fontPx));
-      const dataUrl = cnv.toDataURL('image/png');
-      const hPt = fontPt + 4;
-      const scale = hPt / h;
-      const wPt = w * scale;
-      return { dataUrl, wPt, hPt };
-    } catch { return null; }
+      try {
+        await ensureArabicCanvasFont();
+        const fontPx = Math.max(10, Math.round(fontPt * 6.3333));
+        const cnv = document.createElement('canvas');
+        const ctxm = cnv.getContext('2d');
+        if (!ctxm) return null;
+        ctxm.direction = 'rtl';
+        ctxm.font = `${fontPx}px GajaArabicPDF, 'Noto Naskh Arabic', 'Amiri', Arial`;
+        const metrics = ctxm.measureText(text);
+        const w = Math.max(10, Math.ceil((metrics?.width || (fontPx * String(text||'').length)) + 6));
+        const h = Math.ceil(fontPx * 1.3);
+        cnv.width = w; cnv.height = h;
+        const ctx2 = cnv.getContext('2d');
+        if (!ctx2) return null;
+        ctx2.direction = 'rtl';
+        ctx2.textBaseline = 'alphabetic';
+        ctx2.fillStyle = '#000000';
+        ctx2.font = `${fontPx}px GajaArabicPDF, 'Noto Naskh Arabic', 'Amiri', Arial`;
+        ctx2.fillText(text, w - 2, Math.ceil(fontPx));
+        const dataUrl = cnv.toDataURL('image/png');
+        const hPt = fontPt + 4;
+        const scale = hPt / h;
+        const wPt = w * scale;
+        return { dataUrl, wPt, hPt };
+      } catch { return null; }
     };
 
     const periodStart = `${year}-${String(month).padStart(2, "0")}-01`;
@@ -2148,7 +2601,7 @@ React.useEffect(() => {
   try {
     // Resolve Position (TITLE) before drawing header
     try {
-      const resTitle = await fetch(`http://localhost:9000/employees/${emp.id_emp}`, { headers: authHeader() as unknown as HeadersInit });
+      const resTitle = await fetch(`http://192.168.3.98:9000/employees/${emp.id_emp}`, { headers: authHeader() as unknown as HeadersInit });
       if (resTitle.ok) {
         const payload = await resTitle.json();
         const obj = payload?.data ?? payload;
@@ -2222,131 +2675,24 @@ React.useEffect(() => {
 
     let leaveBalanceRemaining = 0;
     try {
+      // Use backend API which now includes carry-forward calculation
       const leaveData = await getLeaveBalance(String(emp.id_emp));
-      const apiRemaining = Number(
+      
+      // Backend now returns: remaining (with carry-forward), accruedToDate, carryForward, currentYearAccrued
+      leaveBalanceRemaining = Number(
         (leaveData as any)?.remaining ??
           (leaveData as any)?.data?.remaining ??
           (leaveData as any)?.balance?.remaining ??
           0
       );
-      const histRaw: any[] = Array.isArray((leaveData as any)?.leaveHistory)
-        ? (leaveData as any).leaveHistory
-        : (Array.isArray((leaveData as any)?.leaves) ? (leaveData as any).leaves : []);
+      
+      // Fallback to 0 if negative (shouldn't happen with proper backend)
+      leaveBalanceRemaining = Math.max(0, leaveBalanceRemaining);
+    } catch (err) {
+      console.error('Failed to fetch leave balance for PDF:', err);
+    }
 
-      const now = new Date();
-      const dobStr = String((empProfile as any)?.DATE_OF_BIRTH || (empProfile as any)?.date_of_birth || '').slice(0, 10);
-      const contractStartStr = String(
-        (empProfile as any)?.CONTRACT_START ||
-          (empProfile as any)?.contract_start ||
-          contractStartMap[emp.id_emp] ||
-          (v2 as any).CONTRACT_START ||
-          (v2 as any).contract_start ||
-          ''
-      ).slice(0, 10);
-      const dob = dobStr ? new Date(dobStr) : null;
-      const contractStart0 = contractStartStr ? new Date(contractStartStr) : null;
-      const contractStartDate =
-        contractStart0 && Number.isFinite(contractStart0.getTime()) ? contractStart0 : null;
-
-      const inferStartFromHistory = (): Date | null => {
-        try {
-          const rows = (histRaw || [])
-            .map((x: any) => String(x.startDate || x.DATE_START || x.date_depart || '').slice(0, 10))
-            .filter((s: string) => !!s);
-          const earliest = rows.reduce<Date | null>((acc, s) => {
-            const d = new Date(s);
-            if (!Number.isFinite(d.getTime())) return acc;
-            return !acc || d < acc ? d : acc;
-          }, null);
-          if (!earliest) return null;
-          return new Date(earliest.getFullYear(), earliest.getMonth(), 1);
-        } catch {
-          return null;
-        }
-      };
-
-      const contractStart = contractStartDate || inferStartFromHistory();
-      const age = dob && Number.isFinite(dob.getTime())
-        ? Math.floor((Date.now() - dob.getTime()) / (365.25 * 24 * 60 * 60 * 1000))
-        : 0;
-      const expYears = contractStart && Number.isFinite(contractStart.getTime())
-        ? Math.floor((Date.now() - contractStart.getTime()) / (365.25 * 24 * 60 * 60 * 1000))
-        : 0;
-      const entitlement = (age >= 50 || expYears >= 20) ? 45 : 30;
-      const ratePerMonth = entitlement >= 45 ? 3.75 : 2.5;
-
-      const fmtYmd = (d: Date) => {
-        const y = d.getFullYear();
-        const m = String(d.getMonth() + 1).padStart(2, '0');
-        const da = String(d.getDate()).padStart(2, '0');
-        return `${y}-${m}-${da}`;
-      };
-      const clamp = (d: Date) => {
-        const x = new Date(d);
-        x.setHours(0, 0, 0, 0);
-        return x;
-      };
-      const isFriday = (d: Date) => d.getDay() === 5;
-      const isHoliday = (d: Date) => (holidaySetLocal?.has(fmtYmd(d)) || false);
-      const countEffectiveDays = (a: Date, b: Date) => {
-        const s = clamp(a);
-        const e = clamp(b);
-        let c = 0;
-        const d = new Date(s);
-        while (d <= e) {
-          if (!isFriday(d) && !isHoliday(d)) c++;
-          d.setDate(d.getDate() + 1);
-        }
-        return c;
-      };
-      const isApprovedLike = (s: string) => {
-        const v = String(s || '').toLowerCase();
-        return v.includes('approved') || v.includes('accepted') || v.includes('موافق');
-      };
-
-      if (contractStart && Number.isFinite(contractStart.getTime())) {
-        const annivThisYear = new Date(now.getFullYear(), contractStart.getMonth(), contractStart.getDate());
-        const workingYearStart = annivThisYear <= now
-          ? annivThisYear
-          : new Date(now.getFullYear() - 1, contractStart.getMonth(), contractStart.getDate());
-        const workingYearEnd = new Date(workingYearStart.getFullYear() + 1, workingYearStart.getMonth(), workingYearStart.getDate());
-        const prevYearStart = new Date(workingYearStart.getFullYear() - 1, workingYearStart.getMonth(), workingYearStart.getDate());
-
-        const monthsDiff =
-          (now.getFullYear() - workingYearStart.getFullYear()) * 12 +
-          (now.getMonth() - workingYearStart.getMonth());
-        const includeThisMonth = now.getDate() >= workingYearStart.getDate();
-        const monthsElapsed = Math.min(12, Math.max(0, monthsDiff + (includeThisMonth ? 1 : 0)));
-        const accruedByMonth = monthsElapsed * ratePerMonth;
-
-        const sumApprovedInWindow = (ws: Date, we: Date) => {
-          return (histRaw || []).reduce((sum: number, h: any) => {
-            const stStr = String(h.startDate || h.DATE_START || h.date_depart || '').slice(0, 10);
-            const enStr = String(h.endDate || h.DATE_END || h.date_end || '').slice(0, 10);
-            if (!stStr || !enStr) return sum;
-            const st = new Date(stStr);
-            const en = new Date(enStr);
-            if (!Number.isFinite(st.getTime()) || !Number.isFinite(en.getTime())) return sum;
-            if (!isApprovedLike(String(h.status || h.state || ''))) return sum;
-            if (en < ws || st > we) return sum;
-            const a = st < ws ? ws : st;
-            const b = en > we ? we : en;
-            return sum + countEffectiveDays(a, b);
-          }, 0);
-        };
-
-        const approvedThisYear = sumApprovedInWindow(workingYearStart, workingYearEnd);
-        const approvedPrevYear = sumApprovedInWindow(prevYearStart, workingYearStart);
-        const carryForward = Math.max(0, entitlement - approvedPrevYear);
-        const remainingThisYear = accruedByMonth - approvedThisYear;
-        leaveBalanceRemaining = Math.max(0, Number((remainingThisYear + carryForward).toFixed(2)));
-      }
-      if ((!leaveBalanceRemaining || leaveBalanceRemaining <= 0) && Number.isFinite(apiRemaining) && apiRemaining > 0) {
-        leaveBalanceRemaining = Number(apiRemaining.toFixed(2));
-      }
-    } catch {}
-
-    const fmtDays = (val: number) => `${(Number.isFinite(val) ? val : 0).toFixed(2)} days`;
+    const fmtDays = (val: number) => `${(Number.isFinite(val) ? val : 0).toFixed(2)} Days`;
     const leaveBalanceAsOf = dayjs(periodStart).format('MMMM YYYY');
 
     const col1: Array<[string,string]> = [
@@ -2377,11 +2723,9 @@ React.useEffect(() => {
       console.warn('Could not calculate seniority:', e);
     }
 
-    const seniorityStr = `${seniorityYears}y ${seniorityMonths}m`;
     const col3: Array<[string,string]> = [
-      ['Remaining VB:', fmtDays(leaveBalanceRemaining)],
-      // Show only the start date as requested (DD-MM-YYYY)
-      ['Seniority:', contractStartLabel || ''],
+      ['Seniority:', contractStartLabel],
+      ['Vacation Balance:', fmtDays(leaveBalanceRemaining)],
     ];
     const colsData = [col1, col2, col3];
 
@@ -2403,6 +2747,18 @@ React.useEffect(() => {
       const entries = colsData[colIdx];
       const cellX = colEdges[colIdx];
       const cellW = colWidths[colIdx] ?? (boxW / colsData.length);
+
+      doc.setFont('helvetica', 'normal');
+      const labelMaxW = Math.max(
+        0,
+        ...entries.map((e) => {
+          const lab = String(e?.[0] || '');
+          return lab ? doc.getTextWidth(lab) : 0;
+        })
+      );
+      const valueX = cellX + Math.min(cellW - 12, Math.max(60, labelMaxW + 10));
+      const valueMaxW = Math.max(10, cellW - (valueX - cellX) - 6);
+
       for (let rowIdx = 0; rowIdx < entries.length; rowIdx++) {
         const lab = entries[rowIdx][0];
         const val = entries[rowIdx][1] || '';
@@ -2412,18 +2768,7 @@ React.useEffect(() => {
         if (lab) doc.text(lab, cellX + 6, labelY);
         doc.setFont('helvetica', 'bold');
         if (val) {
-          const valueOffset = colIdx === 2 ? 6 : 60;
-          // In the third column (Remaining vacation balance / Seniority), place the value
-          // at the far right of the cell and a bit lower to avoid overlapping the label.
-          const valueY = colIdx === 2 ? labelY + 9 : labelY;
-          if (colIdx === 2) {
-            const text = String(val || '');
-            const tw = doc.getTextWidth(text);
-            const xRight = cellX + cellW - 6 - tw;
-            doc.text(text, xRight, valueY);
-          } else {
-            await drawValueText(val, cellX + valueOffset, valueY, cellW - valueOffset - 6);
-          }
+          await drawValueText(val, valueX, labelY, valueMaxW);
         }
         doc.setFont('helvetica', 'normal');
       }
@@ -2481,7 +2826,7 @@ React.useEffect(() => {
   let commMonthlyPDF = Number(((emp as any).COMMUNICATION ?? (v2 as any).COMMUNICATION) || 0);
   if (!fuelMonthlyPDF && !commMonthlyPDF) {
     try {
-      const resEmp = await fetch(`http://localhost:9000/employees/${emp.id_emp}`, { headers: authHeader() as unknown as HeadersInit });
+      const resEmp = await fetch(`http://192.168.3.98:9000/employees/${emp.id_emp}`, { headers: authHeader() as unknown as HeadersInit });
       if (resEmp.ok) {
         const payload = await resEmp.json();
         const obj = payload?.data ?? payload;
@@ -2497,7 +2842,7 @@ React.useEffect(() => {
   // Fetch this month's Salary Advances total for this employee (to deduct from Net Pay)
   let advSumLYD = 0;
   try {
-    const adjUrlSum = `http://localhost:9000/hr/payroll/adjustments?year=${year}&month=${month}&employeeId=${emp.id_emp}`;
+    const adjUrlSum = `http://192.168.3.98:9000/hr/payroll/adjustments?year=${year}&month=${month}&employeeId=${emp.id_emp}`;
     const res = await fetch(adjUrlSum, { headers: authHeader() as unknown as HeadersInit });
     if (res.ok) {
       const js = await res.json();
@@ -2515,7 +2860,7 @@ React.useEffect(() => {
   let commissionRole: string = '';
   let commissionPs: number[] = [];
   try {
-    const resEmp = await fetch(`http://localhost:9000/employees/${emp.id_emp}`, { headers: authHeader() as unknown as HeadersInit });
+    const resEmp = await fetch(`http://192.168.3.98:9000/employees/${emp.id_emp}`, { headers: authHeader() as unknown as HeadersInit });
     if (resEmp.ok) {
       const payload = await resEmp.json();
       const obj = payload?.data ?? payload;
@@ -2553,7 +2898,7 @@ React.useEffect(() => {
   if (sellerUserId != null) {
     try {
       const qs = new URLSearchParams({ from: monthStartISO, to: monthEndISO }).toString();
-      const r = await fetch(`http://localhost:9000/invoices/allDetailsP?${qs}`, { headers: authHeader() as unknown as HeadersInit });
+      const r = await fetch(`http://192.168.3.98:9000/invoices/allDetailsP?${qs}`, { headers: authHeader() as unknown as HeadersInit });
       if (r.ok) {
         const js = await r.json();
         const rowsAll: any[] = Array.isArray(js) ? js : [];
@@ -2658,8 +3003,8 @@ React.useEffect(() => {
   const adjComp = (emp.components?.adjustments || { bonus: 0, deduction: 0, advance: 0, loanPayment: 0 });
 
   // Will be filled from Reimbursements API (adjRowsPdf) later in this function
-  let adjEarnRowsPdf: Array<{ label: string; lyd: number; usd: number }> = [];
-  let adjDedRowsPdf: Array<{ label: string; lyd: number; usd: number }> = [];
+  let adjEarnRowsPdf: Array<{ label: string; lyd: number; usd: number; type?: string }> = [];
+  let adjDedRowsPdf: Array<{ label: string; lyd: number; usd: number; type?: string }> = [];
   
   // Breakdown table driven directly from V2 fields (for the small summary box)
   const breakdown: Array<{label:string; lyd:number; usd:number}> = [
@@ -2689,13 +3034,13 @@ React.useEffect(() => {
   ));
 
   // --- Load period adjustments for this employee and map into earnings/deductions rows ---
-  let adjRowsPdf: Array<{ type: string; amount: number; currency: string; note?: string; ts?: string }> = [];
+  let adjRowsPdf: Array<{ type: string; label?: string; direction?: string; amount: number; currency: string; note?: string; ts?: string }> = [];
   try {
-    const url = `http://localhost:9000/hr/payroll/adjustments?year=${year}&month=${month}&employeeId=${emp.id_emp}`;
+    const url = `http://192.168.3.98:9000/hr/payroll/adjustments?year=${year}&month=${month}&employeeId=${emp.id_emp}`;
     const res = await fetch(url, { headers: authHeader() as unknown as HeadersInit });
     if (res.ok) {
       const js = await res.json();
-      adjRowsPdf = (js?.data?.[String(emp.id_emp)] || []) as Array<{ type: string; amount: number; currency: string; note?: string; ts?: string }>;
+      adjRowsPdf = (js?.data?.[String(emp.id_emp)] || []) as Array<{ type: string; label?: string; direction?: string; amount: number; currency: string; note?: string; ts?: string }>;
     }
   } catch {}
 
@@ -2721,13 +3066,18 @@ React.useEffect(() => {
     const isUsd = cur === 'USD';
     const lyd = isUsd ? 0 : amt;
     const usd = isUsd ? amt : 0;
-    const label = mapAdjLabel(String(r.type || ''));
     const t = String(r.type || '').toLowerCase();
-    if (t === 'deduction') {
-      adjDedRowsPdf.push({ label, lyd, usd });
+    // Salary advances are rendered separately as a deduction row (advSumLYD).
+    // Exclude them here to avoid showing in Earnings and double counting.
+    if (t === 'advance') return;
+    const dir = String((r as any).direction || '').toUpperCase();
+    const isDirDeduct = dir === 'DEDUCT';
+    const label = String((r as any).label || '').trim() || mapAdjLabel(String(r.type || ''));
+    if (isDirDeduct || t === 'deduction') {
+      adjDedRowsPdf.push({ label, lyd, usd, type: String(r.type || '') });
     } else {
       // Treat all non-deduction types as earnings adjustments
-      adjEarnRowsPdf.push({ label, lyd, usd });
+      adjEarnRowsPdf.push({ label, lyd, usd, type: String(r.type || '') });
     }
   });
 
@@ -2763,7 +3113,7 @@ React.useEffect(() => {
   
   // Determine amount columns to show
   const usdCandidates = ['base_salary_usd','wd_food_usd','gold_bonus_usd','diamond_bonus_usd','other_additions_usd','absence_usd','missing_usd','loan_credit_usd','other_deductions_usd','net_salary_usd','C16'];
-  const hasUsd = usdCandidates.some(k => (v2 as any)[k] !== undefined && Number((v2 as any)[k] || 0) !== 0) || (diamondBonusUSDComputed > 0) || (goldBonusUSDComputed > 0);
+  const hasUsd = usdCandidates.some(k => (v2 as any)[k] !== undefined && Number((v2 as any)[k] || 0) !== 0) || (diamondBonusUSDComputed > 0) || (goldBonusUSDComputed > 0) || (adjEarnRowsPdf || []).some(r => Number(r.usd || 0) > 0.0001) || (adjDedRowsPdf || []).some(r => Number(r.usd || 0) > 0.0001);
   const showUsdCol = hasUsd;
   const showLydCol = brShowLyd || !showUsdCol; // if there is no LYD but there is USD, still show USD-only; otherwise at least LYD
   
@@ -2776,12 +3126,26 @@ React.useEffect(() => {
   doc.text("EARNINGS", margin + 6, tblY + 16);
   // Show LYD and/or USD column headers depending on data presence
   if (showUsdCol && showLydCol) {
-    doc.text("LYD", margin + colW - 160, tblY + 16);
-    doc.text("USD", margin + colW - 80, tblY + 16);
+    {
+      const lydCenter = margin + colW - 170 + 40;
+      const usdCenter = margin + colW - 90 + 40;
+      const lydW = doc.getTextWidth('LYD');
+      const usdW = doc.getTextWidth('USD');
+      doc.text('LYD', lydCenter - lydW / 2, tblY + 16);
+      doc.text('USD', usdCenter - usdW / 2, tblY + 16);
+    }
   } else if (showUsdCol && !showLydCol) {
-    doc.text("USD", margin + colW - 80, tblY + 16);
+    {
+      const oneCenter = margin + colW - 90 + 40;
+      const w = doc.getTextWidth('USD');
+      doc.text('USD', oneCenter - w / 2, tblY + 16);
+    }
   } else if (showLydCol) {
-    doc.text("LYD", margin + colW - 80, tblY + 16);
+    {
+      const oneCenter = margin + colW - 90 + 40;
+      const w = doc.getTextWidth('LYD');
+      doc.text('LYD', oneCenter - w / 2, tblY + 16);
+    }
   }
   // Vertical separators for LYD / USD columns
   try {
@@ -2879,15 +3243,53 @@ React.useEffect(() => {
       earningsUsdTotal += diaUsd;
       ey += 24;
     }
-    // Earnings adjustments from Reimbursements (Bonus / Eid Bonus / Ramadan Bonus)
-    (adjEarnRowsPdf || []).forEach((ar) => {
-      if (Math.max(0, Number(ar.lyd || 0)) > 0.0001 || Math.max(0, Number(ar.usd || 0)) > 0.0001) {
-        row(ar.label, ar.lyd, ar.usd, ey);
-        earningsLydTotal += Math.max(0, Number(ar.lyd || 0));
-        earningsUsdTotal += Math.max(0, Number(ar.usd || 0));
+    // Earnings adjustments from Reimbursements: keep Eid Bonus separate, show Custom as separate lines, merge the rest into Bonus (LYD + USD)
+    {
+      let eidAdjLyd = 0;
+      let eidAdjUsd = 0;
+
+      let bonusAdjLyd = 0;
+      let bonusAdjUsd = 0;
+      const customEarnRows: Array<{ label: string; lyd: number; usd: number }> = [];
+      (adjEarnRowsPdf || []).forEach((ar) => {
+        const label = String((ar as any)?.label || '');
+        const type = String((ar as any)?.type || '').toLowerCase();
+        const lyd = Math.max(0, Number(ar?.lyd || 0));
+        const usd = Math.max(0, Number(ar?.usd || 0));
+        if (label === 'Eid Bonus' || type === 'eid_bonus') {
+          eidAdjLyd += lyd;
+          eidAdjUsd += usd;
+          return;
+        }
+        if (type === 'custom') {
+          customEarnRows.push({ label: label || 'Custom', lyd, usd });
+          return;
+        }
+        bonusAdjLyd += lyd;
+        bonusAdjUsd += usd;
+      });
+      if (eidAdjLyd > 0.0001 || eidAdjUsd > 0.0001) {
+        row('Eid Bonus', eidAdjLyd, eidAdjUsd, ey);
+        earningsLydTotal += eidAdjLyd;
+        earningsUsdTotal += eidAdjUsd;
         ey += 24;
       }
-    });
+      if (bonusAdjLyd > 0.0001 || bonusAdjUsd > 0.0001) {
+        row('Bonus', bonusAdjLyd, bonusAdjUsd, ey);
+        earningsLydTotal += bonusAdjLyd;
+        earningsUsdTotal += bonusAdjUsd;
+        ey += 24;
+      }
+
+      (customEarnRows || []).forEach((cr) => {
+        if (cr.lyd > 0.0001 || cr.usd > 0.0001) {
+          row(cr.label, cr.lyd, cr.usd, ey);
+          earningsLydTotal += cr.lyd;
+          earningsUsdTotal += cr.usd;
+          ey += 24;
+        }
+      });
+    }
     // Net Salary row removed per request (only shown in footer boxes)
   }
 
@@ -2907,12 +3309,26 @@ React.useEffect(() => {
   doc.text("DEDUCTIONS", dx + 6, dy + 16);
   // Show LYD and/or USD column headers depending on data presence (mirroring Earnings)
   if (showUsdCol && showLydCol) {
-    doc.text("LYD", dx + colW - 160, dy + 16);
-    doc.text("USD", dx + colW - 80, dy + 16);
+    {
+      const lydCenter = dx + colW - 170 + 40;
+      const usdCenter = dx + colW - 90 + 40;
+      const lydW = doc.getTextWidth('LYD');
+      const usdW = doc.getTextWidth('USD');
+      doc.text('LYD', lydCenter - lydW / 2, dy + 16);
+      doc.text('USD', usdCenter - usdW / 2, dy + 16);
+    }
   } else if (showUsdCol && !showLydCol) {
-    doc.text("USD", dx + colW - 80, dy + 16);
+    {
+      const oneCenter = dx + colW - 90 + 40;
+      const w = doc.getTextWidth('USD');
+      doc.text('USD', oneCenter - w / 2, dy + 16);
+    }
   } else if (showLydCol) {
-    doc.text("LYD", dx + colW - 80, dy + 16);
+    {
+      const oneCenter = dx + colW - 90 + 40;
+      const w = doc.getTextWidth('LYD');
+      doc.text('LYD', oneCenter - w / 2, dy + 16);
+    }
   }
   // Vertical separators for LYD / USD columns (same as Earnings header)
   try {
@@ -3075,8 +3491,16 @@ React.useEffect(() => {
       doc.text('Total Earnings', margin + 6, ty + 13);
       const tLydStr = showLydCol && earningsLydTotal > 0.0001 ? earningsLydTotal.toLocaleString(undefined,{maximumFractionDigits:2}) : '';
       const tUsdStr = showUsdCol && earningsUsdTotal > 0.0001 ? earningsUsdTotal.toLocaleString(undefined,{maximumFractionDigits:2}) : '';
-      if (showLydCol && tLydStr) doc.text(tLydStr, margin + colW - 160, ty + 13);
-      if (showUsdCol && tUsdStr) doc.text(tUsdStr, margin + colW - 80, ty + 13);
+      if (showLydCol && tLydStr) {
+        const tw = doc.getTextWidth(tLydStr);
+        const lydCenter = margin + colW - 170 + 40;
+        doc.text(tLydStr, lydCenter - tw / 2, ty + 13);
+      }
+      if (showUsdCol && tUsdStr) {
+        const tw = doc.getTextWidth(tUsdStr);
+        const usdCenter = margin + colW - 90 + 40;
+        doc.text(tUsdStr, usdCenter - tw / 2, ty + 13);
+      }
       doc.setFont('helvetica', 'normal');
       ey = ty + 20;
     }
@@ -3093,8 +3517,16 @@ React.useEffect(() => {
       doc.text('Total Deductions', dx + 6, ty + 13);
       const tLydStr = dedTotalLyd > 0.0001 ? dedTotalLyd.toLocaleString(undefined,{maximumFractionDigits:2}) : '';
       const tUsdStr = dedTotalUsd > 0.0001 ? dedTotalUsd.toLocaleString(undefined,{maximumFractionDigits:2}) : '';
-      if (showLydCol && tLydStr) doc.text(tLydStr, dx + colW - 160, ty + 13);
-      if (showUsdCol && tUsdStr) doc.text(tUsdStr, dx + colW - 80, ty + 13);
+      if (showLydCol && tLydStr) {
+        const tw = doc.getTextWidth(tLydStr);
+        const lydCenter = dx + colW - 170 + 40;
+        doc.text(tLydStr, lydCenter - tw / 2, ty + 13);
+      }
+      if (showUsdCol && tUsdStr) {
+        const tw = doc.getTextWidth(tUsdStr);
+        const usdCenter = dx + colW - 90 + 40;
+        doc.text(tUsdStr, usdCenter - tw / 2, ty + 13);
+      }
       if (!showUsdCol && !showLydCol) {
         const one = tUsdStr || tLydStr;
         if (one) doc.text(one, dx + colW - 80, ty + 13);
@@ -3315,6 +3747,7 @@ React.useEffect(() => {
           case 'XL': return [240,248,208]; // Exam - light yellow-green
           case 'B1': return [200,230,230]; // Bereavement 1 - teal tint
           case 'B2': return [230,210,230]; // Bereavement 2 - lilac tint
+          case 'H':  return [183,162,125]; // Public holiday marker (beige / #b7a27d tone)
           // Exception codes - warning colors
           case 'NI': return [255,245,220]; // No In - light amber
           case 'NO': return [255,240,210]; // No Out - light peach
@@ -3332,8 +3765,9 @@ React.useEffect(() => {
       };
       let bg: [number,number,number] | null = null;
 
-      if (isFri && !present) { 
-        bg = [215, 215, 215]; 
+      if (isFri && !present) {
+        // Fridays without presence: light grey background
+        bg = [215, 215, 215];
       } else {
         bg = headerBg(badge);
       }
@@ -3345,8 +3779,10 @@ React.useEffect(() => {
       doc.setDrawColor(140,140,140);
       doc.rect(x, cellY, wAdj, hCell);
       
-      // Cross out Fridays with no presence
-      if (isFri && !present) {
+      const isHolidayBadge = badge === 'H';
+
+      // Cross out Fridays with no presence and pure holidays (H)
+      if ((isFri && !present) || isHolidayBadge) {
         doc.setDrawColor(120,120,120);
         doc.setLineWidth(0.6);
         doc.line(x + 2, cellY + 2, x + wAdj - 2, cellY + hCell - 2);
@@ -3358,22 +3794,23 @@ React.useEffect(() => {
       // **UPDATED: Show leave codes and exception codes prominently**
       const isLeaveCode = ['AL','SL','EL','ML','UL','HL','BM','XL','B1','B2'].includes(badge);
       const isExceptionCode = ['NI','NO','MO','IP'].includes(badge);
-      const showCodes = ['P','PH','PHF','PT','PL','A','AL','SL','EL','ML','UL','HL','BM','XL','B1','B2','NI','NO','MO','IP'].includes(badge) && !(isFri && !present);
+      const showCodes = ['P','PH','PHF','PT','PL','A','H','AL','SL','EL','ML','UL','HL','BM','XL','B1','B2','NI','NO','MO','IP'].includes(badge) && !(isFri && !present);
       
-      if (isFri && !present) {
+      if (!(isFri && !present) && showCodes && badge) {
         doc.setFont('helvetica','bold');
-        doc.setFontSize(14);
-        const topLeftY = (logoY || margin) + 44;
-        const cap = 'PAYSLIP';
-        const tw = doc.getTextWidth(cap);
-        doc.setTextColor(0,0,0);
-        const payY = topLeftY;
-        const midX = pageW / 2;
-        doc.text(cap, midX - (tw/2), payY);
-      } else if (showCodes && badge) {
-        doc.setFont('helvetica','bold');
-        doc.setFontSize(isLeaveCode || isExceptionCode ? 11 : 10); // Slightly larger for leave/exception codes
-        if (isLeaveCode) {
+        // Auto-fit attendance code font to the cell width so codes stay readable
+        const baseSize = (isLeaveCode || isExceptionCode || badge === 'H') ? 12 : 11;
+        const minSize = 7;
+        let fs = baseSize;
+        doc.setFontSize(fs);
+        while (fs > minSize && doc.getTextWidth(badge) > (wAdj - 4)) {
+          fs -= 1;
+          doc.setFontSize(fs);
+        }
+        if (badge === 'H') {
+          // Holiday marker: b7a27d tone
+          doc.setTextColor(183, 162, 125);
+        } else if (isLeaveCode) {
           doc.setTextColor(0, 100, 0); // Dark green for leave codes
         } else if (isExceptionCode) {
           doc.setTextColor(200, 100, 0); // Orange for exception codes
@@ -3384,8 +3821,8 @@ React.useEffect(() => {
         doc.setFont('helvetica','normal');
       }
       
-      // Missing hours indicator at top-right of cell (only if not on leave)
-      if (!isLeaveCode) {
+      // Missing hours indicator at top-right of cell (only if not on leave/holiday marker)
+      if (!isLeaveCode && badge !== 'H') {
         const dm = Number((day as any)?.deltaMin ?? 0);
         const show = dm < 0 && Math.abs(dm) >= 1; // Only show negative deltas
         const sgn = '-'; // Always negative
@@ -3415,29 +3852,40 @@ React.useEffect(() => {
   const counts: Record<string, number> = { 
     P:0, A:0, PT:0, PHF:0, PH:0, PL:0,
     AL:0, SL:0, EL:0, ML:0, UL:0, HL:0, BM:0, XL:0, B1:0, B2:0,
-    NI:0, NO:0, MO:0, IP:0,
+    NI:0, NO:0, MO:0, IP:0, LI:0, EO:0,
   };
 
   for (let d = 1; d <= dim; d++) {
     const monthStartDate = dayjs(periodStart);
     const dayDate = monthStartDate.date(d);
-    // Skip Fridays in summary (days off)
-    if (dayDate.day() === 5) continue;
     const effectiveStart = contractStart && contractStart.isAfter(monthStartDate) ? contractStart : monthStartDate;
     if (contractStart && dayDate.isBefore(effectiveStart, 'day')) continue;
     
     const badge = codeBadgePDF(days[d-1] || undefined, d - 1, schStartMinPDF, schEndMinPDF);
-    if (badge && badge in counts) counts[badge]++;
+    const isFriday = dayDate.day() === 5;
+    
+    // Count codes with Friday rule:
+    // - PH/PHF: Count on all days including Fridays (paid holidays can be on Fridays)
+    // - Leave codes (AL, EL, ML, UL, HL, BM, XL, B1, B2): Skip Fridays EXCEPT Sick Leave (SL)
+    // - Other codes (P, A, PT, PL, exception codes): Count on all working days
+    const isLeaveCode = ['AL','EL','ML','UL','HL','BM','XL','B1','B2'].includes(badge);
+    const skipFriday = isFriday && isLeaveCode; // Skip Fridays for non-sick leave codes
+    
+    // Don't count 'A' here - we'll use backend absence_days instead for consistency
+    if (badge && badge !== 'A' && badge in counts && !skipFriday) counts[badge]++;
   }
+  
+  // Use backend absence_days for 'A' count to match deduction calculation
+  counts['A'] = absenceDaysPDF;
 
   // Full-width Attendance table with leave codes
   doc.setFontSize(14);
-  const tblTop = afterGridY + 8;
+  const tblTop = afterGridY + 6;
   const fullW = pageW - margin*2;
 
-  const allCodes = ['P','A','PT','PHF','PH','PL','AL','SL','EL','ML','UL','HL','BM','XL','B1','B2','NI','NO','MO','IP'] as const;
+  const allCodes = ['P','A','PT','PHF','PH','PL','AL','SL','EL','ML','UL','HL','BM','XL','B1','B2','NI','NO','MO','IP','LI','EO'] as const;
   const codes = allCodes.filter((c) => Number((counts as any)[c] || 0) > 0);
-  const leftW = 80;
+  const leftW = 40;
   const cellW = Math.floor((fullW - leftW) / Math.max(1, codes.length));
   
   doc.setFont('helvetica', 'bold');
@@ -3471,6 +3919,8 @@ React.useEffect(() => {
     NO: 'No Out',
     MO: 'Missing Out',
     IP: 'Incomplete',
+    LI: 'Late In',
+    EO: 'Early Out',
   };
 
   const headerBg = (code: string): [number,number,number] | null => {
@@ -3489,6 +3939,8 @@ React.useEffect(() => {
       case 'NO': return [255,240,210]; // No Out - light peach
       case 'MO': return [255,235,200]; // Missing Out - light orange
       case 'IP': return [255,250,230]; // Incomplete - light yellow
+      case 'LI': return [255,248,225]; // Late In - light gold
+      case 'EO': return [255,243,215]; // Early Out - light apricot
       // Regular attendance codes
       case 'PHF': return [235,235,235];
       case 'PH':  return [230,230,230];
@@ -4214,11 +4666,15 @@ React.useEffect(() => {
                     label={t("LYD") || "LYD"}
                     value={adjForm.amount}
                     onChange={(e) => {
-                      const v = Number(e.target.value || 0);
-                      const clamped = Math.min(Math.max(v, 0), availableAdvance);
-                      setAdjForm((f) => ({ ...f, amount: String(clamped) }));
+                      setAdjForm((f) => ({ ...f, amount: e.target.value }));
                     }}
-                    inputProps={{ step: "0.01", min: 0, max: availableAdvance }}
+                    onBlur={() => {
+                      const v = Number(adjForm.amount || 0);
+                      if (Number.isFinite(v) && v > availableAdvance) {
+                        showUiError(`Amount exceeds available advance (${availableAdvance.toFixed(2)} LYD)`);
+                      }
+                    }}
+                    inputProps={{ step: "0.01", min: 0 }}
                     helperText={`Available: ${availableAdvance.toFixed(2)} LYD (${advanceMaxPercent}% - existing advances)`}
                   />
                   <Button
@@ -4229,12 +4685,12 @@ React.useEffect(() => {
                       try {
                         const amt = Number(adjForm.amount);
                         if (amt > availableAdvance) {
-                          alert(`Amount exceeds available advance (${availableAdvance.toFixed(2)} LYD)`);
+                          showUiError(`Amount exceeds available advance (${availableAdvance.toFixed(2)} LYD)`);
                           setAdjLoading(false);
                           return;
                         }
                         if (amt + existingAdvances > maxAdvance) {
-                          alert(`Total advances cannot exceed ${advanceMaxPercent}% of salary (${maxAdvance.toFixed(2)} LYD)`);
+                          showUiError(`Total advances cannot exceed ${advanceMaxPercent}% of salary (${maxAdvance.toFixed(2)} LYD)`);
                           setAdjLoading(false);
                           return;
                         }
@@ -4247,17 +4703,17 @@ React.useEffect(() => {
                           currency: "LYD",
                           note: "salary advance",
                         };
-                        const res = await fetch(`http://localhost:9000/hr/payroll/adjustments`, {
+                        const res = await fetch(`http://192.168.3.98:9000/hr/payroll/adjustments`, {
                           method: "POST",
                           headers: { "Content-Type": "application/json", ...authHeader() } as unknown as HeadersInit,
                           body: JSON.stringify(payload),
                         });
                         if (!res.ok) throw new Error("Failed to add advance");
                         await onRun();
-                        setAdjForm({ type: "bonus", amount: "", currency: "LYD", note: "" });
-                        alert("Advance added");
+                        setAdjForm((f) => ({ ...f, amount: "" }));
+                        // success message not required
                       } catch (e: any) {
-                        alert(e?.message || "Failed");
+                        showUiError(e?.message || "Failed");
                       } finally {
                         setAdjLoading(false);
                       }
@@ -4345,7 +4801,7 @@ React.useEffect(() => {
                       try {
                         const principal = Number(loanAmount);
                         if (principal <= 0) {
-                          alert("Loan amount must be greater than 0");
+                          showUiError("Loan amount must be greater than 0");
                           setAdjLoading(false);
                           return;
                         }
@@ -4353,9 +4809,7 @@ React.useEffect(() => {
                         const baseSalary = Number(emp?.baseSalary || 0);
                         const maxPrincipal = baseSalary * loanMaxMultiple;
                         if (baseSalary > 0 && principal > maxPrincipal) {
-                          alert(
-                            `Loan exceeds maximum allowed (${loanMaxMultiple}× salary). Max: ${maxPrincipal.toFixed(2)} LYD`
-                          );
+                          showUiError(`Loan exceeds maximum allowed (${loanMaxMultiple}× salary). Max: ${maxPrincipal.toFixed(2)} LYD`);
                           setAdjLoading(false);
                           return;
                         }
@@ -4368,15 +4822,13 @@ React.useEffect(() => {
                           (vr as any).contractStart ||
                           (vr as any).T_START;
                         if (!csRaw) {
-                          alert(
-                            "Employee contract start date is missing. Loans are only available 1 year after contract start."
-                          );
+                          showUiError("Employee contract start date is missing. Loans are only available 1 year after contract start.");
                           setAdjLoading(false);
                           return;
                         }
                         const cs = dayjs(csRaw);
                         if (!cs.isValid() || dayjs().isBefore(cs.add(1, "year"))) {
-                          alert("Loan not available: must be at least 1 year after contract start date.");
+                          showUiError("Loan not available: must be at least 1 year after contract start date.");
                           setAdjLoading(false);
                           return;
                         }
@@ -4431,9 +4883,9 @@ React.useEffect(() => {
 
                         await onRun();
                         setLoanAmount("");
-                        alert("Loan created");
+                        // success message not required
                       } catch (e: any) {
-                        alert(e?.message || "Failed");
+                        showUiError(e?.message || "Failed");
                       } finally {
                         setAdjLoading(false);
                       }
@@ -4531,65 +4983,51 @@ React.useEffect(() => {
                   </Typography>
                 ) : (
                   <Box>
-                    <Table>
-                      <TableHead>
-                        <TableRow>
-                          <TableCell>{t("Month") || "Month"}</TableCell>
-                          <TableCell>{t("Gold") || "Gold"}</TableCell>
-                          <TableCell>{t("Diamond") || "Diamond"}</TableCell>
-                          <TableCell>{t("Gross Salary") || "Gross Salary"}</TableCell>
-                          <TableCell>{t("Net Salary") || "Net Salary"}</TableCell>
-                        </TableRow>
-                      </TableHead>
-                      <TableBody>
-                        {(historyPoints || []).map((p, idx) => {
-                          const hp = p as any;
-                          const goldLyd = Number(hp.gold_lyd ?? 0);
-                          const goldUsd = Number(hp.gold_usd ?? 0);
-                          const diamondLyd = Number(hp.diamond_lyd ?? 0);
-                          const diamondUsd = Number(hp.diamond_usd ?? 0);
-                          const grossLyd = Number(hp.gross_lyd ?? 0);
-                          const grossUsd = Number(hp.gross_usd ?? 0);
-                          const netLyd = Number(hp.net_lyd ?? 0);
-                          const netUsd = Number(hp.net_usd ?? 0);
-                          return (
-                            <TableRow key={idx}>
-                              <TableCell>
-                                {dayjs(`${hp.year}-${String(hp.month).padStart(2, "0")}-01`).format("MMM YYYY")}
-                              </TableCell>
-                              <TableCell>
-                                {goldLyd.toFixed(2)} LYD / {goldUsd.toFixed(2)} USD
-                              </TableCell>
-                              <TableCell>
-                                {diamondLyd.toFixed(2)} LYD / {diamondUsd.toFixed(2)} USD
-                              </TableCell>
-                              <TableCell>
-                                {grossLyd.toFixed(2)} LYD / {grossUsd.toFixed(2)} USD
-                              </TableCell>
-                              <TableCell>
-                                {netLyd.toFixed(2)} LYD / {netUsd.toFixed(2)} USD
-                              </TableCell>
-                            </TableRow>
-                          );
-                        })}
-                      </TableBody>
-                    </Table>
-
-                    <Box>
-                      {(historyPoints || []).map((p) => (
-                        <Box
-                          key={`${p.year}-${p.month}`}
-                          display="flex"
-                          justifyContent="space-between"
-                          sx={{ py: 0.25, borderTop: "1px dotted", borderColor: "divider" }}
-                        >
-                          <Typography variant="caption">
-                            {dayjs(`${p.year}-${String(p.month).padStart(2, "0")}-01`).format("MMM YYYY")}
-                          </Typography>
-                          <Typography variant="caption">{Number((p as any).total || 0).toFixed(2)} LYD</Typography>
-                        </Box>
-                      ))}
-                    </Box>
+                    <TableContainer sx={{ width: '100%', overflowX: 'auto' }}>
+                      <Table size="small" sx={{ minWidth: 900 }}>
+                        <TableHead>
+                          <TableRow>
+                            <TableCell sx={{ fontWeight: 700 }}>{t("Month") || "Month"}</TableCell>
+                            <TableCell sx={{ fontWeight: 700 }}>{t("Gold") || "Gold"}</TableCell>
+                            <TableCell sx={{ fontWeight: 700 }}>{t("Diamond") || "Diamond"}</TableCell>
+                            <TableCell sx={{ fontWeight: 700 }}>{t("Gross Salary") || "Gross Salary"}</TableCell>
+                            <TableCell sx={{ fontWeight: 700 }}>{t("Net Salary") || "Net Salary"}</TableCell>
+                          </TableRow>
+                        </TableHead>
+                        <TableBody>
+                          {(historyPoints || []).map((p, idx) => {
+                            const hp = p as any;
+                            const goldLyd = Number(hp.gold_lyd ?? 0);
+                            const goldUsd = Number(hp.gold_usd ?? 0);
+                            const diamondLyd = Number(hp.diamond_lyd ?? 0);
+                            const diamondUsd = Number(hp.diamond_usd ?? 0);
+                            const grossLyd = Number(hp.gross_lyd ?? 0);
+                            const grossUsd = Number(hp.gross_usd ?? 0);
+                            const netLyd = Number(hp.net_lyd ?? 0);
+                            const netUsd = Number(hp.net_usd ?? 0);
+                            return (
+                              <TableRow key={idx}>
+                                <TableCell>
+                                  {dayjs(`${hp.year}-${String(hp.month).padStart(2, "0")}-01`).format("MMM YYYY")}
+                                </TableCell>
+                                <TableCell>
+                                  {goldLyd.toFixed(2)} LYD / {goldUsd.toFixed(2)} USD
+                                </TableCell>
+                                <TableCell>
+                                  {diamondLyd.toFixed(2)} LYD / {diamondUsd.toFixed(2)} USD
+                                </TableCell>
+                                <TableCell>
+                                  {grossLyd.toFixed(2)} LYD / {grossUsd.toFixed(2)} USD
+                                </TableCell>
+                                <TableCell>
+                                  {netLyd.toFixed(2)} LYD / {netUsd.toFixed(2)} USD
+                                </TableCell>
+                              </TableRow>
+                            );
+                          })}
+                        </TableBody>
+                      </Table>
+                    </TableContainer>
                   </Box>
                 )}
               </Box>
@@ -4601,59 +5039,299 @@ React.useEffect(() => {
           <Box display="grid" gap={2}>
             <Typography variant="subtitle1">{t("Adjustments") || "Adjustments"}</Typography>
 
-            <TextField
-              select
-              size="small"
-              label={t("Employee") || "Employee"}
-              value={adjEmpId || ""}
-              onChange={(e) => setAdjEmpId(Number(e.target.value) || null)}
-              sx={{ maxWidth: 400 }}
-            >
-              {(result?.employees || []).map((emp) => (
-                <MenuItem key={emp.id_emp} value={emp.id_emp}>
-                  {emp.name} (ID: {emp.id_emp})
-                </MenuItem>
-              ))}
-            </TextField>
+            <Box display="flex" gap={2} alignItems="center" flexWrap="wrap">
+              <TextField
+                select
+                size="small"
+                label={t("Employee") || "Employee"}
+                value={adjEmpId || ""}
+                onChange={(e) => setAdjEmpId(Number(e.target.value) || null)}
+                sx={{ minWidth: 300 }}
+              >
+                {(result?.employees || []).map((emp) => (
+                  <MenuItem key={emp.id_emp} value={emp.id_emp}>
+                    {emp.name} (ID: {emp.id_emp})
+                  </MenuItem>
+                ))}
+              </TextField>
+              
+              <TextField
+                select
+                size="small"
+                label={t("Currency Filter") || "Currency Filter"}
+                value={adjCurrencyFilter}
+                onChange={(e) => setAdjCurrencyFilter(e.target.value as 'ALL' | 'LYD' | 'USD')}
+                sx={{ minWidth: 120 }}
+              >
+                <MenuItem value="ALL">{t("All") || "All"}</MenuItem>
+                <MenuItem value="LYD">LYD</MenuItem>
+                <MenuItem value="USD">USD</MenuItem>
+              </TextField>
+            </Box>
 
             {adjEmpId && (
-              <Box display="grid" gap={2} sx={{ maxWidth: 900 }}>
+              <Box display="grid" gap={2} sx={{ width: '100%', maxWidth: 1400 }}>
                 <Box>
-                  {(adjRows || []).length === 0 && (
-                    <Typography variant="body2" color="text.secondary">
-                      {t("No adjustments yet") || "No adjustments yet"}
-                    </Typography>
-                  )}
-                  {(adjRows || []).map((r, idx) => {
-                    const opt = adjTypeOptions.find((o) => o.value === r.type);
-                    const label = opt?.label || r.type;
-                    const amt = Number(r.amount || 0).toFixed(2);
-                    const dateStr = r.ts ? dayjs(r.ts).format("YYYY-MM-DD HH:mm") : "";
-                    return (
-                      <Box
-                        key={idx}
-                        display="flex"
-                        justifyContent="space-between"
-                        alignItems="flex-start"
-                        sx={{ py: 0.5, borderBottom: "1px dashed", borderColor: "divider" }}
-                      >
-                        <Box>
-                          <Typography variant="body2" sx={{ fontWeight: 600 }}>
-                            {label}
+                  {(() => {
+                    const visible = (adjRows || []).filter((r: any) =>
+                      adjCurrencyFilter === 'ALL' || String(r.currency || '').toUpperCase() === String(adjCurrencyFilter).toUpperCase()
+                    );
+                    if (visible.length === 0) {
+                      return (
+                        <Typography variant="body2" color="text.secondary">
+                          {t("No adjustments yet") || "No adjustments yet"}
+                        </Typography>
+                      );
+                    }
+
+                    const isDeduction = (r: any) => {
+                      const dir = String(r?.direction || '').toUpperCase();
+                      const type = String(r?.type || '').toLowerCase();
+                      return dir === 'DEDUCT' || type === 'deduction';
+                    };
+
+                    const showUsd = !!adjUsdEligible;
+
+                    const sumTotals = (rows: any[]) => {
+                      let lyd = 0;
+                      let usd = 0;
+                      (rows || []).forEach((r) => {
+                        const amt = Number(r?.amount || 0) || 0;
+                        if (!amt) return;
+                        const cur = String(r?.currency || 'LYD').toUpperCase();
+                        if (cur === 'USD') usd += amt;
+                        else lyd += amt;
+                      });
+                      return { lyd, usd };
+                    };
+
+                    const renderRows = (rows: any[]) => {
+                      if (!rows.length) {
+                        return (
+                          <Typography variant="body2" color="text.secondary" sx={{ py: 0.5 }}>
+                            {t("None") || "None"}
                           </Typography>
-                          {r.note && <Typography variant="body2" color="text.secondary">{r.note}</Typography>}
-                          {dateStr && (
-                            <Typography variant="caption" color="text.secondary">
+                        );
+                      }
+                      return rows.map((r: any, idx: number) => {
+                        const opt = adjTypeOptions.find((o) => o.value === r.type);
+                        const label = String(r.label || opt?.label || r.type || '').trim();
+                        const amt = Number(r.amount || 0);
+                        const cur = String(r.currency || 'LYD').toUpperCase();
+                        const lydStr = cur === 'USD' ? '' : (amt ? amt.toFixed(2) : '');
+                        const usdStr = cur === 'USD' ? (amt ? amt.toFixed(2) : '') : '';
+                        const note = String(r.note || '').trim();
+                        const dateStr = r.ts ? dayjs(r.ts).format('YYYY-MM-DD') : '';
+                        const isEditing = adjEditId === r.id;
+                        return (
+                          <Box
+                            key={r.id || idx}
+                            sx={{
+                              display: 'grid',
+                              gridTemplateColumns: showUsd ? '96px 1fr 1fr 90px 90px 72px' : '96px 1fr 1fr 90px 72px',
+                              gap: 1,
+                              alignItems: 'center',
+                              py: 0.5,
+                              px: 1,
+                              borderBottom: '1px dashed',
+                              borderColor: 'divider',
+                              bgcolor: isEditing ? 'action.selected' : 'transparent',
+                              borderRadius: 1,
+                            }}
+                          >
+                            <Typography variant="body2" color="text.secondary" sx={{ fontSize: 12 }}>
                               {dateStr}
                             </Typography>
-                          )}
-                        </Box>
-                        <Typography variant="body2" sx={{ fontWeight: 600 }}>
-                          {r.currency} {amt}
+                            <Box>
+                              <Typography variant="body2" sx={{ fontWeight: 600 }}>
+                                {label}
+                              </Typography>
+                            </Box>
+                            <Box>
+                              {note ? (
+                                <Typography
+                                  variant="caption"
+                                  color="text.secondary"
+                                  sx={{ display: 'block', lineHeight: 1.2 }}
+                                >
+                                  {note}
+                                </Typography>
+                              ) : null}
+                            </Box>
+                            <Typography variant="body2" sx={{ fontWeight: 600, textAlign: 'right' }}>
+                              {lydStr}
+                            </Typography>
+                            {showUsd && (
+                              <Typography variant="body2" sx={{ fontWeight: 600, textAlign: 'right' }}>
+                                {usdStr}
+                              </Typography>
+                            )}
+                            <Box display="flex" justifyContent="flex-end" gap={0.5}>
+                              <IconButton
+                                size="small"
+                                onClick={() => startEditAdjustment(r)}
+                                disabled={adjLoading || isEditing}
+                                title={t("Edit") || "Edit"}
+                              >
+                                <SettingsIcon fontSize="small" />
+                              </IconButton>
+                              <IconButton
+                                size="small"
+                                onClick={() => r.id && requestDeleteAdjustment(r.id)}
+                                disabled={adjLoading}
+                                color="error"
+                                title={t("Delete") || "Delete"}
+                              >
+                                <VisibilityOffIcon fontSize="small" />
+                              </IconButton>
+                            </Box>
+                          </Box>
+                        );
+                      });
+                    };
+
+                    const earnings = visible.filter((r: any) => r && !isDeduction(r));
+                    const deductions = visible.filter((r: any) => r && isDeduction(r));
+
+                    const earnTot = sumTotals(earnings);
+                    const dedTot = sumTotals(deductions);
+
+                    const TotalsRow = ({ totals }: { totals: { lyd: number; usd: number } }) => (
+                      <Box
+                        sx={{
+                          display: 'grid',
+                          gridTemplateColumns: showUsd ? '96px 1fr 1fr 90px 90px 72px' : '96px 1fr 1fr 90px 72px',
+                          gap: 1,
+                          alignItems: 'center',
+                          mt: 0.5,
+                          px: 1,
+                          py: 0.75,
+                          minHeight: 38,
+                          bgcolor: (t) =>
+                            t.palette.mode === 'dark'
+                              ? 'rgba(255,255,255,0.10)'
+                              : 'rgba(0,0,0,0.10)',
+                          borderRadius: 1,
+                        }}
+                      >
+                        <Box />
+                        <Typography variant="body2" sx={{ fontWeight: 700 }}>
+                          {t('Total') || 'Total'}
                         </Typography>
+                        <Box />
+                        <Typography variant="body2" sx={{ fontWeight: 700, textAlign: 'right' }}>
+                          {totals.lyd ? totals.lyd.toFixed(2) : ''}
+                        </Typography>
+                        {showUsd ? (
+                          <Typography variant="body2" sx={{ fontWeight: 700, textAlign: 'right' }}>
+                            {totals.usd ? totals.usd.toFixed(2) : ''}
+                          </Typography>
+                        ) : null}
+                        <Box />
                       </Box>
                     );
-                  })}
+
+                    return (
+                      <Box
+                        sx={{
+                          display: 'grid',
+                          gridTemplateColumns: { xs: '1fr', md: '1fr 1fr' },
+                          gap: 2,
+                          alignItems: 'stretch',
+                        }}
+                      >
+                        <Box
+                          sx={{
+                            border: '1px solid',
+                            borderColor: 'divider',
+                            borderRadius: 2,
+                            overflow: 'hidden',
+                            display: 'flex',
+                            flexDirection: 'column',
+                            height: { xs: 'auto', md: 520 },
+                          }}
+                        >
+                          <Box sx={{ px: 1, py: 0.75, bgcolor: 'background.default' }}>
+                            <Typography variant="subtitle2" sx={{ fontWeight: 800 }} align="center">
+                              {t('EARNINGS') || 'EARNINGS'}
+                            </Typography>
+                            <Box
+                              sx={{
+                                display: 'grid',
+                                gridTemplateColumns: showUsd ? '96px 1fr 1fr 90px 90px 72px' : '96px 1fr 1fr 90px 72px',
+                                gap: 1,
+                                alignItems: 'center',
+                                mt: 0.5,
+                              }}
+                            >
+                              <Typography variant="caption" color="text.secondary">{t('Date') || 'Date'}</Typography>
+                              <Typography variant="caption" color="text.secondary">{t('Item') || 'Item'}</Typography>
+                              <Typography variant="caption" color="text.secondary">{t('Notes') || 'Notes'}</Typography>
+                              <Typography variant="caption" color="text.secondary" sx={{ textAlign: 'right' }}>LYD</Typography>
+                              {showUsd && (
+                                <Typography variant="caption" color="text.secondary" sx={{ textAlign: 'right' }}>USD</Typography>
+                              )}
+                              <Typography variant="caption" color="text.secondary" sx={{ textAlign: 'right' }}>{t('Actions') || 'Actions'}</Typography>
+                            </Box>
+                          </Box>
+                          <Box sx={{ px: 0.5, pb: 0.5, flex: 1, overflowY: 'auto' }}>
+                            {renderRows(earnings)}
+                          </Box>
+                          <Box sx={{ px: 0.5, pb: 0.75 }}>
+                            <Divider sx={{ mt: 0.5 }} />
+                            <Box sx={{ px: 0.5 }}>
+                              <TotalsRow totals={earnTot} />
+                            </Box>
+                          </Box>
+                        </Box>
+
+                        <Box
+                          sx={{
+                            border: '1px solid',
+                            borderColor: 'divider',
+                            borderRadius: 2,
+                            overflow: 'hidden',
+                            display: 'flex',
+                            flexDirection: 'column',
+                            height: { xs: 'auto', md: 520 },
+                          }}
+                        >
+                          <Box sx={{ px: 1, py: 0.75, bgcolor: 'background.default' }}>
+                            <Typography variant="subtitle2" sx={{ fontWeight: 800 }} align="center">
+                              {t('DEDUCTIONS') || 'DEDUCTIONS'}
+                            </Typography>
+                            <Box
+                              sx={{
+                                display: 'grid',
+                                gridTemplateColumns: showUsd ? '96px 1fr 1fr 90px 90px 72px' : '96px 1fr 1fr 90px 72px',
+                                gap: 1,
+                                alignItems: 'center',
+                                mt: 0.5,
+                              }}
+                            >
+                              <Typography variant="caption" color="text.secondary">{t('Date') || 'Date'}</Typography>
+                              <Typography variant="caption" color="text.secondary">{t('Item') || 'Item'}</Typography>
+                              <Typography variant="caption" color="text.secondary">{t('Notes') || 'Notes'}</Typography>
+                              <Typography variant="caption" color="text.secondary" sx={{ textAlign: 'right' }}>LYD</Typography>
+                              {showUsd && (
+                                <Typography variant="caption" color="text.secondary" sx={{ textAlign: 'right' }}>USD</Typography>
+                              )}
+                              <Typography variant="caption" color="text.secondary" sx={{ textAlign: 'right' }}>{t('Actions') || 'Actions'}</Typography>
+                            </Box>
+                          </Box>
+                          <Box sx={{ px: 0.5, pb: 0.5, flex: 1, overflowY: 'auto' }}>
+                            {renderRows(deductions)}
+                          </Box>
+                          <Box sx={{ px: 0.5, pb: 0.75 }}>
+                            <Divider sx={{ mt: 0.5 }} />
+                            <Box sx={{ px: 0.5 }}>
+                              <TotalsRow totals={dedTot} />
+                            </Box>
+                          </Box>
+                        </Box>
+                      </Box>
+                    );
+                  })()}
 
                   {Object.keys(adjTypeTotals).length > 0 && (
                     <Box
@@ -4686,7 +5364,17 @@ React.useEffect(() => {
 
                 <Divider sx={{ my: 1.5 }} />
 
-                <Box display="grid" gridTemplateColumns="repeat(4, 1fr)" gap={1}>
+                <Box
+                  display="grid"
+                  gap={1}
+                  sx={{
+                    gridTemplateColumns: {
+                      xs: '1fr',
+                      sm: 'repeat(2, 1fr)',
+                      md: 'repeat(4, 1fr)',
+                    },
+                  }}
+                >
                   <TextField
                     select
                     size="small"
@@ -4694,12 +5382,21 @@ React.useEffect(() => {
                     value={adjForm.type}
                     onChange={(e) => {
                       const nextType = e.target.value;
+                      const opt = adjTypeOptions.find((o) => o.value === nextType);
                       setAdjForm((f) => ({
                         ...f,
                         type: nextType,
-                        currency: adjLydOnlyTypes.has(nextType) ? "LYD" : f.currency,
+                        label: nextType === 'custom' ? '' : String(opt?.label || nextType),
+                        direction: nextType === 'deduction' ? 'DEDUCT' : (nextType === 'custom' ? 'ADD' : 'ADD'),
+                        recurring: false,
+                        startYear: year,
+                        startMonth: month,
+                        endYear: '',
+                        endMonth: '',
+                        currency: adjUsdEligible ? f.currency : "LYD",
                       }));
                     }}
+                    fullWidth
                   >
                     {adjTypeOptions.map((opt) => (
                       <MenuItem key={opt.value} value={opt.value}>
@@ -4714,16 +5411,141 @@ React.useEffect(() => {
                     value={adjForm.amount}
                     onChange={(e) => setAdjForm((f) => ({ ...f, amount: e.target.value }))}
                     inputProps={{ step: "0.01" }}
+                    fullWidth
                   />
+
+                  {adjForm.type === 'custom' && (
+                    <TextField
+                      size="small"
+                      label={t("Label") || "Label"}
+                      value={adjForm.label}
+                      onChange={(e) => setAdjForm((f) => ({ ...f, label: e.target.value }))}
+                      placeholder={t("Example: Attendance Bonus") || "Example: Attendance Bonus"}
+                      fullWidth
+                    />
+                  )}
+
+                  {adjForm.type === 'custom' && (
+                    <TextField
+                      select
+                      size="small"
+                      label={t("Add / Deduct") || "Add / Deduct"}
+                      value={adjForm.direction}
+                      onChange={(e) =>
+                        setAdjForm((f) => ({
+                          ...f,
+                          direction: (String(e.target.value || '').toUpperCase() === 'DEDUCT' ? 'DEDUCT' : 'ADD') as 'ADD' | 'DEDUCT',
+                        }))
+                      }
+                      fullWidth
+                    >
+                      <MenuItem value="ADD">{t("Earnings (+)") || "Earnings (+)"}</MenuItem>
+                      <MenuItem value="DEDUCT">{t("Deductions (-)") || "Deductions (-)"}</MenuItem>
+                    </TextField>
+                  )}
+
+                  {adjForm.type === 'custom' && (
+                    <FormControlLabel
+                      sx={{ gridColumn: { xs: '1 / -1', md: '1 / -1' }, m: 0 }}
+                      control={
+                        <Checkbox
+                          checked={!!adjForm.recurring}
+                          onChange={(e) => {
+                            const checked = !!e.target.checked;
+                            setAdjForm((f) => ({
+                              ...f,
+                              recurring: checked,
+                              startYear: checked ? Number(f.startYear || year) : Number(f.startYear || year),
+                              startMonth: checked ? Number(f.startMonth || month) : Number(f.startMonth || month),
+                              endYear: checked ? String(f.endYear || '') : '',
+                              endMonth: checked ? String(f.endMonth || '') : '',
+                            }));
+                          }}
+                        />
+                      }
+                      label={t('Recurring (apply every month)') || 'Recurring (apply every month)'}
+                    />
+                  )}
+
+                  {adjForm.type === 'custom' && adjForm.recurring && (
+                    <TextField
+                      select
+                      size="small"
+                      label={t('Start Year') || 'Start Year'}
+                      value={adjForm.startYear}
+                      onChange={(e) => setAdjForm((f) => ({ ...f, startYear: Number(e.target.value) }))}
+                      fullWidth
+                    >
+                      {years.map((yy) => (
+                        <MenuItem key={yy} value={yy}>
+                          {yy}
+                        </MenuItem>
+                      ))}
+                    </TextField>
+                  )}
+
+                  {adjForm.type === 'custom' && adjForm.recurring && (
+                    <TextField
+                      select
+                      size="small"
+                      label={t('Start Month') || 'Start Month'}
+                      value={adjForm.startMonth}
+                      onChange={(e) => setAdjForm((f) => ({ ...f, startMonth: Number(e.target.value) }))}
+                      fullWidth
+                    >
+                      {months.map((mm) => (
+                        <MenuItem key={mm} value={mm}>
+                          {String(mm).padStart(2, '0')}
+                        </MenuItem>
+                      ))}
+                    </TextField>
+                  )}
+
+                  {adjForm.type === 'custom' && adjForm.recurring && (
+                    <TextField
+                      select
+                      size="small"
+                      label={t('End Year (optional)') || 'End Year (optional)'}
+                      value={adjForm.endYear}
+                      onChange={(e) => setAdjForm((f) => ({ ...f, endYear: String(e.target.value) }))}
+                      fullWidth
+                    >
+                      <MenuItem value="">—</MenuItem>
+                      {years.map((yy) => (
+                        <MenuItem key={yy} value={String(yy)}>
+                          {yy}
+                        </MenuItem>
+                      ))}
+                    </TextField>
+                  )}
+
+                  {adjForm.type === 'custom' && adjForm.recurring && (
+                    <TextField
+                      select
+                      size="small"
+                      label={t('End Month (optional)') || 'End Month (optional)'}
+                      value={adjForm.endMonth}
+                      onChange={(e) => setAdjForm((f) => ({ ...f, endMonth: String(e.target.value) }))}
+                      fullWidth
+                    >
+                      <MenuItem value="">—</MenuItem>
+                      {months.map((mm) => (
+                        <MenuItem key={mm} value={String(mm)}>
+                          {String(mm).padStart(2, '0')}
+                        </MenuItem>
+                      ))}
+                    </TextField>
+                  )}
                   <TextField
                     select
                     size="small"
                     label={t("Currency") || "Currency"}
                     value={adjForm.currency}
                     onChange={(e) => setAdjForm((f) => ({ ...f, currency: e.target.value }))}
-                    disabled={adjLydOnlyTypes.has(adjForm.type)}
+                    disabled={!adjUsdEligible}
+                    fullWidth
                   >
-                    {["LYD", "USD"].map((x) => (
+                    {(adjUsdEligible ? ["LYD", "USD"] : ["LYD"]).map((x) => (
                       <MenuItem key={x} value={x}>
                         {x}
                       </MenuItem>
@@ -4734,13 +5556,25 @@ React.useEffect(() => {
                     label={t("Note") || "Note"}
                     value={adjForm.note}
                     onChange={(e) => setAdjForm((f) => ({ ...f, note: e.target.value }))}
+                    fullWidth
                   />
                 </Box>
 
-                <Box mt={1} display="flex" justifyContent="flex-end">
-                  <Button onClick={addAdjustment} variant="contained" disabled={adjLoading}>
-                    {t("common.add") || "Add"}
-                  </Button>
+                <Box mt={1} display="flex" justifyContent="flex-end" gap={1}>
+                  {adjEditId ? (
+                    <>
+                      <Button onClick={cancelEditAdjustment} variant="outlined" disabled={adjLoading}>
+                        {t("common.cancel") || "Cancel"}
+                      </Button>
+                      <Button onClick={updateAdjustment} variant="contained" disabled={adjLoading}>
+                        {t("common.update") || "Update"}
+                      </Button>
+                    </>
+                  ) : (
+                    <Button onClick={addAdjustment} variant="contained" disabled={adjLoading}>
+                      {t("common.add") || "Add"}
+                    </Button>
+                  )}
                 </Box>
               </Box>
             )}
@@ -5226,7 +6060,7 @@ React.useEffect(() => {
                     >
                       <Box display="flex" alignItems="center" gap={1.25}>
                         <Avatar
-                          src={`http://localhost:9000/employees/${e.id_emp}/picture`}
+                          src={`http://192.168.3.98:9000/employees/${e.id_emp}/picture`}
                           sx={{ width: 28, height: 28 }}
                         />
                         <Box
@@ -6039,7 +6873,13 @@ React.useEffect(() => {
                   </Box>
                 )}
 
-                <Dialog open={calOpen} onClose={() => setCalOpen(false)} fullWidth maxWidth="md">
+                <Dialog
+                  open={calOpen}
+                  onClose={() => setCalOpen(false)}
+                  fullWidth
+                  maxWidth="xl"
+                  PaperProps={{ sx: { width: 'min(1400px, 95vw)' } }}
+                >
                   <DialogTitle>
                     {calEmp
                       ? `${calEmp.name} — ${String(year)}-${String(month).padStart(2, "0")}`
@@ -6066,16 +6906,16 @@ React.useEffect(() => {
                             <Typography variant="caption">PHF: Holiday (full)</Typography>
                             <Typography variant="caption">PT: Short Hours</Typography>
                             <Typography variant="caption">PL: Late</Typography>
-                            <Typography variant="caption" sx={{ fontWeight: 600, color: "primary.main" }}>AL: Annual Leave</Typography>
-                            <Typography variant="caption" sx={{ fontWeight: 600, color: "primary.main" }}>SL: Sick Leave</Typography>
-                            <Typography variant="caption" sx={{ fontWeight: 600, color: "primary.main" }}>EL: Emergency</Typography>
-                            <Typography variant="caption" sx={{ fontWeight: 600, color: "primary.main" }}>ML: Maternity</Typography>
-                            <Typography variant="caption" sx={{ fontWeight: 600, color: "primary.main" }}>UL: Unpaid</Typography>
-                            <Typography variant="caption" sx={{ fontWeight: 600, color: "primary.main" }}>HL: Half Day</Typography>
-                            <Typography variant="caption" sx={{ fontWeight: 600, color: "primary.main" }}>XL: Exam Leave</Typography>
-                            <Typography variant="caption" sx={{ fontWeight: 600, color: "primary.main" }}>BM: Bereavement</Typography>
-                            <Typography variant="caption" sx={{ fontWeight: 600, color: "primary.main" }}>B1: Bereavement 1</Typography>
-                            <Typography variant="caption" sx={{ fontWeight: 600, color: "primary.main" }}>B2: Bereavement 2</Typography>
+                            <Typography variant="caption" sx={{ fontWeight: 600, color: stableColorFromCode("AL") }}>AL: Annual Leave</Typography>
+                            <Typography variant="caption" sx={{ fontWeight: 600, color: stableColorFromCode("SL") }}>SL: Sick Leave</Typography>
+                            <Typography variant="caption" sx={{ fontWeight: 600, color: stableColorFromCode("EL") }}>EL: Emergency</Typography>
+                            <Typography variant="caption" sx={{ fontWeight: 600, color: stableColorFromCode("ML") }}>ML: Maternity</Typography>
+                            <Typography variant="caption" sx={{ fontWeight: 600, color: stableColorFromCode("UL") }}>UL: Unpaid</Typography>
+                            <Typography variant="caption" sx={{ fontWeight: 600, color: stableColorFromCode("HL") }}>HL: Half Day</Typography>
+                            <Typography variant="caption" sx={{ fontWeight: 600, color: stableColorFromCode("XL") }}>XL: Exam Leave</Typography>
+                            <Typography variant="caption" sx={{ fontWeight: 600, color: stableColorFromCode("BM") }}>BM: Bereavement</Typography>
+                            <Typography variant="caption" sx={{ fontWeight: 600, color: stableColorFromCode("B1") }}>B1: Bereavement 1</Typography>
+                            <Typography variant="caption" sx={{ fontWeight: 600, color: stableColorFromCode("B2") }}>B2: Bereavement 2</Typography>
                           </Box>
                         </Box>
 
@@ -6094,7 +6934,12 @@ React.useEffect(() => {
                             const cells: React.ReactNode[] = [];
 
                             for (let i = 0; i < startIdx; i++) {
-                              cells.push(<Box key={`e${i}`} sx={{ p: 1, minHeight: 80, bgcolor: "#fafafa" }} />);
+                              cells.push(
+                                <Box
+                                  key={`e${i}`}
+                                  sx={{ p: 1, minHeight: 80, bgcolor: "background.default", border: "1px solid", borderColor: "divider" }}
+                                />
+                              );
                             }
 
                             const vrForEmp =
@@ -6129,8 +6974,8 @@ React.useEffect(() => {
                               const day = calDays[d - 1];
                               const ymd = `${year}-${String(month).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
                               const vac = (calVacations || []).find((v) => {
-                                const st = String((v as any).date_depart || '').slice(0, 10);
-                                const en = String((v as any).date_end || '').slice(0, 10);
+                                const st = safeISO10((v as any).date_depart);
+                                const en = safeISO10((v as any).date_end);
                                 const stateLower = String((v as any).state || '').toLowerCase();
                                 const okState = stateLower === 'approved' || stateLower.includes('موافق');
                                 return okState && ymd >= st && ymd <= en;
@@ -6139,79 +6984,169 @@ React.useEffect(() => {
                               const vacLt = vacIdKey ? leaveTypeMap[vacIdKey] : undefined;
                               const vacCode = vac ? String(vacLt?.code || (vac as any).type || 'V').toUpperCase() : '';
 
+                              // Resolve approved leave code (prefer leaveRequestsCache, fallback to Vacation records)
+                              const leaveCode = (() => {
+                                const empId = Number(calEmp?.id_emp);
+                                const reqs = empId ? leaveRequestsCache[empId] : null;
+                                if (Array.isArray(reqs) && reqs.length) {
+                                  for (const leave of reqs) {
+                                    const status = String((leave as any).status || (leave as any).state || '').toLowerCase();
+                                    if (!status.includes('approved') && !status.includes('موافق') && !status.includes('accepted')) continue;
+                                    const st = (leave as any).startDate ?? (leave as any).DATE_START ?? (leave as any).date_depart;
+                                    const en = (leave as any).endDate ?? (leave as any).DATE_END ?? (leave as any).date_end;
+                                    if (!st || !en) continue;
+                                    const stYmd = safeISO10(st);
+                                    const enYmd = safeISO10(en);
+                                    if (ymd < stYmd || ymd > enYmd) continue;
+
+                                    const directCode = String((leave as any).code || (leave as any).leaveType || (leave as any).leaveTypeCode || '').toUpperCase();
+                                    if (directCode) return directCode;
+
+                                    const idCan = (leave as any).id_can ?? (leave as any).ID_CAN ?? (leave as any).typeCode;
+                                    if (idCan != null) {
+                                      const lt = leaveTypeMap[String(idCan)];
+                                      if (lt?.code) return String(lt.code).toUpperCase();
+                                    }
+
+                                    return 'V';
+                                  }
+                                }
+                                return vacCode || '';
+                              })();
+
                               const badge0 = codeBadge(day, schStartMin, schEndMin, calEmp?.id_emp);
-                              const badge = (vacCode && (badge0 === 'A' || badge0 === '')) ? vacCode : badge0;
+                              const present = !!day?.present;
+                              const isFri = dayjs(ymd).day() === 5;
+                              const isHol = holidaySet.has(ymd) || !!day?.isHoliday || badge0 === 'PH' || badge0 === 'PHF';
+
+                              const holidayBadge = isHol
+                                ? (badge0 === 'PH' || badge0 === 'PHF')
+                                    ? badge0
+                                    : present
+                                        ? 'PH'
+                                        : 'H'
+                                : '';
+
+                              const badge =
+                                (isFri || isHol)
+                                  ? (isHol ? holidayBadge : badge0)
+                                  : (leaveCode && (badge0 === 'A' || badge0 === 'P' || badge0 === ''))
+                                      ? leaveCode
+                                      : badge0;
                               const delta = roundedHoursWithSign(day?.deltaMin ?? null);
                               const leaveDesc = (day as any)?.leave_description || (day as any)?.leaveDescription || "";
 
                               const isLeave = ["AL", "SL", "EL", "ML", "UL", "HL", "BM", "XL", "B1", "B2"].includes(String(badge));
+                              
+                              // Get leave color from leaveTypeMap or stableColorFromCode (matching CalendarLogScreen.tsx)
+                              const getLeaveColor = (code: string) => {
+                                const c = code.toUpperCase();
+                                // Check if we have this code in leaveTypeMap by searching values
+                                const entry = Object.values(leaveTypeMap).find(e => e.code === c);
+                                if (entry?.color) return entry.color;
+                                return stableColorFromCode(c);
+                              };
 
-                              const bg = (() => {
-                                if (badge === "AL") return "#dcf5dc";
-                                if (badge === "SL") return "#e8d4f8";
-                                if (badge === "EL") return "#ffe4b5";
-                                if (badge === "ML") return "#ffc0e0";
-                                if (badge === "UL") return "#ffe0e0";
-                                if (badge === "HL") return "#e0f0ff";
-                                if (badge === "BM") return "#d3d3d3";
-                                if (badge === "XL") return "#f0f8d0";
-                                if (badge === "B1" || badge === "B2") return "#e6ddff";
-                                if (badge === "PHF") return "#e6ffe6";
-                                if (badge === "PH") return "#fff3cd";
-                                if (badge === "PT") return "#e0f7fa";
-                                if (badge === "PL") return "#ffebee";
-                                if (badge === "A") return "#fdecea";
-                                if (badge === "P") return "#eef7ff";
-                                if (vacCode && badge === vacCode) return "rgba(156, 136, 255, 0.20)";
-                                if (badge) return "#f5f5f5";
-                                return "#fafafa";
-                              })();
+                              // Backend-authoritative effective days (excludes Fridays + expanded holidays, except sick leave)
+                              const effectiveDays = vac ? Number((vac as any).effectiveDays ?? 0) : 0;
+
+                              const leaveAccent = isLeave ? getLeaveColor(badge) : (leaveCode ? getLeaveColor(leaveCode) : '');
+                              const vacAccent = vacCode ? getLeaveColor(vacCode) : '';
 
                               cells.push(
                                 <Box
                                   key={`d${d}`}
-                                  sx={{
-                                    p: 1,
-                                    minHeight: 80,
-                                    bgcolor: bg,
-                                    border: "1px solid #eee",
-                                    position: "relative",
+                                  sx={(theme) => {
+                                    const holidayBg = hexToRgba('#b7a27d', 0.22);
+                                    const fridayBg = 'rgba(0,0,0,0.06)';
+                                    const leaveBg = leaveAccent ? hexToRgba(leaveAccent, 0.16) : '';
+                                    const vacBg = vacAccent ? hexToRgba(vacAccent, 0.12) : '';
+                                    const bgColor =
+                                      isHol ? holidayBg :
+                                      (isFri && !present) ? fridayBg :
+                                      isLeave ? (leaveBg || theme.palette.action.hover) :
+                                      (vac ? (vacBg || theme.palette.action.hover) : theme.palette.background.default);
+
+                                    const crossOut = (isHol && badge === 'H') || (isFri && !present);
+
+                                    return {
+                                      p: 1,
+                                      minHeight: 80,
+                                      bgcolor: bgColor,
+                                      border: '1px solid',
+                                      borderColor: 'divider',
+                                      position: 'relative',
+                                      color: 'text.primary',
+                                      ...(isLeave || vac ? { borderLeft: `4px solid ${leaveAccent || vacAccent || theme.palette.divider}` } : {}),
+                                      ...(crossOut
+                                        ? {
+                                            '&:after': {
+                                              content: '""',
+                                              position: 'absolute',
+                                              left: 6,
+                                              right: 6,
+                                              top: '50%',
+                                              borderTop: `2px solid ${isHol ? '#b7a27d' : '#bdbdbd'}`,
+                                              transform: 'rotate(-18deg)',
+                                              transformOrigin: 'center',
+                                              opacity: 0.9,
+                                              pointerEvents: 'none',
+                                            },
+                                          }
+                                        : {}),
+                                    };
                                   }}
                                 >
                                   <Box display="flex" justifyContent="space-between">
-                                    <Typography variant="caption" sx={{ fontWeight: 600 }}>
+                                    <Typography variant="caption" sx={{ fontWeight: 700, color: 'text.primary' }}>
                                       {d}
                                     </Typography>
                                     <Typography
                                       variant="caption"
                                       sx={{
-                                        fontWeight: 600,
-                                        color: isLeave ? "primary.main" : "inherit",
+                                        fontWeight: 700,
+                                        color: badge === 'H' ? '#b7a27d' : 'text.primary',
                                       }}
                                     >
                                       {badge}
                                     </Typography>
                                   </Box>
 
-                                  {isLeave && leaveDesc ? (
-                                    <Typography
-                                      variant="caption"
-                                      sx={{
-                                        display: "block",
-                                        fontSize: "0.65rem",
-                                        color: "text.secondary",
-                                        mt: 0.5,
-                                        fontStyle: "italic",
-                                      }}
-                                    >
-                                      {leaveDesc}
-                                    </Typography>
-                                  ) : null}
+                                  {isLeave && (
+                                    <Box sx={{ mt: 0.5 }}>
+                                      {effectiveDays > 0 && (
+                                        <Typography
+                                          variant="caption"
+                                          sx={{
+                                            display: "block",
+                                            fontSize: "0.6rem",
+                                            color: 'text.secondary',
+                                            fontWeight: 500,
+                                          }}
+                                        >
+                                          {effectiveDays} working {effectiveDays === 1 ? 'day' : 'days'}
+                                        </Typography>
+                                      )}
+                                      {leaveDesc && (
+                                        <Typography
+                                          variant="caption"
+                                          sx={{
+                                            display: "block",
+                                            fontSize: "0.6rem",
+                                            color: "text.secondary",
+                                            fontStyle: "italic",
+                                          }}
+                                        >
+                                          {leaveDesc}
+                                        </Typography>
+                                      )}
+                                    </Box>
+                                  )}
 
-                                  {day?.entry && badge === "P" ? (
+                                  {day?.entry ? (
                                     <Typography variant="caption">
-                                      {String(day.entry).slice(11, 16)} →{" "}
-                                      {day?.exit ? String(day.exit).slice(11, 16) : "--:--"}
+                                      {timeHM(day.entry)} →{" "}
+                                      {day?.exit ? timeHM(day.exit) : "--:--"}
                                     </Typography>
                                   ) : null}
 
@@ -6235,7 +7170,13 @@ React.useEffect(() => {
                   </DialogActions>
                 </Dialog>
 
-                <Dialog open={sendDialogOpen} onClose={() => setSendDialogOpen(false)} fullWidth maxWidth="sm">
+                <Dialog
+                  open={sendDialogOpen}
+                  onClose={() => setSendDialogOpen(false)}
+                  fullWidth
+                  maxWidth="lg"
+                  PaperProps={{ sx: { width: 'min(1100px, 92vw)' } }}
+                >
                   <DialogTitle>{t("Send Payslips") || "Send Payslips"}</DialogTitle>
                   <DialogContent dividers>
                     <Typography variant="body2" sx={{ mb: 1 }}>
@@ -6288,7 +7229,13 @@ React.useEffect(() => {
                   </DialogActions>
                 </Dialog>
 
-                <Dialog open={rowEditOpen} onClose={() => setRowEditOpen(false)} fullWidth maxWidth="sm">
+                <Dialog
+                  open={rowEditOpen}
+                  onClose={() => setRowEditOpen(false)}
+                  fullWidth
+                  maxWidth="lg"
+                  PaperProps={{ sx: { width: 'min(1100px, 92vw)' } }}
+                >
                   <DialogTitle>
                     {t("Adjustments") || "Adjustments"} — {String(rowEdit?.name || rowEdit?.id_emp || "")}
                   </DialogTitle>
@@ -6296,7 +7243,16 @@ React.useEffect(() => {
                     <Typography variant="caption" color="text.secondary" sx={{ display: "block", mb: 1 }}>
                       {t("Autosaves on change") || "Autosaves on change"}
                     </Typography>
-                    <Box display="grid" gridTemplateColumns="repeat(2, 1fr)" gap={1.25}>
+                    <Box
+                      display="grid"
+                      gap={1.25}
+                      sx={{
+                        gridTemplateColumns: {
+                          xs: '1fr',
+                          sm: 'repeat(2, 1fr)',
+                        },
+                      }}
+                    >
                       <TextField
                         size="small"
                         type="number"
@@ -6311,6 +7267,7 @@ React.useEffect(() => {
                             queueAutoSave(rowEdit.id_emp);
                           }
                         }}
+                        fullWidth
                       />
                       <TextField
                         size="small"
@@ -6326,6 +7283,7 @@ React.useEffect(() => {
                             queueAutoSave(rowEdit.id_emp);
                           }
                         }}
+                        fullWidth
                       />
                       <TextField
                         size="small"
@@ -6341,6 +7299,7 @@ React.useEffect(() => {
                             queueAutoSave(rowEdit.id_emp);
                           }
                         }}
+                        fullWidth
                       />
                       <TextField
                         size="small"
@@ -6355,6 +7314,7 @@ React.useEffect(() => {
                             queueAutoSave(rowEdit.id_emp);
                           }
                         }}
+                        fullWidth
                       />
                       <TextField
                         size="small"
@@ -6370,6 +7330,7 @@ React.useEffect(() => {
                             queueAutoSave(rowEdit.id_emp);
                           }
                         }}
+                        fullWidth
                       />
                       <TextField
                         size="small"
@@ -6384,6 +7345,7 @@ React.useEffect(() => {
                             queueAutoSave(rowEdit.id_emp);
                           }
                         }}
+                        fullWidth
                       />
                       <TextField
                         size="small"
@@ -6399,6 +7361,7 @@ React.useEffect(() => {
                             queueAutoSave(rowEdit.id_emp);
                           }
                         }}
+                        fullWidth
                       />
                       <TextField
                         size="small"
@@ -6414,6 +7377,7 @@ React.useEffect(() => {
                             queueAutoSave(rowEdit.id_emp);
                           }
                         }}
+                        fullWidth
                       />
                       <TextField
                         size="small"
@@ -6429,6 +7393,7 @@ React.useEffect(() => {
                             queueAutoSave(rowEdit.id_emp);
                           }
                         }}
+                        fullWidth
                       />
                       <TextField
                         size="small"
@@ -6444,6 +7409,7 @@ React.useEffect(() => {
                             queueAutoSave(rowEdit.id_emp);
                           }
                         }}
+                        fullWidth
                       />
                     </Box>
                   </DialogContent>
@@ -6452,7 +7418,13 @@ React.useEffect(() => {
                   </DialogActions>
                 </Dialog>
 
-                <Dialog open={bdOpen} onClose={() => setBdOpen(false)} fullWidth maxWidth="sm">
+                <Dialog
+                  open={bdOpen}
+                  onClose={() => setBdOpen(false)}
+                  fullWidth
+                  maxWidth="md"
+                  PaperProps={{ sx: { width: 'min(900px, 92vw)' } }}
+                >
                   <DialogTitle>
                     {bdEmp
                       ? `${bdEmp.name} — Breakdown (${String(year)}-${String(month).padStart(2, "0")})`
@@ -6505,7 +7477,8 @@ React.useEffect(() => {
                     setActiveLoan(null);
                   }}
                   fullWidth
-                  maxWidth="xs"
+                  maxWidth="sm"
+                  PaperProps={{ sx: { width: 'min(650px, 92vw)' } }}
                 >
                   <DialogTitle>{t("Payoff loan") || "Payoff loan"}</DialogTitle>
                   <DialogContent>
@@ -6563,7 +7536,58 @@ React.useEffect(() => {
                   </DialogActions>
                 </Dialog>
 
-                <Dialog open={adjOpen} onClose={() => setAdjOpen(false)} fullWidth maxWidth="sm">
+                <Dialog
+                  open={adjDeleteOpen}
+                  onClose={() => {
+                    if (adjLoading) return;
+                    setAdjDeleteOpen(false);
+                    setAdjDeleteId(null);
+                  }}
+                  fullWidth
+                  maxWidth="xs"
+                >
+                  <DialogTitle>{t("Confirm") || "Confirm"}</DialogTitle>
+                  <DialogContent>
+                    <Typography>
+                      {t("Delete this reimbursement?") || "Delete this reimbursement?"}
+                    </Typography>
+                  </DialogContent>
+                  <DialogActions>
+                    <Button
+                      onClick={() => {
+                        setAdjDeleteOpen(false);
+                        setAdjDeleteId(null);
+                      }}
+                      disabled={adjLoading}
+                    >
+                      {t("common.cancel") || "Cancel"}
+                    </Button>
+                    <Button
+                      color="error"
+                      variant="contained"
+                      onClick={async () => {
+                        if (!adjDeleteId) {
+                          setAdjDeleteOpen(false);
+                          return;
+                        }
+                        await deleteAdjustment(adjDeleteId);
+                        setAdjDeleteOpen(false);
+                        setAdjDeleteId(null);
+                      }}
+                      disabled={adjLoading}
+                    >
+                      {t("Delete") || "Delete"}
+                    </Button>
+                  </DialogActions>
+                </Dialog>
+
+                <Dialog
+                  open={adjOpen}
+                  onClose={() => setAdjOpen(false)}
+                  fullWidth
+                  maxWidth="md"
+                  PaperProps={{ sx: { width: 'min(900px, 92vw)' } }}
+                >
                   <DialogTitle>{t("Adjustments") || "Adjustments"}</DialogTitle>
                   <DialogContent>
                     {adjLoading ? (
@@ -6580,40 +7604,72 @@ React.useEffect(() => {
                             </Typography>
                           )}
 
-                          {(adjRows || []).map((r, idx) => {
-                            const opt = adjTypeOptions.find((o) => o.value === r.type);
-                            const label = opt?.label || r.type;
-                            const amt = Number(r.amount || 0).toFixed(2);
-                            const dateStr = r.ts ? dayjs(r.ts).format("YYYY-MM-DD HH:mm") : "";
-                            return (
-                              <Box
-                                key={idx}
-                                display="flex"
-                                justifyContent="space-between"
-                                alignItems="flex-start"
-                                sx={{ py: 0.5, borderBottom: "1px dashed", borderColor: "divider" }}
-                              >
-                                <Box>
+                          {(() => {
+                            const isDeduction = (r: any) => {
+                              const dir = String(r?.direction || '').toUpperCase();
+                              const type = String(r?.type || '').toLowerCase();
+                              return dir === 'DEDUCT' || type === 'deduction';
+                            };
+
+                            const renderRow = (r: any, idx: number) => {
+                              const opt = adjTypeOptions.find((o) => o.value === r.type);
+                              const label = String(r.label || opt?.label || r.type || '').trim();
+                              const amt = Number(r.amount || 0).toFixed(2);
+                              const dateStr = r.ts ? dayjs(r.ts).format('YYYY-MM-DD HH:mm') : '';
+                              return (
+                                <Box
+                                  key={`${String(r.id ?? idx)}-${idx}`}
+                                  display="flex"
+                                  justifyContent="space-between"
+                                  alignItems="flex-start"
+                                  sx={{ py: 0.5, borderBottom: "1px dashed", borderColor: "divider" }}
+                                >
+                                  <Box>
+                                    <Typography variant="body2" sx={{ fontWeight: 600 }}>
+                                      {label}
+                                    </Typography>
+                                    {r.note ? (
+                                      <Typography variant="body2" color="text.secondary">
+                                        {r.note}
+                                      </Typography>
+                                    ) : null}
+                                    {dateStr ? (
+                                      <Typography variant="caption" color="text.secondary">
+                                        {dateStr}
+                                      </Typography>
+                                    ) : null}
+                                  </Box>
                                   <Typography variant="body2" sx={{ fontWeight: 600 }}>
-                                    {label}
+                                    {r.currency} {amt}
                                   </Typography>
-                                  {r.note ? (
-                                    <Typography variant="body2" color="text.secondary">
-                                      {r.note}
-                                    </Typography>
-                                  ) : null}
-                                  {dateStr ? (
-                                    <Typography variant="caption" color="text.secondary">
-                                      {dateStr}
-                                    </Typography>
-                                  ) : null}
                                 </Box>
-                                <Typography variant="body2" sx={{ fontWeight: 600 }}>
-                                  {r.currency} {amt}
-                                </Typography>
-                              </Box>
+                              );
+                            };
+
+                            const earnings = (adjRows || []).filter((r) => r && !isDeduction(r));
+                            const deductions = (adjRows || []).filter((r) => r && isDeduction(r));
+
+                            return (
+                              <>
+                                {earnings.length > 0 && (
+                                  <Box mb={1}>
+                                    <Typography variant="subtitle2" sx={{ fontWeight: 700, mb: 0.5 }}>
+                                      {t('EARNINGS') || 'EARNINGS'}
+                                    </Typography>
+                                    {earnings.map((r, idx) => renderRow(r, idx))}
+                                  </Box>
+                                )}
+                                {deductions.length > 0 && (
+                                  <Box>
+                                    <Typography variant="subtitle2" sx={{ fontWeight: 700, mb: 0.5 }}>
+                                      {t('DEDUCTIONS') || 'DEDUCTIONS'}
+                                    </Typography>
+                                    {deductions.map((r, idx) => renderRow(r, idx))}
+                                  </Box>
+                                )}
+                              </>
                             );
-                          })}
+                          })()}
 
                           {Object.keys(adjTypeTotals).length > 0 ? (
                             <Box
@@ -6646,7 +7702,17 @@ React.useEffect(() => {
 
                         <Divider sx={{ my: 1.5 }} />
 
-                        <Box display="grid" gridTemplateColumns="repeat(4, 1fr)" gap={1}>
+                        <Box
+                          display="grid"
+                          gap={1}
+                          sx={{
+                            gridTemplateColumns: {
+                              xs: '1fr',
+                              sm: 'repeat(2, 1fr)',
+                              md: 'repeat(4, 1fr)',
+                            },
+                          }}
+                        >
                           <TextField
                             select
                             size="small"
@@ -6654,12 +7720,21 @@ React.useEffect(() => {
                             value={adjForm.type}
                             onChange={(e) => {
                               const nextType = e.target.value;
+                              const opt = adjTypeOptions.find((o) => o.value === nextType);
                               setAdjForm((f) => ({
                                 ...f,
                                 type: nextType,
-                                currency: adjLydOnlyTypes.has(nextType) ? "LYD" : f.currency,
+                                label: nextType === 'custom' ? '' : String(opt?.label || nextType),
+                                direction: nextType === 'deduction' ? 'DEDUCT' : (nextType === 'custom' ? 'ADD' : 'ADD'),
+                                recurring: false,
+                                startYear: year,
+                                startMonth: month,
+                                endYear: '',
+                                endMonth: '',
+                                currency: adjUsdEligible ? f.currency : "LYD",
                               }));
                             }}
+                            fullWidth
                           >
                             {adjTypeOptions.map((opt) => (
                               <MenuItem key={opt.value} value={opt.value}>
@@ -6675,7 +7750,131 @@ React.useEffect(() => {
                             value={adjForm.amount}
                             onChange={(e) => setAdjForm((f) => ({ ...f, amount: e.target.value }))}
                             inputProps={{ step: "0.01" }}
+                            fullWidth
                           />
+
+                          {adjForm.type === 'custom' && (
+                            <TextField
+                              size="small"
+                              label={t("Label") || "Label"}
+                              value={adjForm.label}
+                              onChange={(e) => setAdjForm((f) => ({ ...f, label: e.target.value }))}
+                              placeholder={t("Example: Attendance Bonus") || "Example: Attendance Bonus"}
+                              fullWidth
+                            />
+                          )}
+
+                          {adjForm.type === 'custom' && (
+                            <TextField
+                              select
+                              size="small"
+                              label={t("Add / Deduct") || "Add / Deduct"}
+                              value={adjForm.direction}
+                              onChange={(e) =>
+                                setAdjForm((f) => ({
+                                  ...f,
+                                  direction: (String(e.target.value || '').toUpperCase() === 'DEDUCT' ? 'DEDUCT' : 'ADD') as 'ADD' | 'DEDUCT',
+                                }))
+                              }
+                              fullWidth
+                            >
+                              <MenuItem value="ADD">{t("Earnings (+)") || "Earnings (+)"}</MenuItem>
+                              <MenuItem value="DEDUCT">{t("Deductions (-)") || "Deductions (-)"}</MenuItem>
+                            </TextField>
+                          )}
+
+                          {adjForm.type === 'custom' && (
+                            <FormControlLabel
+                              sx={{ gridColumn: { xs: '1 / -1', md: '1 / -1' }, m: 0 }}
+                              control={
+                                <Checkbox
+                                  checked={!!adjForm.recurring}
+                                  onChange={(e) => {
+                                    const checked = !!e.target.checked;
+                                    setAdjForm((f) => ({
+                                      ...f,
+                                      recurring: checked,
+                                      startYear: checked ? Number(f.startYear || year) : Number(f.startYear || year),
+                                      startMonth: checked ? Number(f.startMonth || month) : Number(f.startMonth || month),
+                                      endYear: checked ? String(f.endYear || '') : '',
+                                      endMonth: checked ? String(f.endMonth || '') : '',
+                                    }));
+                                  }}
+                                />
+                              }
+                              label={t('Recurring (apply every month)') || 'Recurring (apply every month)'}
+                            />
+                          )}
+
+                          {adjForm.type === 'custom' && adjForm.recurring && (
+                            <TextField
+                              select
+                              size="small"
+                              label={t('Start Year') || 'Start Year'}
+                              value={adjForm.startYear}
+                              onChange={(e) => setAdjForm((f) => ({ ...f, startYear: Number(e.target.value) }))}
+                              fullWidth
+                            >
+                              {years.map((yy) => (
+                                <MenuItem key={yy} value={yy}>
+                                  {yy}
+                                </MenuItem>
+                              ))}
+                            </TextField>
+                          )}
+
+                          {adjForm.type === 'custom' && adjForm.recurring && (
+                            <TextField
+                              select
+                              size="small"
+                              label={t('Start Month') || 'Start Month'}
+                              value={adjForm.startMonth}
+                              onChange={(e) => setAdjForm((f) => ({ ...f, startMonth: Number(e.target.value) }))}
+                              fullWidth
+                            >
+                              {months.map((mm) => (
+                                <MenuItem key={mm} value={mm}>
+                                  {String(mm).padStart(2, '0')}
+                                </MenuItem>
+                              ))}
+                            </TextField>
+                          )}
+
+                          {adjForm.type === 'custom' && adjForm.recurring && (
+                            <TextField
+                              select
+                              size="small"
+                              label={t('End Year (optional)') || 'End Year (optional)'}
+                              value={adjForm.endYear}
+                              onChange={(e) => setAdjForm((f) => ({ ...f, endYear: String(e.target.value) }))}
+                              fullWidth
+                            >
+                              <MenuItem value="">—</MenuItem>
+                              {years.map((yy) => (
+                                <MenuItem key={yy} value={String(yy)}>
+                                  {yy}
+                                </MenuItem>
+                              ))}
+                            </TextField>
+                          )}
+
+                          {adjForm.type === 'custom' && adjForm.recurring && (
+                            <TextField
+                              select
+                              size="small"
+                              label={t('End Month (optional)') || 'End Month (optional)'}
+                              value={adjForm.endMonth}
+                              onChange={(e) => setAdjForm((f) => ({ ...f, endMonth: String(e.target.value) }))}
+                              fullWidth
+                            >
+                              <MenuItem value="">—</MenuItem>
+                              {months.map((mm) => (
+                                <MenuItem key={mm} value={String(mm)}>
+                                  {String(mm).padStart(2, '0')}
+                                </MenuItem>
+                              ))}
+                            </TextField>
+                          )}
 
                           <TextField
                             select
@@ -6683,9 +7882,10 @@ React.useEffect(() => {
                             label={t("Currency") || "Currency"}
                             value={adjForm.currency}
                             onChange={(e) => setAdjForm((f) => ({ ...f, currency: e.target.value }))}
-                            disabled={adjLydOnlyTypes.has(adjForm.type)}
+                            disabled={!adjUsdEligible}
+                            fullWidth
                           >
-                            {["LYD", "USD"].map((x) => (
+                            {(adjUsdEligible ? ["LYD", "USD"] : ["LYD"]).map((x) => (
                               <MenuItem key={x} value={x}>
                                 {x}
                               </MenuItem>
@@ -6697,6 +7897,7 @@ React.useEffect(() => {
                             label={t("Note") || "Note"}
                             value={adjForm.note}
                             onChange={(e) => setAdjForm((f) => ({ ...f, note: e.target.value }))}
+                            fullWidth
                           />
                         </Box>
 
@@ -6714,6 +7915,17 @@ React.useEffect(() => {
                     </Button>
                   </DialogActions>
                 </Dialog>
+
+                <Snackbar
+                  open={uiErrorOpen}
+                  autoHideDuration={6000}
+                  onClose={() => setUiErrorOpen(false)}
+                  anchorOrigin={{ vertical: 'bottom', horizontal: 'center' }}
+                >
+                  <Alert onClose={() => setUiErrorOpen(false)} severity="error" sx={{ width: '100%' }}>
+                    {uiErrorMessage}
+                  </Alert>
+                </Snackbar>
                 </Box>
                   );
                 }

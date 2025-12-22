@@ -322,6 +322,10 @@ export const EmployeeCard = <T extends MinimalEmployee>({
           <Avatar
             src={imgSrc}
             onError={() => setBroken(true)}
+            imgProps={{
+              crossOrigin: "anonymous",
+              referrerPolicy: "no-referrer",
+            }}
             sx={{
               width: 64,
               height: 64,
@@ -330,7 +334,9 @@ export const EmployeeCard = <T extends MinimalEmployee>({
               borderColor: "divider",
               bgcolor: "background.default",
             }}
-          />
+          >
+            {initials(e.NAME)}
+          </Avatar>
           <Box sx={{ minWidth: 0, flex: 1 }}>
             <Typography
               variant="h6"

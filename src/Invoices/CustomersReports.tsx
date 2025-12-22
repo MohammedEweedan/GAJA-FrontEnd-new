@@ -17,8 +17,9 @@ import {
   Autocomplete,
 } from "@mui/material";
 import axios from "../api";
-import { decodeClientToken, buildEncryptedClientPath } from "../utils/routeCrypto";
+import { decodeClientToken } from "../utils/routeCrypto";
 import { MaterialReactTable, type MRT_ColumnDef } from "material-react-table";
+import ExcelJS from "exceljs";
 
 import PrintInvoiceDialog from "../Invoices/ListCardInvoice/Gold Invoices/PrintInvoiceDialog";
 interface Client {
@@ -62,8 +63,8 @@ const CustomersReports = ({
   const mm = String(today.getMonth() + 1).padStart(2, "0");
   const dd = String(today.getDate()).padStart(2, "0");
   const currentDate = `${yyyy}-${mm}-${dd}`;
-  const [periodFrom, setPeriodFrom] = useState("");
-  const [periodTo, setPeriodTo] = useState("");
+  const [periodFrom, setPeriodFrom] = useState(`${yyyy}-01-01`);
+  const [periodTo, setPeriodTo] = useState(currentDate);
   const [detailsOpen, setDetailsOpen] = useState(false);
   const [detailsData, setDetailsData] = useState<any>(null);
   const [isChira, setIsChira] = useState<"all" | "yes" | "no">("all");
@@ -77,10 +78,80 @@ const CustomersReports = ({
 
   const apiIp = process.env.REACT_APP_API_IP;
   const API_BASEImage = "/images";
+  const apiUrlWatches = "/WOpurchases";
   const [imageUrls, setImageUrls] = useState<Record<string, string[]>>({});
   const [imageBlobUrls, setImageBlobUrls] = useState<Record<string, string[]>>(
     {}
   );
+  // Watch details (OriginalAchatWatches) keyed by invoice picint
+  const [watchDetailsMap, setWatchDetailsMap] = useState<Record<string, any>>(
+    {}
+  );
+
+  const tryWatchFallback = (
+    imgEl: HTMLImageElement,
+    typeSupplier?: string
+  ): boolean => {
+    const type = typeSupplier?.toLowerCase() || "";
+    if (!type.includes("watch")) return false;
+    try {
+      const originalSrc = imgEl.getAttribute("data-orig-src") || imgEl.src;
+      if (!originalSrc || !/\/images\//.test(originalSrc)) return false;
+      imgEl.setAttribute("data-orig-src", originalSrc);
+      const urlObj = new URL(originalSrc, window.location.origin);
+      const token = urlObj.searchParams.get("token");
+      const host = `${urlObj.protocol}//${urlObj.host}`;
+      const pathParts = urlObj.pathname.split("/");
+      const alreadyTried = imgEl.getAttribute("data-fallback-tried") || "";
+      if (
+        pathParts.length >= 4 &&
+        pathParts[1] === "images" &&
+        pathParts[2] !== "watch" &&
+        alreadyTried !== "watch"
+      ) {
+        const idPart = pathParts[2];
+        const filenamePart = pathParts.slice(3).join("/").split("?")[0];
+        const rewrittenPath = `/images/watch/${idPart}/${filenamePart}`;
+        const nextUrl = token
+          ? `${host}${rewrittenPath}?token=${encodeURIComponent(token)}`
+          : `${host}${rewrittenPath}`;
+        imgEl.setAttribute("data-fallback-tried", "watch");
+        imgEl.onerror = () => {
+          tryWatchFallback(imgEl, typeSupplier);
+        };
+        imgEl.src = nextUrl;
+        return true;
+      }
+      if (
+        pathParts.length >= 5 &&
+        pathParts[1] === "images" &&
+        pathParts[2] === "watch" &&
+        alreadyTried !== "static"
+      ) {
+        const idPart = pathParts[3];
+        const filenamePart = pathParts.slice(4).join("/").split("?")[0];
+        const staticUrl = `${host}/uploads/WatchPic/${idPart}/${filenamePart}`;
+        imgEl.setAttribute("data-fallback-tried", "static");
+        imgEl.onerror = null;
+        imgEl.src = staticUrl;
+        return true;
+      }
+    } catch {
+      return false;
+    }
+    return false;
+  };
+
+  const handleImageError = (
+    event: React.SyntheticEvent<HTMLImageElement>,
+    typeSupplier?: string
+  ) => {
+    const imgEl = event.currentTarget;
+    if (tryWatchFallback(imgEl, typeSupplier)) {
+      return;
+    }
+    imgEl.onerror = null;
+  };
   let ps: string | null = null;
   const userStr = localStorage.getItem("user");
   if (userStr) {
@@ -163,85 +234,92 @@ const CustomersReports = ({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [customers]);
 
-  // Fallback preselection: try name/phone if id was not provided or not matched
-  useEffect(() => {
-    if (typeof focusCustomerId === "number") return; // explicit id wins
-    if (selectedCustomer && selectedCustomer.id_client) return; // already selected
-    try {
-      const hintName = localStorage.getItem("customerFocusName") || "";
-      const hintPhone = localStorage.getItem("customerFocusPhone") || "";
-      if (!customers || customers.length === 0) return;
-      let match: Client | null = null;
-      if (hintPhone) {
-        match =
-          customers.find((c) => String(c.tel_client) === String(hintPhone)) ||
-          null;
-      }
-      if (!match && hintName) {
-        match =
-          customers.find((c) => String(c.client_name) === String(hintName)) ||
-          null;
-      }
-      if (match) setSelectedCustomer(match);
-    } catch {}
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [customers, selectedCustomer, focusCustomerId]);
+  // Fetch all images for a given picint (or id_achat)
+  const fetchImages = async (picint: string, supplierType?: string) => {
+    const token = localStorage.getItem("token");
+    if (!picint) return;
+    if (imageUrls[picint]) return;
 
-  // When user changes the selected customer from the dropdown, navigate to that customer's profile route
-  useEffect(() => {
-    if (!selectedCustomer || !selectedCustomer.id_client) return;
+    const numericPicint = Number(picint);
+    const typeHint = supplierType?.toLowerCase() || "";
+    let typed: "watch" | "diamond" | "gold" | undefined;
+    if (typeHint.includes("watch")) typed = "watch";
+    else if (typeHint.includes("diamond")) typed = "diamond";
+    else if (typeHint.includes("gold")) typed = "gold";
+    const isWatchLike = !typed && !isNaN(numericPicint) && numericPicint >= 500000;
+
     try {
-      const newId = Number(selectedCustomer.id_client);
-      if (!newId || Number.isNaN(newId)) return;
-      // Determine currently focused id from either prop, /c/<token>, or localStorage
-      let currentId: number | null = null;
-      if (typeof focusCustomerId === "number") currentId = Number(focusCustomerId);
-      else {
-        const path = typeof window !== "undefined" ? window.location.pathname : "";
-        if (path.startsWith("/c/")) {
-          const token = path.slice(3);
-          const id = decodeClientToken(token);
-          if (id) currentId = Number(id);
-        } else {
-          try {
-            const raw = localStorage.getItem("customerFocusId");
-            if (raw !== null && raw !== "") currentId = Number(raw);
-          } catch {}
+      const endpoints =
+        typed || isWatchLike
+          ? [
+            `${API_BASEImage}/list/${typed || "watch"}/${picint}`,
+            `${API_BASEImage}/list/${picint}`,
+          ]
+          : [`${API_BASEImage}/list/${picint}`];
+
+      for (const endpoint of endpoints) {
+        try {
+          const res = await axios.get(endpoint, {
+            headers: { Authorization: `Bearer ${token}` },
+          });
+
+          if (Array.isArray(res.data)) {
+            const normalized = res.data
+              .map((u: string) => {
+                if (typeof u !== "string") return "";
+                let out = u;
+                if (out.includes("system.gaja.ly")) {
+                  try {
+                    const hostIdx = out.indexOf("system.gaja.ly") + "system.gaja.ly".length;
+                    const trailing = out.substring(hostIdx);
+                    out = `https://system.gaja.ly${trailing}`;
+                  } catch {
+                    /* ignore */
+                  }
+                }
+                if (window?.location?.protocol === "https:" && out.startsWith("http://")) {
+                  try {
+                    const after = out.substring("http://".length);
+                    out = "https://" + after;
+                  } catch {
+                    /* ignore */
+                  }
+                }
+                const needsWatchRewrite = (typed || (isWatchLike ? "watch" : undefined)) === "watch";
+                if (needsWatchRewrite) {
+                  try {
+                    const obj = new URL(out, window.location.origin);
+                    const parts = obj.pathname.split("/");
+                    if (parts.length >= 4 && parts[1] === "images" && parts[2] !== "watch") {
+                      obj.pathname = ["", "images", "watch", parts[2], ...parts.slice(3)].join("/");
+                      out = obj.toString();
+                    }
+                  } catch {
+                    /* ignore */
+                  }
+                }
+                if (token) {
+                  try {
+                    const urlObj = new URL(out, window.location.origin);
+                    urlObj.searchParams.delete("token");
+                    urlObj.searchParams.append("token", token);
+                    out = urlObj.toString();
+                  } catch {
+                    /* ignore */
+                  }
+                }
+                return out;
+              })
+              .filter(Boolean);
+            setImageUrls((prev) => ({ ...prev, [picint]: normalized }));
+            return;
+          }
+        } catch {
+          /* try next */
         }
       }
-      if (currentId === newId) return; // already on this customer
-      // Persist hints and navigate to dynamic encrypted path
-      try {
-        localStorage.setItem("customerFocusId", String(newId));
-        if (selectedCustomer.client_name)
-          localStorage.setItem("customerFocusName", String(selectedCustomer.client_name));
-        if (selectedCustomer.tel_client)
-          localStorage.setItem("customerFocusPhone", String(selectedCustomer.tel_client));
-      } catch {}
-      const path = buildEncryptedClientPath(newId);
-      if (typeof window !== "undefined") {
-        try {
-          window.location.assign(path);
-          return;
-        } catch {}
-      }
-    } catch {}
-  }, [selectedCustomer, focusCustomerId]);
 
-  // Fetch all images for a given picint (or id_achat)
-  const fetchImages = async (picint: string) => {
-    const token = localStorage.getItem("token");
-
-    try {
-      const res = await axios.get(`${API_BASEImage}/list/${picint}`, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-
-      if (Array.isArray(res.data)) {
-        setImageUrls((prev) => ({ ...prev, [picint]: res.data }));
-      } else {
-        setImageUrls((prev) => ({ ...prev, [picint]: [] }));
-      }
+      setImageUrls((prev) => ({ ...prev, [picint]: [] }));
     } catch (err) {
       setImageUrls((prev) => ({ ...prev, [picint]: [] }));
     }
@@ -249,35 +327,27 @@ const CustomersReports = ({
 
   // Helper to fetch image as blob and store object URL
   const fetchImageBlobs = async (picint: number, urls: string[]) => {
-    const token = localStorage.getItem("token");
     const blobUrls: string[] = [];
     for (const url of urls) {
+      const cleanedUrl = (() => {
+        if (/^https?:\/\//i.test(url)) return url;
+        const normalized = url.replace(/^\/+/, "");
+        return `${API_BASEImage}/${normalized}`;
+      })();
       try {
-        const imgUrl = url.startsWith("http") ? url : `${API_BASEImage}/${url}`;
-        console.log(
-          "[fetchImageBlobs] Fetching blob for picint",
-          picint,
-          "url:",
-          imgUrl
-        ); // Debug log
-        const res = await axios.get(imgUrl, {
-          headers: { Authorization: `Bearer ${token}` },
-          responseType: "blob",
-        });
-        const blobUrl = URL.createObjectURL(res.data);
+        console.log("[fetchImageBlobs] Fetching blob for picint", picint, "url:", cleanedUrl);
+        const resp = await fetch(cleanedUrl, { method: "GET" });
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const blob = await resp.blob();
+        const blobUrl = URL.createObjectURL(blob);
         blobUrls.push(blobUrl);
       } catch (err) {
-        console.error(
-          "[fetchImageBlobs] Error fetching blob for picint",
-          picint,
-          "url:",
-          url,
-          err
-        ); // Debug log
+        console.error("[fetchImageBlobs] Error fetching blob for picint", picint, "url:", cleanedUrl, err);
       }
     }
     setImageBlobUrls((prev) => ({ ...prev, [picint]: blobUrls }));
-    console.log("[fetchImageBlobs] Set blob URLs for picint", picint, blobUrls); // Debug log
+    console.log("[fetchImageBlobs] Set blob URLs for picint", picint, blobUrls);
+    return blobUrls;
   };
 
   // Fetch blobs for protected images when imageUrls changes
@@ -453,7 +523,6 @@ const CustomersReports = ({
     isWholeSale,
     selectedCustomer,
     currency,
-    fetchRevenueData,
   ]);
 
   // Defensive: ensure data is always an array
@@ -484,6 +553,57 @@ const CustomersReports = ({
     return value;
   };
 
+  // Fetch watch details (OriginalAchatWatches) for watch invoices using invoice picint
+  useEffect(() => {
+    const fetchWatchDetails = async () => {
+      const token = localStorage.getItem("token");
+      if (!token) return;
+
+      // Only consider invoices where supplier type is watch
+      const watchRows = (safeData || []).filter((row: any) => {
+        const t = String(
+          row?.ACHATs?.[0]?.Fournisseur?.TYPE_SUPPLIER || ""
+        ).toLowerCase();
+        return t.includes("watch");
+      });
+
+      const ids = Array.from(
+        new Set(
+          watchRows
+            .map((row: any) => row.picint)
+            .filter(
+              (id: any) => id && watchDetailsMap[String(id)] === undefined
+            )
+        )
+      );
+      if (ids.length === 0) return;
+
+      const next: Record<string, any> = {};
+      await Promise.all(
+        ids.map(async (id: number) => {
+          try {
+            const res = await axios.get(`${apiUrlWatches}/getitem/${id}`, {
+              headers: { Authorization: `Bearer ${token}` },
+            });
+            next[String(id)] = Array.isArray(res.data)
+              ? res.data[0]
+              : res.data;
+          } catch {
+            next[String(id)] = null;
+          }
+        })
+      );
+      if (Object.keys(next).length > 0) {
+        setWatchDetailsMap((prev) => ({ ...prev, ...next }));
+      }
+    };
+
+    if (safeData && safeData.length > 0) {
+      fetchWatchDetails();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [safeData, watchDetailsMap]);
+
   // --- Merge rows by num_fact and aggregate product details ---
   function mergeRowsByInvoice(data: any[]) {
     const invoiceMap = new Map<string, any>();
@@ -497,15 +617,63 @@ const CustomersReports = ({
       const achats: any[] = row.ACHATs || [];
 
       achats.forEach((achat: any) => {
-        const design = achat.Design_art || "";
+        const typeSupplier: string = achat.Fournisseur?.TYPE_SUPPLIER || "";
+        const typeLower = typeSupplier.toLowerCase();
+
+        // For watch items: prefer model from OriginalAchatWatches (via invoice picint),
+        // then DistributionPurchase/OriginalAchatWatch, then ACHAT.Model/model.
+        // For non-watch items keep Design_art/design.
+        const invoicePicint = row.picint;
+        const watchDetails =
+          (invoicePicint !== undefined && invoicePicint !== null
+            ? watchDetailsMap[String(invoicePicint)]
+            : undefined) || undefined;
+
+        let watch: any = undefined;
+        const dp: any = (achat as any).DistributionPurchase;
+        if (Array.isArray(dp) && dp.length > 0 && typeof dp[0] === "object") {
+          watch = dp[0]?.OriginalAchatWatch;
+        } else if (dp && typeof dp === "object") {
+          watch = dp?.OriginalAchatWatch;
+        }
+        if (!watch && (achat as any).OriginalAchatWatch) {
+          watch = (achat as any).OriginalAchatWatch;
+        }
+
+        let design: string;
+        if (typeLower.includes("watch")) {
+          const modelVal: string =
+            (watchDetails?.model as string | undefined) ||
+            (watchDetails?.Model as string | undefined) ||
+            (watch?.model as string | undefined) ||
+            (watch?.Model as string | undefined) ||
+            (achat.Model as string | undefined) ||
+            (achat.model as string | undefined) ||
+            "";
+          const serialVal: string =
+            (watchDetails?.serial_number as string | undefined) ||
+            (watch?.serial_number as string | undefined) ||
+            (achat.serial_number as string | undefined) ||
+            "";
+
+          design = serialVal
+            ? `${modelVal} | SN: ${serialVal}`.trim()
+            : (modelVal || "");
+        } else {
+          design =
+            (achat.Design_art as string | undefined) ||
+            (achat.design as string | undefined) ||
+            "";
+        }
+
         const code = achat.id_fact || "";
-        const typeSupplier = achat.Fournisseur?.TYPE_SUPPLIER || "";
         let weight = "";
-        if (typeSupplier.toLowerCase().includes("gold")) {
+        if (typeLower.includes("gold")) {
           weight = achat.qty?.toString() || "";
         }
-        // Use id_fact as picint for image fetching
-        const picint = row.picint || "";
+        // Prefer achat.picint/id_achat, fall back to invoice-level picint
+        const picint =
+          achat.picint || achat.id_achat || row.picint || "";
 
         const IS_GIFT = row.IS_GIFT || "";
         invoiceMap.get(numFact)._productDetails.push({
@@ -564,12 +732,24 @@ const CustomersReports = ({
   useEffect(() => {
     const picints: Set<number> = new Set();
     data.forEach((row: any) => {
+      const supplierType = row?.ACHATs?.[0]?.Fournisseur?.TYPE_SUPPLIER;
       if (row.picint && !imageUrls[row.picint]) {
         picints.add(row.picint);
       }
+      if (row.ACHATs) {
+        row.ACHATs.forEach((achat: any) => {
+          const p = achat?.picint || achat?.id_achat;
+          if (p && !imageUrls[p]) {
+            fetchImages(String(p), achat?.Fournisseur?.TYPE_SUPPLIER || supplierType);
+          }
+        });
+      }
     });
 
-    Array.from(picints).forEach((picint) => fetchImages(String(picint)));
+    Array.from(picints).forEach((picint) => {
+      const supplierType = data.find((row: any) => row.picint === picint)?.ACHATs?.[0]?.Fournisseur?.TYPE_SUPPLIER;
+      fetchImages(String(picint), supplierType);
+    });
     // eslint-disable-next-line
   }, [sortedData]);
 
@@ -581,12 +761,15 @@ const CustomersReports = ({
         row._productDetails.forEach((d: any) => {
           const picint = d.picint;
           if (picint && !imageUrls[picint]) {
-            allPicints.add(picint);
+            allPicints.add(`${picint}:::${d.typeSupplier || ""}`);
           }
         });
       }
     });
-    Array.from(allPicints).forEach((picint) => fetchImages(picint));
+    Array.from(allPicints).forEach((combo) => {
+      const [picint, typeSupplier] = combo.split(":::");
+      fetchImages(picint, typeSupplier || undefined);
+    });
     // eslint-disable-next-line
   }, [sortedData, imageUrls]);
 
@@ -630,258 +813,272 @@ const CustomersReports = ({
     };
   }
 
-  // --- Export Table to PDF (via print dialog) with all data, details, and images ---
-  async function exportTableToPdf() {
-    // Convert all product images to base64 for export
-    async function blobUrlToBase64(blobUrl: string): Promise<string> {
-      return new Promise((resolve, reject) => {
-        fetch(blobUrl)
-          .then((res) => res.blob())
-          .then((blob) => {
-            const reader = new FileReader();
-            reader.onloadend = () => resolve(reader.result as string);
-            reader.onerror = reject;
-            reader.readAsDataURL(blob);
-          })
-          .catch(reject);
+  // --- Export Table to Excel with embedded images ---
+  async function exportTableToExcel() {
+    try {
+      if (!rowsWithBalance.length) {
+        console.warn("No data to export");
+        return;
+      }
+
+      const workbook = new ExcelJS.Workbook();
+      workbook.creator = "CustomersReports";
+      workbook.created = new Date();
+      const sheet = workbook.addWorksheet("Customer Statement");
+      const imageColumnKeys = ["img1", "img2", "img3", "img4"];
+
+      sheet.columns = [
+        { header: "Type", key: "type", width: 16 },
+        { header: "Date", key: "date", width: 16 },
+        { header: "Reference", key: "reference", width: 18 },
+        { header: "Point of Sale", key: "pos", width: 18 },
+        { header: "Amounts", key: "amounts", width: 40 },
+        { header: "Balance (LYD)", key: "balanceLyd", width: 20 },
+        { header: "Balance (USD)", key: "balanceUsd", width: 20 },
+        { header: "Balance (EUR)", key: "balanceEur", width: 20 },
+        { header: "Description / Details", key: "details", width: 45 },
+        ...imageColumnKeys.map((key, index) => ({
+          header: `Image ${index + 1}`,
+          key,
+          width: 18,
+        })),
+      ];
+
+      const firstImageColumnIndex = sheet.columns.length - imageColumnKeys.length + 1;
+
+      sheet.getRow(1).eachCell((cell: any) => {
+        cell.font = { bold: true, color: { argb: "FFFFFFFF" } };
+        cell.fill = {
+          type: "pattern",
+          pattern: "solid",
+          fgColor: { argb: "FF1976D2" },
+        };
+        cell.alignment = { horizontal: "center", vertical: "middle", wrapText: true };
       });
-    }
-    // Build a map of picint to base64 image data URLs
-    const picintToBase64: Record<string, string[]> = {};
-    for (const [picint, urls] of Object.entries(imageBlobUrls)) {
-      picintToBase64[picint] = [];
-      for (const url of urls) {
-        try {
-          const base64 = await blobUrlToBase64(url);
-          picintToBase64[picint].push(base64);
-        } catch {
-          // skip if error
-        }
-      }
-    }
-    // Logo path (use your actual logo path or a public URL)
-    const logoUrl = "/logo.png";
-    // Build HTML content
-    let html = `
-        <html>
-        <head>
-            <title>Customer Statement Report</title>
-            <style>
-                body { font-family: 'Segoe UI', Arial, sans-serif; background: #f8f9fa; color: #222; margin: 0; padding: 0; }
-                .export-header { display: flex; align-items: center; gap: 20px; background: #fff; padding: 24px 32px 12px 32px; border-bottom: 2px solid #1976d2; }
-                .export-logo { height: 60px; }
-                .export-title { font-size: 2.2rem; font-weight: 700; color: #1976d2; letter-spacing: 1px; }
-                .export-summary { margin: 24px 32px 0 32px; font-size: 1.1rem; color: #333; }
-                .export-table { width: 98%; margin: 24px auto; border-collapse: collapse; background: #fff; box-shadow: 0 2px 12px #0001; border-radius: 8px; overflow: hidden; }
-                .export-table th, .export-table td { border: 1px solid #e0e0e0; padding: 10px 14px; font-size: 1rem; vertical-align: top; }
-                .export-table th { background: #1976d2; color: #fff; font-weight: 600; }
-                .export-table tr:nth-child(even) { background: #f4f8fb; }
-                .export-table tr:hover { background: #e3f2fd; }
-                .export-footer { margin: 32px auto 0 auto; text-align: center; color: #888; font-size: 1rem; }
-                .export-img-row { display: flex; flex-direction: row; gap: 6px; overflow-x: auto; }
-                .export-img-row img { width: 60px; height: 60px; object-fit: cover; border-radius: 4px; border: 1px solid #eee; }
-                .export-product-table { width: 100%; border-collapse: collapse; margin-bottom: 8px; }
-                .export-product-table th, .export-product-table td { border: 1px solid #e0e0e0; padding: 4px 8px; font-size: 0.95rem; }
-                .export-product-table th { background: #e3f2fd; color: #1976d2; font-weight: 600; }
-                .export-product-label { font-weight: 600; color: #1976d2; margin-bottom: 2px; display: block; }
-            </style>
-        </head>
-        <body>
-            <div class="export-header">
-                <img src="${logoUrl}" class="export-logo" alt="Logo" />
-                <span class="export-title">Customer Statement Report</span>
-            </div>
-            <div class="export-summary">
-                <b>Customer:</b> ${selectedCustomer ? selectedCustomer.client_name + (selectedCustomer.tel_client ? " (" + selectedCustomer.tel_client + ")" : "") : "All"}<br/>
-                <b>Period:</b> ${periodFrom} to ${periodTo}<br/>
-                <b>Type:</b> ${MODEL_LABELS[type]}
-            </div>
-            <table class="export-table">
-                <thead>
-                    <tr>
-                        <th>Type</th>
-                        <th>Date</th>
-                        <th>Reference</th>
-                        <th>Point of Sale</th>
-                    
-                        
-                        <th>Amounts</th>
-                        <th>Balance</th>
-                        <th>Balance (USD)</th>
-                        <th>Balance (EUR)</th>
-                        <th>Description / Details</th>
-                        <th>Images</th>
-                    </tr>
-                </thead>
-                <tbody>
-        `;
-    rowsWithBalance.forEach((row: any) => {
-      // Type, Date, Ref, POS
-      let type =
-        row.statementType === "debit"
-          ? "Invoice"
-          : row.statementType === "credit"
-            ? "Revenue"
-            : row.type || "";
-      if (row.id === "opening-balance") type = "Opening Balance";
-      const date = row.date || "";
-      const ref = row.num_fact || row.id_acc_cli || "";
-      const psVal = row.ps || "";
-      // Customer
 
-      let debitAcc = "";
-      if (row.DebitAccount) {
-        debitAcc = `<div><b>Account:</b> ${row.DebitAccount.Acc_No || ""}</div><div><b>Name:</b> ${row.DebitAccount.Name_M || ""}</div>`;
-      }
-      // Credit Account
-      let creditAcc = "";
-      if (row.CreditAccount) {
-        creditAcc = `<div><b>Account:</b> ${row.CreditAccount.Acc_No || ""}</div><div><b>Name:</b> ${row.CreditAccount.Name_M || ""}</div>`;
-      }
-      // Amounts
-      let amounts = "";
-      if (row.id === "opening-balance") {
-        amounts = "";
-      } else if (row.statementType === "debit") {
-        const totalRemiseFinal = row.total_remise_final ?? "";
-        const amountCurrency = row.amount_currency ?? "";
-        const amountLyd = row.amount_lyd ?? "";
-        const amountEur = row.amount_EUR ?? "";
-        const amountCurrencyLyd = row.amount_currency_LYD ?? "";
-        const amountEurLyd = row.amount_EUR_LYD ?? "";
-        const remise = row.remise ?? 0;
-        const remise_per = row.remise_per ?? 0;
-        let savedTotal = totalRemiseFinal;
-        if (remise > 0) {
-          savedTotal = Number(totalRemiseFinal) - Number(remise);
-        } else if (remise_per > 0) {
-          savedTotal =
-            Number(totalRemiseFinal) -
-            (Number(totalRemiseFinal) * Number(remise_per)) / 100;
-        }
-        amounts += `<div><b>Total Invoice:</b> ${row?.ACHATs?.[0]?.Fournisseur?.TYPE_SUPPLIER?.toLowerCase().includes("gold") ? formatNumber(totalRemiseFinal) + " LYD" : formatNumber(totalRemiseFinal) + " USD"}</div>`;
-        if (remise > 0) {
-          amounts += `<div><b>Discount Value:</b> <span style='color:#d32f2f;'>${formatNumber(remise)}</span></div>`;
-        }
-        if (remise_per > 0) {
-          amounts += `<div><b>Discount %:</b> <span style='color:#d32f2f;'>${formatNumber(remise_per)}</span></div>`;
-        }
-        if (remise > 0 || remise_per > 0) {
-          amounts += `<div><b>Saved Total:</b> ${row?.ACHATs?.[0]?.Fournisseur?.TYPE_SUPPLIER?.toLowerCase().includes("gold") ? formatNumber(savedTotal) + " LYD" : formatNumber(savedTotal) + " USD"}</div>`;
-        }
-        if (amountLyd !== 0) {
-          amounts += `<div><b>LYD paid:</b> ${formatNumber(amountLyd)}</div>`;
-        }
-        if (amountCurrency !== 0) {
-          amounts += `<div><b>USD paid:</b> ${formatNumber(amountCurrency)}`;
-          if (amountCurrencyLyd !== 0) {
-            amounts += ` <span style='color:#888;'>Equi. in LYD:</span> ${formatNumber(amountCurrencyLyd)}`;
+      const isTruthy = (value: any) =>
+        value === true || value === 1 || value === "1" || value === "true";
+
+      const buildAmountsBlock = (row: any) => {
+        if (row.id === "opening-balance") return "";
+        const chunks: string[] = [];
+        if (row.statementType === "debit") {
+          const totalRemiseFinal = row.total_remise_final ?? "";
+          const amountCurrency = row.amount_currency ?? "";
+          const amountLyd = row.amount_lyd ?? "";
+          const amountEur = row.amount_EUR ?? "";
+          const amountCurrencyLyd = row.amount_currency_LYD ?? "";
+          const amountEurLyd = row.amount_EUR_LYD ?? "";
+          const remise = row.remise ?? 0;
+          const remise_per = row.remise_per ?? 0;
+          let savedTotal = totalRemiseFinal;
+          if (remise > 0) savedTotal = Number(totalRemiseFinal) - Number(remise);
+          else if (remise_per > 0)
+            savedTotal =
+              Number(totalRemiseFinal) -
+              (Number(totalRemiseFinal) * Number(remise_per)) / 100;
+
+          if (totalRemiseFinal !== 0) {
+            const isGold = row?.ACHATs?.[0]?.Fournisseur?.TYPE_SUPPLIER?.toLowerCase().includes("gold");
+            chunks.push(
+              `Total Invoice: ${formatNumber(totalRemiseFinal)} ${isGold ? "LYD" : "USD"}`
+            );
           }
-          amounts += `</div>`;
-        }
-        if (amountEur !== 0) {
-          amounts += `<div><b>EUR Paid:</b> ${formatNumber(amountEur)}`;
-          if (amountEurLyd !== 0) {
-            amounts += ` <span style='color:#888;'>Equi. in LYD:</span> ${formatNumber(amountEurLyd)}`;
+          if (remise > 0) {
+            chunks.push(`Discount Value: ${formatNumber(remise)}`);
           }
-          amounts += `</div>`;
+          if (remise_per > 0) {
+            chunks.push(`Discount %: ${formatNumber(remise_per)}`);
+          }
+          if (remise > 0 || remise_per > 0) {
+            const isGold = row?.ACHATs?.[0]?.Fournisseur?.TYPE_SUPPLIER?.toLowerCase().includes("gold");
+            chunks.push(
+              `Saved Total: ${formatNumber(savedTotal)} ${isGold ? "LYD" : "USD"}`
+            );
+          }
+          if (amountLyd !== 0) chunks.push(`LYD Paid: ${formatNumber(amountLyd)}`);
+          if (amountCurrency !== 0) {
+            let line = `USD Paid: ${formatNumber(amountCurrency)}`;
+            if (amountCurrencyLyd !== 0) {
+              line += ` (Equiv. LYD: ${formatNumber(amountCurrencyLyd)})`;
+            }
+            chunks.push(line);
+          }
+          if (amountEur !== 0) {
+            let line = `EUR Paid: ${formatNumber(amountEur)}`;
+            if (amountEurLyd !== 0) {
+              line += ` (Equiv. LYD: ${formatNumber(amountEurLyd)})`;
+            }
+            chunks.push(line);
+          }
+        } else if (row.statementType === "credit") {
+          const montantCurrency = row.montant_currency ?? "";
+          const montant = row.montant ?? "";
+          if (montantCurrency !== 0) {
+            chunks.push(`Amount: ${formatNumber(montantCurrency)} ${row.currency || ""}`);
+          }
+          if (montant !== 0) {
+            chunks.push(`Amount (LYD): ${formatNumber(montant)} LYD`);
+          }
         }
-      } else if (row.statementType === "credit") {
-        const montantCurrency = row.montant_currency ?? "";
-        const montant = row.montant ?? "";
-        amounts += `<div><b>Amount USD:</b> ${formatNumber(montantCurrency)}</div>`;
-        amounts += `<div><b>Amount (LYD):</b> ${formatNumber(montant)} LYD</div>`;
-      }
-      // Balance
-      let balance = `<span style='font-weight:bold;color:#1976d2;'>${formatNumber(row.balance)}</span>`;
-      // Description / Details
-      let detailsHtml = "";
-      if (row.id === "opening-balance") {
-        detailsHtml = '<span style="font-weight:600">Opening Balance</span>';
-      } else if (row.statementType === "debit") {
-        if (row._productDetails && row._productDetails.length > 0) {
-          detailsHtml = `<table class='export-product-table'><thead><tr><th>Design</th><th>Code</th><th>Type</th><th>Gift</th></tr></thead><tbody>`;
-          row._productDetails.forEach((d: any) => {
-            detailsHtml += `<tr><td>${d.design}</td><td>${d.code}</td><td>${d.typeSupplier}</td><td>${d.IS_GIFT ? `<span title='Gift' style='color:orangered;font-weight:bold;'>&#127873; Gift</span>` : ""}</td></tr>`;
-          });
-          detailsHtml += `</tbody></table>`;
-        }
-      } else {
-        detailsHtml = `<div><b>Revenue ID:</b> ${row.id_acc_cli}</div><div><b>Comment:</b> ${row.comment}</div><div><b>Currency:</b> ${row.currency}</div>`;
-      }
-      // Images
-      let imagesHtml = "";
-      if (row.id === "opening-balance") {
-        imagesHtml = '<span style="font-weight:600">Opening Balance</span>';
-      } else if (row.statementType === "debit") {
-        if (row._productDetails && row._productDetails.length > 0) {
-          imagesHtml = row._productDetails
-            .map((d: any, idx: number) => {
-              const picint = d.picint;
-              const urls =
-                picint && picintToBase64[picint] ? picintToBase64[picint] : [];
-              if (urls.length > 0) {
-                return `${""}<div class='export-img-row'>${urls.map((url: string) => `<img src='${url}' alt='Product' />`).join("")}</div>`;
-              } else {
-                return `${""}<span style='color:#aaa;'>No Image</span>`;
-              }
+        return chunks.join("\n");
+      };
+
+      const buildDetailsBlock = (row: any) => {
+        if (row.id === "opening-balance") return "Opening Balance";
+        if (row.statementType === "debit") {
+          if (!row._productDetails || row._productDetails.length === 0) return "";
+          return row._productDetails
+            .map((d: any) => {
+              const giftMark = d.IS_GIFT ? " (Gift)" : "";
+              return `${d.code || ""} ${d.design || ""} (${d.typeSupplier || ""})${giftMark}`.trim();
             })
-            .join("<br/>");
+            .join("\n");
         }
-      } else {
-        // imagesHtml = `<div><b>Revenue ID:</b> ${row.id_acc_cli}</div><div><b>Comment:</b> ${row.comment}</div><div><b>Currency:</b> ${row.currency}</div>`;
-      }
-      html += `
-                <tr>
-                    <td>${type}</td>
-                    <td>${date}</td>
-                    <td>${ref}</td>
-                    <td>${psVal}</td>
-                   
-                   
-                    <td>${amounts}</td>
-                    <td>${formatNumber(row.balance_lyd)} LYD</td>
-                    <td>${formatNumber(row.balance_usd)} USD</td>
-                    <td>${formatNumber(row.balance_eur)} EUR</td>
-                    <td>${detailsHtml}</td>
-                    <td>${imagesHtml}</td>
-                </tr>
-            `;
-    });
-    // Helper to get color style for positive values
-    function getColorStyle(value: number) {
-      return value > 0 ? "color:#d32f2f;font-weight:bold;" : "";
-    }
+        const blocks: string[] = [];
+        if (row.id_acc_cli) blocks.push(`Revenue ID: ${row.id_acc_cli}`);
+        if (row.comment) blocks.push(`Comment: ${row.comment}`);
+        if (row.currency) blocks.push(`Currency: ${row.currency}`);
+        return blocks.join("\n");
+      };
 
-    html += `
-            </tbody>
-            </table>
-            <div class="export-footer" style="display: flex; flex-direction: row; justify-content: center; gap: 32px; font-weight:bold;color:#1976d2;">
-            <div style="${getColorStyle(rowsWithBalance.length > 0 ? rowsWithBalance[rowsWithBalance.length - 1].balance_lyd : 0)}">
-                Final Balance (LYD): ${rowsWithBalance.length > 0 ? formatNumber(rowsWithBalance[rowsWithBalance.length - 1].balance_lyd) : "0.00"} LYD
-            </div>
-            <div style="${getColorStyle(rowsWithBalance.length > 0 ? rowsWithBalance[rowsWithBalance.length - 1].balance_usd : 0)}">
-                Final Balance (USD): ${rowsWithBalance.length > 0 ? formatNumber(rowsWithBalance[rowsWithBalance.length - 1].balance_usd) : "0.00"} USD
-            </div>
-            <div style="${getColorStyle(rowsWithBalance.length > 0 ? rowsWithBalance[rowsWithBalance.length - 1].balance_eur : 0)}">
-                Final Balance (EUR): ${rowsWithBalance.length > 0 ? formatNumber(rowsWithBalance[rowsWithBalance.length - 1].balance_eur) : "0.00"} EUR
-            </div>
-            </div>
-            <div class="export-footer">Generated on ${new Date().toLocaleString()}</div>
-            </body>
-        </html>
-        `;
-    // Open in new window for user to save/print as PDF
-    const win = window.open("", "_blank");
-    if (win) {
-      win.document.write(html);
-      win.document.close();
-      try {
-        win.focus();
-        setTimeout(() => {
-          win.print();
-        }, 300);
-      } catch {}
+      const arrayBufferToBase64 = (buffer: ArrayBuffer) => {
+        const bytes = new Uint8Array(buffer);
+        const chunkSize = 0x8000;
+        let binary = "";
+        for (let i = 0; i < bytes.length; i += chunkSize) {
+          binary += String.fromCharCode(
+            ...Array.from(bytes.subarray(i, i + chunkSize))
+          );
+        }
+        return btoa(binary);
+      };
+
+      const blobUrlToBase64 = async (blobUrl: string) => {
+        try {
+          const resp = await fetch(blobUrl);
+          if (!resp.ok) return null;
+          const blob = await resp.blob();
+          const base64 = arrayBufferToBase64(await blob.arrayBuffer());
+          let ext: string = "png";
+          if (/jpeg|jpg/i.test(blob.type)) ext = "jpeg";
+          else if (/gif/i.test(blob.type)) ext = "gif";
+          return { base64, ext };
+        } catch (err) {
+          console.error("Failed to convert blob URL to base64", err);
+          return null;
+        }
+      };
+
+      const picintBase64Cache = new Map<string, { base64: string; ext: string }[]>();
+
+      const getImagesForPicint = async (picint: string) => {
+        if (picintBase64Cache.has(picint)) return picintBase64Cache.get(picint)!;
+
+        let blobSources = imageBlobUrls[picint];
+        if ((!blobSources || blobSources.length === 0) && imageUrls[picint]?.length) {
+          blobSources = await fetchImageBlobs(Number(picint), imageUrls[picint])
+            .catch(() => [] as string[]);
+        }
+
+        const converted: { base64: string; ext: string }[] = [];
+        if (blobSources && blobSources.length) {
+          for (const blobUrl of blobSources) {
+            const base64Result = await blobUrlToBase64(blobUrl);
+            if (base64Result?.base64) converted.push(base64Result);
+          }
+        }
+        picintBase64Cache.set(picint, converted);
+        return converted;
+      };
+
+      const MAX_IMAGES_PER_ROW = imageColumnKeys.length;
+
+      for (const row of rowsWithBalance) {
+        const isOpening = row.id === "opening-balance";
+        const isChiraFlag = isTruthy(row.is_chira ?? row.IS_CHIRA);
+        const isWholeSaleFlag = isTruthy(row.is_whole_sale ?? row.IS_WHOLE_SALE);
+
+        let typeLabel = row.type || "";
+        if (row.statementType === "credit") typeLabel = "Revenue";
+        else if (row.statementType === "debit") {
+          if (isChiraFlag) typeLabel = "Chira";
+          else if (isWholeSaleFlag) typeLabel = "WholeSale";
+          else typeLabel = "Invoice";
+        } else if (isOpening) {
+          typeLabel = "Opening Balance";
+        }
+
+        const excelRow = sheet.addRow({
+          type: typeLabel,
+          date: row.date || "",
+          reference: row.num_fact || row.id_acc_cli || (isOpening ? "Opening" : ""),
+          pos: row.ps || "",
+          amounts: buildAmountsBlock(row),
+          balanceLyd: row.balance_lyd == null ? "" : `${formatNumber(row.balance_lyd)} LYD`,
+          balanceUsd: row.balance_usd == null ? "" : `${formatNumber(row.balance_usd)} USD`,
+          balanceEur: row.balance_eur == null ? "" : `${formatNumber(row.balance_eur)} EUR`,
+          details: buildDetailsBlock(row),
+        });
+
+        excelRow.getCell(5).alignment = { wrapText: true, vertical: "top" } as any;
+        excelRow.getCell(9).alignment = { wrapText: true, vertical: "top" } as any;
+
+        const rowNumber = excelRow.number;
+        sheet.getRow(rowNumber).height = 30;
+
+        if (row.statementType === "debit" && Array.isArray(row._productDetails)) {
+          const imagesForRow: { base64: string; ext: string }[] = [];
+          for (const detail of row._productDetails) {
+            if (!detail?.picint) continue;
+            const base64List = await getImagesForPicint(String(detail.picint));
+            for (const img of base64List) {
+              imagesForRow.push(img);
+              if (imagesForRow.length >= MAX_IMAGES_PER_ROW) break;
+            }
+            if (imagesForRow.length >= MAX_IMAGES_PER_ROW) break;
+          }
+
+          if (imagesForRow.length) {
+            sheet.getRow(rowNumber).height = 100;
+            imagesForRow.forEach((img, index) => {
+              try {
+                const colIndex = firstImageColumnIndex + index;
+                if (colIndex <= 0) return;
+                const imageId = workbook.addImage({
+                  base64: img.base64,
+                  extension: (img.ext as any) || "png",
+                });
+                sheet.addImage(imageId, {
+                  tl: { col: colIndex - 1, row: rowNumber - 1 },
+                  ext: { width: 90, height: 90 },
+                });
+              } catch (err) {
+                console.error("Failed to embed image", err);
+              }
+            });
+          }
+        }
+      }
+
+      const customerName = (selectedCustomer?.client_name || "All").replace(/[\\/:*?"<>|]/g, "_");
+      const filename = `CustomerStatement_${customerName}_${periodFrom}_${periodTo}.xlsx`;
+      const buffer = await workbook.xlsx.writeBuffer();
+      const blob = new Blob([buffer], {
+        type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = filename;
+      document.body.appendChild(link);
+      link.click();
+      setTimeout(() => {
+        document.body.removeChild(link);
+        URL.revokeObjectURL(url);
+      }, 0);
+    } catch (error) {
+      console.error("Failed to export statement to Excel", error);
     }
   }
 
@@ -949,11 +1146,10 @@ const CustomersReports = ({
     const dateB = new Date(b.date).getTime();
     return dateA - dateB;
   });
-  // Dates window (robust when fields are empty)
-  const fromDate = periodFrom ? new Date(periodFrom) : new Date(-8640000000000000);
-  const toDate = periodTo ? new Date(periodTo) : new Date(8640000000000000);
-  // Opening balance: sum all before fromDate
-  const openingRows = allStatementRows.filter((r) => new Date(r.date) < fromDate);
+  // Opening balance: sum all before periodFrom
+  const openingRows = allStatementRows.filter(
+    (r) => new Date(r.date) < new Date(periodFrom)
+  );
   // Opening balance for LYD: only LYD transactions
   const openingBalance = openingRows.reduce((sum, r) => {
     // For invoices (debit), only add LYD debit
@@ -988,7 +1184,9 @@ const CustomersReports = ({
   }, 0);
   // Main period rows
   const mainRows = allStatementRows.filter(
-    (r) => new Date(r.date) >= fromDate && new Date(r.date) <= toDate
+    (r) =>
+      new Date(r.date) >= new Date(periodFrom) &&
+      new Date(r.date) <= new Date(periodTo)
   );
   // Running balances
   let runningBalance = openingBalance;
@@ -1059,12 +1257,25 @@ const CustomersReports = ({
       size: 180,
       Cell: ({ row }) => {
         const isOpening = row.original.id === "opening-balance";
-        const type =
-          row.original.statementType === "debit"
-            ? "Invoice"
-            : row.original.statementType === "credit"
-              ? "Revenue"
-              : row.original.type || "";
+        const isTruthy = (value: any) =>
+          value === true || value === 1 || value === "1" || value === "true";
+        const isChiraFlag = isTruthy(
+          row.original.is_chira ?? row.original.IS_CHIRA
+        );
+        const isWholeSaleFlag = isTruthy(
+          row.original.is_whole_sale ?? row.original.IS_WHOLE_SALE
+        );
+
+        let type = row.original.type || "";
+        if (row.original.statementType === "credit") {
+          type = "Revenue";
+        } else if (row.original.statementType === "debit") {
+          if (isChiraFlag) type = "Chira";
+          else if (isWholeSaleFlag) type = "WholeSale";
+          else type = "Invoice";
+        } else if (isOpening) {
+          type = "Opening Balance";
+        }
         const date = row.original.date;
         const ref = row.original.num_fact || row.original.id_acc_cli || "";
         const psVal = row.original.ps || "";
@@ -1621,13 +1832,15 @@ const CustomersReports = ({
 
                     const idart = `${d.code || ""} ${d.design || ""} (${d.typeSupplier || ""})`;
 
-                    const urls =
+                    const blobSources =
                       picint && imageBlobUrls[picint]
                         ? imageBlobUrls[picint]
-                        : imageUrls[picint]
-                          ? imageUrls[picint].map(
-                              (url) => `${API_BASEImage}/${url}`
-                            )
+                        : undefined;
+                    const urls =
+                      blobSources && blobSources.length > 0
+                        ? blobSources
+                        : picint && imageUrls[picint]
+                          ? imageUrls[picint]
                           : [];
 
                     return (
@@ -1655,6 +1868,8 @@ const CustomersReports = ({
                                   border: "1px solid #eee",
                                   marginRight: 4,
                                 }}
+                                data-orig-src={url}
+                                onError={(e) => handleImageError(e, d.typeSupplier)}
                               />
                             ))
                           ) : (
@@ -1690,6 +1905,9 @@ const CustomersReports = ({
             flexWrap: "wrap",
           }}
         >
+          <Typography variant="h5" sx={{ mr: 2 }}>
+            {MODEL_LABELS[type]} - Customer Reports
+          </Typography>
           <FormControl size="small" sx={{ minWidth: 140 }}>
             <InputLabel id="type-select-label">Type</InputLabel>
             <Select
@@ -1764,9 +1982,6 @@ const CustomersReports = ({
             sx={{ width: "25%" }}
             options={customers}
             autoHighlight
-            isOptionEqualToValue={(option: Client, value: Client) =>
-              value != null && Number(option.id_client) === Number(value.id_client)
-            }
             getOptionLabel={(option: Client) =>
               `${option.client_name} (${option.tel_client || "No Phone"})`
             }
@@ -1785,14 +2000,76 @@ const CustomersReports = ({
               <TextField {...params} label="Customer" required />
             )}
           />
+          <Button
+            variant="contained"
+            color="secondary"
+            sx={{ fontWeight: 600, boxShadow: 2 }}
+            onClick={() => {
+              // Refresh data for selected customer and filters
+              setLoading(true);
+              setErrorMsg(null);
+              if (!selectedCustomer || !selectedCustomer.id_client) {
+                setData([]);
+                setLoading(false);
+                return;
+              }
+              const token = localStorage.getItem("token");
+              if (!token) return;
+              axios
+                .get(`/invoices/allDetailsPC`, {
+                  headers: { Authorization: `Bearer ${token}` },
+                  params: {
+                    ps: ps,
+                    ...(type !== "all" ? { type } : {}),
+                    ...(isChira !== "all"
+                      ? { is_chira: isChira === "yes" ? 1 : 0 }
+                      : {}),
+                    ...(isWholeSale !== "all"
+                      ? { is_whole_sale: isWholeSale === "yes" ? 1 : 0 }
+                      : {}),
+                    from: periodFrom || undefined,
+                    to: periodTo || undefined,
+                    ...(selectedCustomer && selectedCustomer.id_client
+                      ? { client: selectedCustomer.id_client }
+                      : {}),
+                  },
+                })
+                .then((res) => {
+                  if (
+                    typeof res.data === "string" &&
+                    res.data.trim().startsWith("<!DOCTYPE html")
+                  ) {
+                    setErrorMsg(
+                      "Server returned an HTML page instead of data. This may indicate a backend error, downtime, or invalid API endpoint."
+                    );
+                    setData([]);
+                    return;
+                  }
+                  let result = Array.isArray(res.data) ? res.data : [];
+
+                  setData(result);
+                })
+                .catch((err) => {
+                  setErrorMsg(
+                    "Failed to fetch data from server. Please check your connection or contact support."
+                  );
+                  setData([]);
+                })
+                .finally(() => setLoading(false));
+              // Also refresh revenue data
+              fetchRevenueData();
+            }}
+          >
+            Preview Data
+          </Button>
           <Box sx={{ flex: 1 }} />
           <Button
             variant="contained"
             color="info"
             sx={{ fontWeight: 600, boxShadow: 2 }}
-            onClick={exportTableToPdf}
+            onClick={exportTableToExcel}
           >
-            Export to PDF
+            Export to Excel
           </Button>
         </Box>
         {/* Unified Statement Table */}

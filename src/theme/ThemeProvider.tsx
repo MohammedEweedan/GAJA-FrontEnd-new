@@ -23,14 +23,19 @@ interface CustomThemeProviderProps {
 }
 
 export const CustomThemeProvider: React.FC<CustomThemeProviderProps> = ({ children }) => {
-  // Force light as the default mode (ignore system and any previously saved value)
-  const [mode, setMode] = useState<'light' | 'dark'>(() => 'light');
+  const [mode, setMode] = useState<'light' | 'dark'>(() => {
+    try {
+      const saved = localStorage.getItem('themeMode');
+      if (saved === 'light' || saved === 'dark') return saved;
+    } catch {}
+    return 'light';
+  });
 
   // Persist mode on change
   useEffect(() => {
     try {
       // Persist the current mode and reflect on html attribute
-      localStorage.setItem('color-mode', mode);
+      localStorage.setItem('themeMode', mode);
       document.documentElement.setAttribute('data-color-mode', mode);
     } catch {}
   }, [mode]);

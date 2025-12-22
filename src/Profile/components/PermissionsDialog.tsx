@@ -22,6 +22,9 @@ export const AVAILABLE_ACTIONS = [
   "Finance",
   "Sales Settings",
   "ItemsTakingPicture",
+  "Change POS",
+  "Change PS of Product",
+  "Show Cost",
 ];
 
 export default function PermissionsDialog({
@@ -72,6 +75,15 @@ export default function PermissionsDialog({
         </List>
       </DialogContent>
       <DialogActions>
+        <Button
+          onClick={() => {
+            setSelected((s) =>
+              s.length === AVAILABLE_ACTIONS.length ? [] : [...AVAILABLE_ACTIONS]
+            );
+          }}
+        >
+          {selected.length === AVAILABLE_ACTIONS.length ? "Clear all" : "Select all"}
+        </Button>
         <Button onClick={onClose}>Cancel</Button>
         <Button
           variant="contained"

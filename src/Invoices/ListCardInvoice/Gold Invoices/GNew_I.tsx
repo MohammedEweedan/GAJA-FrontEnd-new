@@ -908,7 +908,7 @@ const DNew_I = () => {
 
   const [customers, setCustomers] = useState<Client[]>([]);
 
-  const apiIp = process.env.REACT_APP_API_IP;
+  const apiIp = process.env.REACT_APP_API_IP || process.env.REACT_APP_API_BASE_URL || "";
   const apiUrlcustomers = `/customers`;
 
   const fetchCustomers = async () => {
@@ -1668,7 +1668,7 @@ const DNew_I = () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [paginatedData, datainv]);
 
-  const apiUrlinv = `${apiIp}/invoices`;
+  const apiUrlinv = `/invoices`;
 
   const fetchIssuedInvoices = async () => {
     const token = localStorage.getItem("token");
@@ -1811,9 +1811,12 @@ const DNew_I = () => {
     }
   };
 
-  const fetchDataINV = async () => {
+  const fetchDataINV = async (): Promise<Invoice[]> => {
     const token = localStorage.getItem("token");
-    if (!token) return navigate("/");
+    if (!token) {
+      navigate("/");
+      return [];
+    }
     try {
       const res = await axios.get<Invoice[]>(`${apiUrlinv}/Getinvoice`, {
         headers: { Authorization: `Bearer ${token}` },
@@ -1827,9 +1830,10 @@ const DNew_I = () => {
         Client: res.data[0]?.Client ?? prevState.Client,
         SourceMark: res.data[0]?.SourceMark ?? prevState.SourceMark,
       }));
+      return res.data;
     } catch (err: any) {
       if (err.response?.status === 401) navigate("/");
-      //showNotification('Failed to fetch invoice data', 'error');
+      return [];
     } finally {
       setLoading(false);
     }
@@ -2416,24 +2420,12 @@ const DNew_I = () => {
     setTotalsDialog((prev) => ({ ...prev, open: false }));
   };
 
+  const [approvalPolling, setApprovalPolling] = useState(false);
+
   const handleAddNew = async () => {
     const token = localStorage.getItem("token");
-
-    if (!datainv[0].Client) {
-      setSnackbar({
-        open: true,
-        message: "Please select a client before creating a new invoice",
-        severity: "error",
-      });
-      return;
-    }
-    if (!datainv[0].total_remise_final || datainv[0].total_remise_final === 0) {
-      setSnackbar({
-        open: true,
-        message:
-          "Please add Totals to the invoice before creating a new invoice",
-        severity: "error",
-      });
+    if (!token) {
+      navigate("/");
       return;
     }
 
@@ -2441,51 +2433,122 @@ const DNew_I = () => {
       // ensure latest USD rate before creating new invoice
       try { await fetchLastUsdRate(); } catch { }
       try { await fetchGoldSpot(); } catch { }
-      const res = await axios.get(`${apiUrlinv}/NewNF`, {
-        headers: { Authorization: `Bearer ${token}` },
-        params: { ps, usr: Cuser },
+
+      // IMPORTANT: backend /NewNF only generates a number. /SetNF issues (assigns num_fact).
+      const res = await axios.get(`${apiUrlinv}/SetNF`, {
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+        params: { ps, usr: Cuser, t: Date.now() },
       });
-      if (res.status !== 200) throw new Error("Failed to fetch new invoice number");
+      if (res.status !== 200) throw new Error("Failed to issue invoice");
 
       const maybeNum =
-        (res.data && typeof res.data === 'object' && (res.data as any).num_fact != null)
-          ? Number((res.data as any).num_fact)
-          : (typeof res.data === 'number' || typeof res.data === 'string')
-            ? Number(res.data)
-            : NaN;
+        (res.data && typeof res.data === "object" && (res.data as any).new_num_fact != null)
+          ? Number((res.data as any).new_num_fact)
+          : (res.data && typeof res.data === "object" && (res.data as any).num_fact != null)
+            ? Number((res.data as any).num_fact)
+            : (typeof res.data === "number" || typeof res.data === "string")
+              ? Number(res.data)
+              : NaN;
 
-      // Server should move the draft (num_fact=0) to issued by assigning num_fact.
-      // Clear local cart immediately to avoid requiring a refresh.
+      // Issuing should remove draft rows. Clear local state immediately.
       setDatainv([]);
       setEditInvoice(initialInvoiceState);
       setCanPrint(false);
 
-      // Refresh the cart from server (should become empty). If not empty, keep what server says.
       try {
         await fetchDataINV();
       } catch { }
 
       setSnackbar({
         open: true,
-        message: Number.isFinite(maybeNum) && maybeNum > 0
-          ? `Invoice #${maybeNum} created.`
-          : `Invoice created.`,
+        message:
+          Number.isFinite(maybeNum) && maybeNum > 0
+            ? `Invoice #${maybeNum} created.`
+            : "Invoice created.",
         severity: "success",
       });
+      
+      // Open print dialog after successful invoice generation
+      if (Number.isFinite(maybeNum) && maybeNum > 0) {
+        try {
+          const token = localStorage.getItem("token");
+          const res = await axios.get<Invoice[]>(`${apiUrlinv}/Getinvoice`, {
+            headers: { Authorization: `Bearer ${token}` },
+            params: { ps: ps, num_fact: maybeNum, usr: Cuser },
+          });
+          if (res.data && res.data.length > 0) {
+            setPrintDialog({ open: true, invoice: res.data[0] });
+          }
+        } catch (e) {
+          console.error("Failed to fetch invoice for print dialog:", e);
+        }
+      }
+      
+      return maybeNum;
     } catch (error) {
       setSnackbar({
         open: true,
-        message: (error as any)?.response?.data?.message || (error as any)?.message || "Failed to create invoice number",
+        message:
+          (error as any)?.response?.data?.message ||
+          (error as any)?.response?.data?.error ||
+          (error as any)?.message ||
+          "Failed to create invoice number",
         severity: "error",
       });
+      return null;
     }
   };
 
   const [canPrint, setCanPrint] = useState(false);
 
-  const handleTotalsDialogUpdate = async () => {
-    // First, get a new invoice number
+  const pollApprovalAndGenerate = async (refId: number) => {
+    if (!refId) return;
+    if (approvalPolling) return;
+    setApprovalPolling(true);
 
+    const token = localStorage.getItem("token");
+    const started = Date.now();
+    const maxMs = 2 * 60 * 1000;
+    const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+    setSnackbar({ open: true, message: "Waiting for discount approval...", severity: "success" });
+
+    try {
+      while (Date.now() - started < maxMs) {
+        try {
+          const res = await axios.get(`/ApprovalRequests/prequestsNot`, {
+            headers: { Authorization: `Bearer ${token}` },
+          });
+          const list: any[] = Array.isArray(res?.data?.data) ? res.data.data : [];
+          const match = list.find(
+            (r: any) =>
+              String(r?.type_request || "") === "Invoice" &&
+              String(r?.Refrences_Number || "") === String(refId)
+          );
+          if (match) {
+            const st = String(match.status || "").toLowerCase();
+            if (st === "accepted" || st === "approve" || st === "approved") {
+              await handleAddNew();
+              return;
+            }
+            if (st === "refused" || st === "rejected" || st === "deny" || st === "denied") {
+              setSnackbar({ open: true, message: "Discount approval was refused.", severity: "error" });
+              return;
+            }
+          }
+        } catch { }
+
+        await sleep(4000);
+      }
+      setSnackbar({ open: true, message: "Approval check timed out. Please try again later.", severity: "error" });
+    } finally {
+      setApprovalPolling(false);
+    }
+  };
+
+  const handleTotalsDialogUpdate = async () => {
     try {
       // ensure latest USD rate before totals update
       try { await fetchLastUsdRate(); } catch { }
@@ -2497,7 +2560,7 @@ const DNew_I = () => {
         // Determine invoice destination flags
 
         await axios.put(
-          `${apiIp}/invoices/UpdateTotals/0`,
+          `/invoices/UpdateTotals/0`,
           {
             total_remise_final: totalsDialog.total_remise_final,
             total_remise_final_lyd: totalsDialog.total_remise_final_lyd,
@@ -2530,7 +2593,7 @@ const DNew_I = () => {
             for (const inv of rowsToUpdate) {
               try {
                 await axios.put(
-                  `${apiIp}/invoices/Update/${inv.id_fact}`,
+                  `/invoices/Update/${inv.id_fact}`,
                   { COMMENT: commentVal },
                   { headers: { Authorization: `Bearer ${token2}` } }
                 );
@@ -2540,19 +2603,29 @@ const DNew_I = () => {
         } catch { /* ignore comment bulk update errors */ }
         //   setSnackbar({ open: true, message: 'Invoice totals updated successfully', severity: 'success' });
         setTotalsDialog((prev) => ({ ...prev, open: false }));
-        // Confirm Checkout should NOT generate num_fact.
-        // Keep draft invoice rows (num_fact=0) so user can proceed to invoice preview.
-        // Refresh from server and then enable "Proceed to Invoice".
+
+        // Refresh to ensure we have latest draft rows.
+        let serverItems: Invoice[] = [];
         try {
-          await fetchDataINV();
+          serverItems = await fetchDataINV();
         } catch { }
-        setCanPrint(true);
+
+        // No approval needed: issue invoice immediately.
+        await handleAddNew();
       } catch (error) {
-
-
+        console.error("[handleTotalsDialogUpdate] Error:", error);
+        const errorMsg = (error as any)?.response?.data?.message || 
+                        (error as any)?.response?.data?.error || 
+                        (error as any)?.message || 
+                        "Failed to update invoice totals";
+        console.error("[handleTotalsDialogUpdate] Error details:", {
+          status: (error as any)?.response?.status,
+          data: (error as any)?.response?.data,
+          url: `/invoices/UpdateTotals/0`,
+        });
         setSnackbar({
           open: true,
-          message: "Failed to update invoice totals",
+          message: errorMsg,
           severity: "error",
         });
       } finally {
@@ -2561,8 +2634,7 @@ const DNew_I = () => {
 
       // setShouldOpenPrintDialog(true); // Set flag to open print dialog after data is up-to-date and dialog is closed
     } catch (error) {
-
-
+      console.error("[handleTotalsDialogUpdate] Outer catch:", error);
     }
   };
 
@@ -5094,7 +5166,6 @@ const DNew_I = () => {
                       {(() => {
                         // Show preferred image from imageUrls if available, else fallback to pic
  
-                        const imageKey = (item as any).picint || (item as any).id_fact;
                         const kind: "gold" | "watch" | "diamond" | undefined =
                           typeSupplier.toLowerCase().includes("gold")
                             ? "gold"
@@ -5103,9 +5174,38 @@ const DNew_I = () => {
                             : typeSupplier.toLowerCase().includes("diamond")
                             ? "diamond"
                             : undefined;
-                        const imageKeyStr = getImageKey(kind, imageKey);
- 
-                        const urls = imageUrls?.[imageKeyStr] || [];
+
+                        // Align the lookup ids with the ones used when fetching gold images
+                        const dp: any = (achat as any)?.DistributionPurchase || (item as any)?.DistributionPurchase;
+                        const goldObj = Array.isArray(dp) && dp.length > 0
+                          ? dp.find((d: any) => d?.GoldOriginalAchat)?.GoldOriginalAchat || dp[0]?.GoldOriginalAchat
+                          : (dp && typeof dp === "object" ? (dp as any).GoldOriginalAchat : null);
+                        const goldCandidates = kind === "gold"
+                          ? [
+                              goldObj?.id_achat,
+                              (item as any).id_art,
+                              (item as any).picint,
+                              item.id_fact,
+                            ]
+                              .map((v) => Number(v || 0))
+                              .filter((v) => v > 0)
+                          : [];
+
+                        const baseImageId = kind === "gold"
+                          ? (goldCandidates.find((cid) => !!imageUrls[getImageKey("gold", cid)]) || goldCandidates[0])
+                          : (item as any).picint || (item as any).id_fact;
+
+                        const imageKey = baseImageId;
+
+                        const candidateKeys = kind === "gold"
+                          ? goldCandidates.map((cid) => getImageKey("gold", cid))
+                          : [getImageKey(kind, baseImageId)];
+
+                        const urls = Array.from(
+                          new Set(
+                            candidateKeys.flatMap((k) => imageUrls?.[k] || [])
+                          )
+                        );
                         const token = localStorage.getItem("token");
                         if (urls.length > 0) {
                           const isWatch = typeSupplier.toLowerCase().includes('watch');

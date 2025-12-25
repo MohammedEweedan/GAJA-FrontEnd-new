@@ -2793,42 +2793,64 @@ const SalesReportsTable = ({
   }, [closeInvoice]);
 
   const closeEntered = React.useMemo(() => {
-    const lyd = normalizeLyd0(parseAmt(closePayLydStr));
+    const lyd = normalizeMoney(parseAmt(closePayLydStr));
     const usd = parseAmt(closePayUsdStr);
-    const usdLyd = normalizeLyd0(parseAmt(closePayUsdLydStr));
+    const usdLyd = normalizeMoney(parseAmt(closePayUsdLydStr));
     const eur = parseAmt(closePayEurStr);
-    const eurLyd = normalizeLyd0(parseAmt(closePayEurLydStr));
-    const totalLydEquiv = lyd + usdLyd + eurLyd;
+    const eurLyd = normalizeMoney(parseAmt(closePayEurLydStr));
+    const totalLydEquiv = normalizeMoney(lyd + usdLyd + eurLyd);
     return { lyd, usd, usdLyd, eur, eurLyd, totalLydEquiv };
   }, [closePayEurLydStr, closePayEurStr, closePayLydStr, closePayUsdLydStr, closePayUsdStr]);
 
-  // Compare what cashier entered now vs what was recorded during checkout.
-  // Positive diff means cashier entered more than recorded (overpayment).
-  // Negative diff means cashier entered less than recorded (remainder).
-  const closeCompareDiff = closeEntered.totalLydEquiv - closeTotals.paidLydEquiv;
-  const closeMismatch = Math.abs(closeCompareDiff) > moneyEps;
-  const closeIsOverpay = closeCompareDiff > moneyEps;
-  const closeIsRemainder = closeCompareDiff < -moneyEps;
-  const closeUsdEquivMissing = closeEntered.usd > 0 && closeEntered.usdLyd <= 0;
-  const closeEurEquivMissing = closeEntered.eur > 0 && closeEntered.eurLyd <= 0;
+  // Close invoice validation: entered amount should not exceed what was recorded at invoice creation.
+  // Allow partial payment (less than recorded) or exact match, but never overpayment (more than recorded).
+  const lydDiff = closeEntered.lyd - closeTotals.recorded.lyd;
+  const usdDiff = closeEntered.usd - closeTotals.recorded.usd;
+  const eurDiff = closeEntered.eur - closeTotals.recorded.eur;
+  
+  // Check for overpayment: entered > recorded in any currency
+  const closeIsOverpay = lydDiff > moneyEps || usdDiff > moneyEps || eurDiff > moneyEps;
+  const closeIsRemainder = lydDiff < -moneyEps || usdDiff < -moneyEps || eurDiff < -moneyEps;
+  const closeMismatch = Math.abs(lydDiff) > moneyEps || Math.abs(usdDiff) > moneyEps || Math.abs(eurDiff) > moneyEps;
+  
+  const closeUsdEquivMissing = closeEntered.usd > moneyEps && closeEntered.usdLyd <= moneyEps;
+  const closeEurEquivMissing = closeEntered.eur > moneyEps && closeEntered.eurLyd <= moneyEps;
 
-  // Actual remaining after applying the payment entered in this dialog.
-  const closeOverpayNow = closeEntered.totalLydEquiv - closeTotals.remainingLyd;
-  const closeIsOverpayNow = closeOverpayNow > moneyEps;
-  const closeRemainingAfter = Math.max(0, normalizeLyd0(closeTotals.remainingLyd - closeEntered.totalLydEquiv));
+  // Remaining/remainder after reconciliation per currency.
+  const closeOverpayNow = { lyd: lydDiff, usd: usdDiff, eur: eurDiff };
+  const closeIsOverpayNow = closeIsOverpay;
+  const closeRemainingAfter = {
+    lyd: Math.max(0, normalizeMoney(closeTotals.recorded.lyd - closeEntered.lyd)),
+    usd: Math.max(0, closeTotals.recorded.usd - closeEntered.usd),
+    eur: Math.max(0, closeTotals.recorded.eur - closeEntered.eur),
+  };
 
   const handleConfirmCloseInvoice = async () => {
     const inv = closeInvoice;
     if (!inv) return;
     setCloseError("");
 
+    console.log("[Close Invoice] Validation check:", {
+      closeIsOverpayNow,
+      lydDiff,
+      usdDiff,
+      eurDiff,
+      entered: closeEntered,
+      recorded: closeTotals.recorded,
+    });
+
     // Allow remainder, but never allow overpayment.
     if (closeIsOverpayNow) {
+      console.error("[Close Invoice] Overpayment detected!");
       setCloseError("Overpayment detected. Reduce the entered amount.");
       return;
     }
-    if (closeUsdEquivMissing || closeEurEquivMissing) {
-      setCloseError("If you enter USD/EUR you must also enter the LYD equivalent.");
+    if (closeUsdEquivMissing) {
+      setCloseError("If you enter USD you must also enter the LYD equivalent.");
+      return;
+    }
+    if (closeEurEquivMissing) {
+      setCloseError("If you enter EUR you must also enter the LYD equivalent.");
       return;
     }
 
@@ -2848,8 +2870,45 @@ const SalesReportsTable = ({
 
     setCloseLoading(true);
     try {
+      // For issued invoices, update payment amounts on each invoice row directly
+      const nextAmountLyd = normalizeMoney(Number(closeEntered.lyd) || 0);
+      const nextAmountUsd = normalizeMoney(Number(closeEntered.usd) || 0);
+      const nextAmountUsdLyd = normalizeMoney(Number(closeEntered.usdLyd) || 0);
+      const nextAmountEur = normalizeMoney(Number(closeEntered.eur) || 0);
+      const nextAmountEurLyd = normalizeMoney(Number(closeEntered.eurLyd) || 0);
+
+      console.log("[Close Invoice] Updating payment amounts on invoice rows...");
+      
+      // Update payment amounts on all rows of this invoice
+      if (closeInvoiceRows && closeInvoiceRows.length > 0) {
+        for (const row of closeInvoiceRows) {
+          try {
+            await axios.put(
+              `/invoices/Update/${row.id_fact}`,
+              {
+                amount_lyd: nextAmountLyd,
+                amount_currency: nextAmountUsd,
+                amount_currency_LYD: nextAmountUsdLyd,
+                amount_EUR: nextAmountEur,
+                amount_EUR_LYD: nextAmountEurLyd,
+              },
+              {
+                headers: { Authorization: `Bearer ${token}` },
+              }
+            );
+          } catch (rowErr: any) {
+            console.warn(`[Close Invoice] Failed to update row ${row.id_fact}:`, rowErr);
+            // Continue with other rows even if one fails
+          }
+        }
+        console.log("[Close Invoice] Payment amounts updated on all invoice rows");
+      } else {
+        console.warn("[Close Invoice] No invoice rows found to update");
+      }
+
       // Close invoice (triggers GL)
-      await axios.get(`/invoices/CloseNF`, {
+      console.log("[Close Invoice] Calling CloseNF endpoint...");
+      const closeRes = await axios.get(`/invoices/CloseNF`, {
         params: {
           ps: psParam,
           usr: usrParam,
@@ -2859,12 +2918,15 @@ const SalesReportsTable = ({
         },
         headers: { Authorization: `Bearer ${token}` },
       });
+      console.log("[Close Invoice] CloseNF response:", closeRes.data);
 
       setCloseDialogOpen(false);
       setCloseInvoice(null);
       setCloseInvoiceRows([]);
       setInvoiceRefreshFlag((f) => f + 1);
+      console.log("[Close Invoice] Success! Invoice closed.");
     } catch (e: any) {
+      console.error("[Close Invoice] Error:", e);
       setCloseError(e?.response?.data?.message || e?.message || "Failed to close invoice");
     } finally {
       setCloseLoading(false);
@@ -3257,6 +3319,12 @@ const SalesReportsTable = ({
               const amount_currency_LYD =
                 Number(invoice.amount_currency_LYD) || 0;
               const amount_EUR_LYD = Number(invoice.amount_EUR_LYD) || 0;
+              
+              // Include payment amounts
+              const amount_lyd = Number(invoice.amount_lyd) || 0;
+              const amount_currency = Number(invoice.amount_currency) || 0;
+              const amount_EUR = Number(invoice.amount_EUR) || 0;
+              
               return {
                 invoice,
                 items,
@@ -3266,6 +3334,9 @@ const SalesReportsTable = ({
                 totalAmountEur,
                 totalWeight,
                 itemCount,
+                amount_lyd,
+                amount_currency,
+                amount_EUR,
                 amount_currency_LYD,
                 amount_EUR_LYD,
                 type:
@@ -3354,10 +3425,22 @@ const SalesReportsTable = ({
 
               <Box sx={{ display: "flex", justifyContent: "space-between" }}>
                 <Typography sx={{ fontWeight: 800 }}>Remaining after this payment</Typography>
-                <Typography sx={{ fontWeight: 900, color: closeIsOverpayNow ? "error.main" : closeRemainingAfter > 0 ? "warning.main" : "success.main" }}>
-                  {closeIsOverpayNow
-                    ? `Overpayment: ${Number(Math.abs(closeOverpayNow)).toLocaleString(undefined, { maximumFractionDigits: 0 })} LYD`
-                    : `${Number(closeRemainingAfter).toLocaleString(undefined, { maximumFractionDigits: 0 })} LYD`}
+                <Typography sx={{ fontWeight: 900, color: closeIsOverpayNow ? "error.main" : (closeRemainingAfter.lyd > 0 || closeRemainingAfter.usd > 0 || closeRemainingAfter.eur > 0) ? "warning.main" : "success.main" }}>
+                  {closeIsOverpayNow ? (
+                    <Box component="span">
+                      Overpayment:
+                      {closeOverpayNow.lyd > moneyEps && ` LYD ${Number(Math.abs(closeOverpayNow.lyd)).toLocaleString(undefined, { maximumFractionDigits: 0 })}`}
+                      {closeOverpayNow.usd > moneyEps && ` USD ${Number(Math.abs(closeOverpayNow.usd)).toLocaleString(undefined, { maximumFractionDigits: 2 })}`}
+                      {closeOverpayNow.eur > moneyEps && ` EUR ${Number(Math.abs(closeOverpayNow.eur)).toLocaleString(undefined, { maximumFractionDigits: 2 })}`}
+                    </Box>
+                  ) : (
+                    <Box component="span">
+                      {closeRemainingAfter.lyd > 0 && `LYD ${Number(closeRemainingAfter.lyd).toLocaleString(undefined, { maximumFractionDigits: 0 })} `}
+                      {closeRemainingAfter.usd > 0 && `USD ${Number(closeRemainingAfter.usd).toLocaleString(undefined, { maximumFractionDigits: 2 })} `}
+                      {closeRemainingAfter.eur > 0 && `EUR ${Number(closeRemainingAfter.eur).toLocaleString(undefined, { maximumFractionDigits: 2 })} `}
+                      {closeRemainingAfter.lyd === 0 && closeRemainingAfter.usd === 0 && closeRemainingAfter.eur === 0 && '0'}
+                    </Box>
+                  )}
                 </Typography>
               </Box>
 
@@ -3448,8 +3531,11 @@ const SalesReportsTable = ({
                 <Typography sx={{ fontWeight: 800 }}>Compare vs recorded</Typography>
                 <Typography sx={{ fontWeight: 900 }}>
                   {closeMismatch ? (
-                    <Box component="span" sx={{ color: "error.main" }}>
-                      {closeIsOverpay ? "Overpayment" : "Remainder"}: {Math.abs(closeCompareDiff).toLocaleString(undefined, { maximumFractionDigits: 0 })} LYD
+                    <Box component="span" sx={{ color: closeIsOverpay ? "error.main" : "warning.main" }}>
+                      {closeIsOverpay ? "Overpayment" : "Remainder"}:
+                      {Math.abs(lydDiff) > moneyEps && ` LYD ${Math.abs(lydDiff).toLocaleString(undefined, { maximumFractionDigits: 0 })}`}
+                      {Math.abs(usdDiff) > moneyEps && ` USD ${Math.abs(usdDiff).toLocaleString(undefined, { maximumFractionDigits: 2 })}`}
+                      {Math.abs(eurDiff) > moneyEps && ` EUR ${Math.abs(eurDiff).toLocaleString(undefined, { maximumFractionDigits: 2 })}`}
                     </Box>
                   ) : (
                     <Box component="span" sx={{ color: "success.main" }}>
@@ -3458,22 +3544,6 @@ const SalesReportsTable = ({
                   )}
                 </Typography>
               </Box>
-
-              <FormControlLabel
-                control={
-                  <Checkbox
-                    checked={closeMakeCashVoucher}
-                    onChange={(e) => setCloseMakeCashVoucher(e.target.checked)}
-                  />
-                }
-                label="Create cash voucher"
-              />
-
-              {closeError ? (
-                <Box sx={{ color: "error.main", fontWeight: 800 }}>
-                  {closeError}
-                </Box>
-              ) : null}
             </Box>
           </DialogContent>
           <DialogActions>

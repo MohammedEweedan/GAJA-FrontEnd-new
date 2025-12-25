@@ -715,16 +715,22 @@ const WatchStandardInvoiceContent = forwardRef<HTMLDivElement, Props>(
           sourceIds = pdata.map((inv) => inv.picint).filter(Boolean);
         }
       } else if (isGold) {
-        // For gold, images are stored per ACHAT id_achat; fetch by those ids.
-        sourceIds = pdata
-          .flatMap((inv) => (inv?.ACHATs || []).map((a: any) => a?.id_achat))
-          .filter(Boolean)
-          .map(String);
-        if (sourceIds.length === 0) {
-          sourceIds = (items || [])
-            .flatMap((it: any) => (it?.ACHATs || []).map((a: any) => a?.id_achat))
-            .filter(Boolean)
+        // For gold, images are stored per ACHAT id_achat; fetch by those ids ONLY.
+        const collectGoldIds = (arr: any[]): string[] =>
+          (arr || [])
+            .flatMap((inv: any) => {
+              const ids: any[] = [];
+              (inv?.ACHATs || []).forEach((a: any) => {
+                if (a?.id_achat) ids.push(a.id_achat);
+              });
+              return ids;
+            })
+            .filter((v) => v !== undefined && v !== null)
             .map(String);
+
+        sourceIds = collectGoldIds(pdata);
+        if (sourceIds.length === 0) {
+          sourceIds = collectGoldIds(items || []);
         }
       }
       const unique = Array.from(new Set(sourceIds)).filter(Boolean);
@@ -892,6 +898,18 @@ const WatchStandardInvoiceContent = forwardRef<HTMLDivElement, Props>(
                       }
                     } catch {
                       /* try next */
+                    }
+                    // Fallback to legacy list endpoint if gold route empty
+                    try {
+                      const legacyUrl = `${base}/list/${cid}`;
+                      try { console.log('[InvoiceImages:fetch-gold-legacy] GET', legacyUrl); } catch {}
+                      const r2 = await axios.get(legacyUrl, { headers: { Authorization: `Bearer ${token}` } });
+                      if (Array.isArray(r2.data) && r2.data.length) {
+                        urls = normalizeImageList(r2.data);
+                        break;
+                      }
+                    } catch {
+                      /* continue */
                     }
                   }
                 } catch {}
@@ -1365,7 +1383,10 @@ const WatchStandardInvoiceContent = forwardRef<HTMLDivElement, Props>(
                     // Inject original watch data for each row if available
 
                     return (
-                      <TableRow key={idx} sx={{ background: "inherit" }}>
+                      <TableRow
+                        key={String(item?.id_achat ?? item?.id_fact ?? item?._parent?.id_fact ?? idx)}
+                        sx={{ background: "inherit" }}
+                      >
                         <TableCell
                           className="col-sn"
                           sx={{
@@ -1420,27 +1441,37 @@ const WatchStandardInvoiceContent = forwardRef<HTMLDivElement, Props>(
                                   ? String(invoice.picint)
                                   : "";
                               const isGoldType = typeinv?.toLowerCase().includes("gold");
+                              const isWatchType = typeinv?.toLowerCase().includes("watch");
+                              const isDiamondType = typeinv?.toLowerCase().includes("diamond");
+                              
                               // Prefer the correct key per type; placeholder should only be used when there are truly no URLs.
                               let urls = [] as string[];
-                              // Gold: images are stored per ACHAT id_achat
-                              if (isGoldType && rowAchatKey && imageUrls[rowAchatKey]) {
-                                urls = imageUrls[rowAchatKey];
+                              
+                              // For gold/watch/diamond: ONLY use id_achat from the current row to prevent image repetition
+                              if (isGoldType || isWatchType || isDiamondType) {
+                                const rowIdAchat = item?.id_achat;
+                                if (rowIdAchat) {
+                                  const key = String(rowIdAchat);
+                                  urls = imageUrls[key] || [];
+                                  console.log('[InvoiceImages:render]', { 
+                                    type: isGoldType ? 'gold' : isWatchType ? 'watch' : 'diamond',
+                                    rowIdAchat, 
+                                    key, 
+                                    hasUrls: urls.length > 0,
+                                    urlCount: urls.length,
+                                    allKeys: Object.keys(imageUrls)
+                                  });
+                                }
+                              } else {
+                                // Fallback for unknown types
+                                const candidateKeys = [rowAchatKey, rowPicintKey, invPicintKey].filter(Boolean);
+                                urls = Array.from(
+                                  new Set(
+                                    candidateKeys.flatMap((k) => imageUrls[k] || [])
+                                  )
+                                );
                               }
-                              // Non-gold (or fallback): allow picint-based lookup
-                              if ((!urls || urls.length === 0) && rowPicintKey && imageUrls[rowPicintKey]) {
-                                urls = imageUrls[rowPicintKey];
-                              }
-                              // Generic fallback: id_achat lookup if available
-                              if ((!urls || urls.length === 0) && rowAchatKey && imageUrls[rowAchatKey]) {
-                                urls = imageUrls[rowAchatKey];
-                              }
-                              // Try using current invoice picint as fallback key
-                              if (
-                                (!urls || urls.length === 0) &&
-                                !!invPicintKey
-                              ) {
-                                if (imageUrls[invPicintKey]) urls = imageUrls[invPicintKey];
-                              }
+
                               if (
                                 urls.length === 0 &&
                                 (typeinv?.toLowerCase().includes("diamond") ||
@@ -1468,7 +1499,6 @@ const WatchStandardInvoiceContent = forwardRef<HTMLDivElement, Props>(
                               }
                               urls = normalizeImageList(urls);
                               const token = localStorage.getItem("token");
-                              const isWatchType = typeinv?.toLowerCase().includes("watch");
                               // Candidate images already fetched and stored in imageUrls
                               let candidateUrls = Array.isArray(urls) ? urls.filter(Boolean) : [];
                               // Neutral normalization based on source folder, independent of type
@@ -1983,11 +2013,7 @@ const WatchStandardInvoiceContent = forwardRef<HTMLDivElement, Props>(
                 <Typography>
                   <span style={{ fontWeight: "bold" }}>Final Price in USD: </span>
                   <span style={{ fontFamily: "monospace" }}>
-                    {(
-                      (Number(TotalAmountFinal) || 0) +
-                      (Number(data.remise) || 0) +
-                      (Number(TotalAmountFinal) || 0) * ((Number(data.remise_per) || 0) / 100)
-                    ).toLocaleString(undefined, {
+                    {(Number(TotalAmountFinal) || 0).toLocaleString(undefined, {
                       minimumFractionDigits: 2,
                       maximumFractionDigits: 2,
                     })}
@@ -2013,37 +2039,86 @@ const WatchStandardInvoiceContent = forwardRef<HTMLDivElement, Props>(
               const eurLyd = Number(paidEurLyd) || 0;
               const paidTotalLydEquiv = lyd + usdLyd + eurLyd;
 
-              const totalLyd = normalizeLyd0(Number(totalAmountLYD) || 0);
-              const paidLyd0 = normalizeLyd0(paidTotalLydEquiv);
-              const diff = totalLyd - paidLyd0;
-              const isPaidInFull = Math.abs(diff) <= moneyEps;
-              const hasRemainder = diff > moneyEps;
-              const paidColor = isPaidInFull ? "#2e7d32" : (hasRemainder ? "#d04444ff" : "#d04444ff");
+              const supplierType = String(typeinv || "").toLowerCase();
+              const isGoldInv = supplierType.includes("gold");
+              const totalUsd = Number(totalAmountUSD) || Number(TotalAmountFinal) || 0;
+              const totalLyd = Number(totalAmountLYD) || 0;
 
-              const lines: Array<{ label: string; value: string }> = [];
-              if (lyd > 0) lines.push({ label: "LYD", value: fmt0(lyd) });
-              if (usd > 0) lines.push({ label: "USD", value: fmt0(usd) });
-              if (eur > 0) lines.push({ label: "EUR", value: fmt0(eur) });
-              if (lines.length === 0) lines.push({ label: "LYD", value: fmt0(paidTotalLydEquiv) });
+              const usdRate = usd > 0 && usdLyd > 0 ? (usdLyd / usd) : NaN;
+
+              // GOLD: calculate remainder purely in LYD-equivalent.
+              const diffLyd = normalizeLyd0(totalLyd) - normalizeLyd0(paidTotalLydEquiv);
+
+              // NON-GOLD: primary remainder is in USD when possible.
+              // Use amount_currency as the USD paid amount (authoritative), and show LYD-equiv remainder when rate is known.
+              const diffUsd = (Number.isFinite(totalUsd) ? totalUsd : 0) - (Number.isFinite(usd) ? usd : 0);
+              const diffUsd0 = Math.round((Number(diffUsd) || 0) * 100) / 100;
+              const hasRemainder = isGoldInv ? diffLyd > moneyEps : diffUsd0 > moneyEps;
+              const isPaidInFull = isGoldInv ? Math.abs(diffLyd) <= moneyEps : Math.abs(diffUsd0) <= moneyEps;
+              const paidColor = isPaidInFull ? "#2e7d32" : "#d04444ff";
+
+              const lines: Array<{ label: string; value: string }> = [
+                { label: "LYD", value: fmt0(lyd) },
+                { label: "USD", value: fmt0(usd) },
+                { label: "EUR", value: fmt0(eur) },
+              ];
 
               return (
                 <>
                   <Typography>
                     <span style={{ fontWeight: "bold" }}>Payments:</span>
                   </Typography>
-                  <Typography sx={{ mt: 0.5 }}>
-                    <span style={{ fontWeight: "bold" }}>Paid (LYD equivalent):</span>{" "}
-                    <span style={{ fontFamily: "monospace", color: paidColor }}>
-                      {fmt0(paidTotalLydEquiv)} LYD
-                    </span>
-                  </Typography>
+                  {lines.map((l) => {
+                    const suffix = l.label;
+                    return (
+                      <Typography key={l.label} sx={{ mt: 0.25 }}>
+                        <span style={{ fontWeight: "bold" }}>{l.label}:</span>{" "}
+                        <span style={{ fontFamily: "monospace" }}>{l.value} {suffix}</span>
+                        {l.label === "USD" && usdLyd > 0 ? (
+                          <span style={{ color: "#666" }}> ({fmt0(usdLyd)} LYD)</span>
+                        ) : null}
+                        {l.label === "EUR" && eurLyd > 0 ? (
+                          <span style={{ color: "#666" }}> ({fmt0(eurLyd)} LYD)</span>
+                        ) : null}
+                      </Typography>
+                    );
+                  })}
+                  {isGoldInv ? (
+                    <Typography sx={{ mt: 0.5 }}>
+                      <span style={{ fontWeight: "bold" }}>Paid total:</span>{" "}
+                      <span style={{ fontFamily: "monospace", color: paidColor }}>
+                        {fmt0(paidTotalLydEquiv)} LYD
+                      </span>
+                    </Typography>
+                  ) : (
+                    <Typography sx={{ mt: 0.5 }}>
+                      <span style={{ fontWeight: "bold" }}>Paid total:</span>{" "}
+                      <span style={{ fontFamily: "monospace", color: paidColor }}>
+                        {fmt0(usd)} USD
+                      </span>
+                      {Number.isFinite(usdRate) && usdRate > 0 ? (
+                        <span style={{ color: "#666" }}> ({fmt0(usd * usdRate)} LYD)</span>
+                      ) : null}
+                    </Typography>
+                  )}
                   {hasRemainder && (
                     <Typography sx={{ mt: 0.25 }}>
                       <span style={{ fontWeight: "bold", color: "#d04444ff" }}>
                         Remainder:
                       </span>{" "}
                       <span style={{ fontFamily: "monospace", color: "#d04444ff" }}>
-                        {fmt0(diff)} LYD
+                        {isGoldInv ? (
+                          <>
+                            {fmt0(diffLyd)} LYD
+                          </>
+                        ) : (
+                          <>
+                            {diffUsd0.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USD
+                            {Number.isFinite(usdRate) && usdRate > 0 ? (
+                              <span style={{ color: "#666" }}> ({fmt0(diffUsd0 * usdRate)} LYD)</span>
+                            ) : null}
+                          </>
+                        )}
                       </span>
                     </Typography>
                   )}

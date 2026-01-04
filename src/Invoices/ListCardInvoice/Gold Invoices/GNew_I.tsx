@@ -171,6 +171,7 @@ type ACHATs = {
 };
 
 type InventoryItem = {
+  Supplier: any;
   id_fact: number;
   date_fact: string;
   client: number;
@@ -1068,24 +1069,25 @@ const DNew_I = () => {
 
   const distinctBrands = React.useMemo(() => {
     const brands = new Set<string>();
-    data.forEach((row) => {
+    const arr = Array.isArray(data) ? data : [];
+    arr.forEach((row) => {
       const brand = getBrandName(row);
       if (brand) brands.add(brand);
     });
     return Array.from(brands).sort();
   }, [data]);
 
+
   // Distinct gold types (based on Fournisseur.TYPE_SUPPLIER) for dropdown
   const distinctGoldTypes = React.useMemo(() => {
     const types = new Set<string>();
-    data.forEach((row) => {
+    const arr = Array.isArray(data) ? data : [];
+    arr.forEach((row) => {
       const ts = (row.Fournisseur?.TYPE_SUPPLIER || '').toString().trim();
       if (ts) types.add(ts);
     });
     return Array.from(types).sort((a, b) => a.localeCompare(b));
   }, [data]);
-
-
 
   const fetchData = useCallback(
     async (typeParam = typeFilter) => {
@@ -1099,14 +1101,34 @@ const DNew_I = () => {
       if (!token) return navigate("/");
 
       try {
-        const response = await axios.get<InventoryItem[]>(
+        const response = await axios.get(
           "/Inventory/allActive",
           {
             headers: { Authorization: `Bearer ${token}` },
             params: { ps, type_supplier: typeParam },
           }
         );
-        setData(response.data);
+
+        // backend shape: { success: true, count: 658, purchases: [...] }
+        const payload: any = response.data;
+
+        const rawList: any[] = Array.isArray(payload)
+          ? payload
+          : Array.isArray(payload?.purchases)
+          ? payload.purchases
+          : [];
+
+        // Normalize property names so the rest of your code keeps working
+        const list: InventoryItem[] = rawList.map((row: any) => ({
+          ...row,
+          // map Supplier → Fournisseur (your code expects Fournisseur)
+          Fournisseur: row.Fournisseur ?? row.Supplier ?? null,
+          // map Distribution → DistributionPurchase if needed
+          DistributionPurchase: row.DistributionPurchase ?? row.Distribution ?? null,
+        }));
+
+        setData(list);
+
         // Debug: log gold API response
 
       } catch (error: any) {
@@ -1289,7 +1311,7 @@ const DNew_I = () => {
   const [search, setSearch] = useState("");
 
   // Filtered data based on search (matches all fields) and cost range
-  const filteredData = data.filter((row) => {
+  const filteredData = (Array.isArray(data) ? data : []).filter((row) => {
     // Hide items that are already present in the current cart
     const isAlreadyInCart = datainv.some((inv) => {
       if (inv.id_art === row.id_fact) return true;
@@ -1352,9 +1374,15 @@ const DNew_I = () => {
       (min === null || cost >= min) && (max === null || cost <= max);
 
     // Type filter logic
+    const supplierType =
+      row.Fournisseur?.TYPE_SUPPLIER ||
+      row.Supplier?.TYPE_SUPPLIER ||
+      "";
+
     const typeOk =
-      typeFilter === "" ||
-      row.Fournisseur?.TYPE_SUPPLIER?.toLowerCase().includes(typeFilter);
+      !typeFilter ||
+      supplierType.toLowerCase().includes(typeFilter.toLowerCase());
+
 
     // Brand filter logic
     const brandValue = getBrandName(row).toLowerCase();

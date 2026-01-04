@@ -19,16 +19,24 @@ import {
   Card,
   CardContent,
   Chip,
+  Divider,
+  Grid,
+  Tooltip,
+  IconButton,
 } from "@mui/material";
 import axios from "../api";
 import LockIcon from "@mui/icons-material/Lock";
 import { useNavigate } from "react-router-dom";
 import { buildEncryptedClientPath, buildEncryptedSellerPath } from "../utils/routeCrypto";
+import { useTheme } from '@mui/material/styles';
+import { Link as RouterLink } from 'react-router-dom';
 import FileCopyIcon from "@mui/icons-material/FileCopy";
+import FileDownload from "@mui/icons-material/FileDownload";
+import EditIcon from "@mui/icons-material/Edit";
 
 import PrintInvoiceDialog from "../Invoices/ListCardInvoice/Gold Invoices/PrintInvoiceDialog";
 import ChiraReturnPage from "./ChiraReturnPage";
-import { FileDownload } from "@mui/icons-material";
+
 // Helper function to format date/time with proper timezone handling
 const formatDateTime = (dateString: string | null) => {
   if (!dateString) return "";
@@ -53,6 +61,49 @@ const formatDateTime = (dateString: string | null) => {
     return "";
   }
 };
+
+async function convertBlobToPngDataUrl(blob: Blob): Promise<string> {
+  const drawOnCanvas = (img: CanvasImageSource, width: number, height: number) => {
+    const canvas = document.createElement("canvas");
+    canvas.width = width || 1;
+    canvas.height = height || 1;
+    const ctx = canvas.getContext("2d");
+    if (ctx) ctx.drawImage(img, 0, 0);
+    return canvas.toDataURL("image/png");
+  };
+
+  if (typeof createImageBitmap === "function") {
+    const bitmap = await createImageBitmap(blob);
+    return drawOnCanvas(bitmap, bitmap.width, bitmap.height);
+  }
+
+  return new Promise((resolve, reject) => {
+    const objectUrl = URL.createObjectURL(blob);
+    const img = new Image();
+    img.onload = () => {
+      try {
+        resolve(drawOnCanvas(img, img.width, img.height));
+      } finally {
+        URL.revokeObjectURL(objectUrl);
+      }
+    };
+    img.onerror = (err) => {
+      URL.revokeObjectURL(objectUrl);
+      reject(err);
+    };
+    img.src = objectUrl;
+  });
+}
+
+async function convertAvifUrlToPngBase64(url: string, token?: string): Promise<string> {
+  const headers: Record<string, string> = token ? { Authorization: `Bearer ${token}` } : {};
+  const res = await fetch(url, { mode: "cors", headers });
+  if (!res.ok) {
+    throw new Error(`Failed to fetch AVIF image (${res.status})`);
+  }
+  const blob = await res.blob();
+  return convertBlobToPngDataUrl(blob);
+}
 
 // Helper function to format date with proper timezone handling
 const formatDate = (dateString: string | null) => {
@@ -90,6 +141,48 @@ const EXPORT_IMG_SIZE = 55; // px size for exported thumbnails (HTML + Excel)
 const EXPORT_IMG_QUALITY = 0.7; // base JPEG quality for export
 const EXPORT_MAX_IMAGES = 800; // global cap of embedded images across entire export
 const EXPORT_FALLBACK_COLOR = "#f0f0f0";
+
+const formatWholeAmount = (value: any, opts?: { allowNegative?: boolean }) => {
+  const raw = Number(value);
+  if (!Number.isFinite(raw)) return "0";
+  const normalized = opts?.allowNegative ? raw : Math.max(0, raw);
+  const rounded = normalized >= 0 ? Math.ceil(normalized) : Math.ceil(normalized);
+  return rounded.toLocaleString(undefined, {
+    maximumFractionDigits: 0,
+    minimumFractionDigits: 0,
+  });
+};
+
+const PS_CODE_LOOKUP: Record<string, string> = {
+  "0": "P0",
+  "1": "P1",
+  "2": "P2",
+  "3": "P3",
+  "4": "P4",
+  P0: "P0",
+  P1: "P1",
+  P2: "P2",
+  P3: "P3",
+  P4: "P4",
+  OG: "OG",
+  "O.G": "OG",
+  "ORIG": "OG",
+  "ORIGINAL": "OG",
+  "ORIGINAL GOLD": "OG",
+};
+
+const resolvePointOfSaleCode = (value: any): string => {
+  if (value === null || value === undefined) return "";
+  const raw = String(value).trim();
+  if (!raw) return "";
+  const normalized = raw.toUpperCase();
+  if (PS_CODE_LOOKUP[normalized]) return PS_CODE_LOOKUP[normalized];
+  const digits = normalized.replace(/\D/g, "");
+  if (digits && PS_CODE_LOOKUP[digits]) return PS_CODE_LOOKUP[digits];
+  if (normalized.includes("OG")) return "OG";
+  if (/^P\d$/i.test(normalized)) return normalized.toUpperCase();
+  return raw;
+};
 
 // Utility: fetch image URL (already tokenized) and downscale to fixed size JPEG base64 to reduce XLS size
 async function fetchAndDownscaleToBase64(
@@ -580,107 +673,142 @@ const SalesReportsTable = ({
 
   // Fetch all images for a given picint (or id_achat) with optional supplier type to select correct folder
   // Typed fetch similar to WatchStandardInvoiceContent: only attempt the explicit folder based on supplier type, with a legacy fallback if none
-  const fetchImages = async (id: number, supplierType?: string) => {
-    if (!id) return;
-    if (imageUrls[id] !== undefined) return; // already fetched
-    const token = localStorage.getItem("token");
-    const normalizeEntryToString = (it: any): string => {
-      if (typeof it === "string") return it;
-      if (it && typeof it === "object") return it.url || it.path || it.href || it.src || "";
-      return "";
-    };
-    const t = supplierType?.toLowerCase() || "";
-    let typed: "watch" | "diamond" | "gold" | undefined;
-    if (t.includes("watch")) typed = "watch";
-    else if (t.includes("diamond")) typed = "diamond";
-    else if (t.includes("gold")) typed = "gold";
-    const endpoints = typed
-      ? [
-        `${API_BASEImage}/list/${typed}/${id}`,
-        // legacy fallback (watch default)
-        `${API_BASEImage}/list/${id}`
-      ]
-      : [`${API_BASEImage}/list/${id}`];
-    for (const url of endpoints) {
+  // Remove the old fetchImages function and replace with this:
+const fetchImages = useCallback(async (id: number, supplierType?: string) => {
+  console.log('[fetchImages] START:', { id, supplierType });
+  
+  if (!id) {
+    console.log('[fetchImages] No ID provided');
+    return;
+  }
+  
+  if (imageUrls[id] !== undefined) {
+    console.log('[fetchImages] Already cached:', id);
+    return;
+  }
+  
+  const token = localStorage.getItem("token");
+  const t = supplierType?.toLowerCase() || "";
+  let typed: "watch" | "diamond" | "gold" | undefined;
+  
+  if (t.includes("watch")) typed = "watch";
+  else if (t.includes("diamond")) typed = "diamond";
+  else if (t.includes("gold")) typed = "gold";
+
+  console.log('[fetchImages] Type detected:', typed);
+
+  try {
+    // Try all possible image endpoints
+    const endpoints = [
+      typed ? `${API_BASEImage}/list/${typed}/${id}` : undefined,
+      `${API_BASEImage}/list/${id}`,
+      `/api/images/list/${typed}/${id}`,
+      `/api/images/list/${id}`,
+      `/images/list/${typed}/${id}`,
+      `/images/list/${id}`,
+    ].filter((v): v is string => typeof v === 'string');
+
+    console.log('[fetchImages] Trying endpoints:', endpoints);
+
+    for (const endpoint of endpoints) {
       try {
-        const res = await axios.get(url, {
-          headers: { Authorization: `Bearer ${token}` },
+        console.log('[fetchImages] Fetching:', endpoint);
+        const res = await axios.get(endpoint, {
+          headers: token ? { Authorization: `Bearer ${token}` } : {},
         });
-        if (Array.isArray(res.data)) {
-          const list = res.data
-            .map((it: any) => {
-              let u = normalizeEntryToString(it);
-              if (!u) return "";
-              // Normalize to a stable, base-path-independent form first.
-              if (u.startsWith("images/") || u.startsWith("uploads/")) u = "/" + u;
-              try {
-                const urlObj = new URL(u, window.location.origin);
-                if (urlObj.pathname.startsWith("/api/images/")) {
-                  u = urlObj.pathname.replace(/^\/api/, "");
-                } else if (urlObj.pathname.startsWith("/api/uploads/")) {
-                  u = urlObj.pathname.replace(/^\/api/, "");
-                } else if (urlObj.pathname.startsWith("/images/") || urlObj.pathname.startsWith("/uploads/")) {
-                  u = urlObj.pathname;
-                } else {
-                  // keep absolute url as-is
-                  u = urlObj.toString();
-                }
-              } catch {
-                /* ignore */
-              }
+        
+        console.log('[fetchImages] Response:', res.data);
 
-              // Rewrite legacy upload mounts to secure routes
-              try {
-                const t2 = new URL(u, window.location.origin);
-                const parts = t2.pathname.split("/").filter(Boolean);
-                const len = parts.length;
-                if (len >= 3) {
-                  const filename = parts[len - 1];
-                  const idSeg = parts[len - 2];
-                  const mount = parts.slice(0, len - 2).join("/").toLowerCase();
-                  if (typed === "gold") {
-                    if (mount.includes("uploads/goldpic") || mount.includes("uploads/opurchases/upload-attachment") || mount.includes("uploads/purchase")) {
-                      u = `/images/gold/${encodeURIComponent(idSeg)}/${encodeURIComponent(filename)}`;
-                    }
-                  }
-                  if (typed === "watch") {
-                    if (mount.includes("uploads/watchpic")) {
-                      u = `/images/watch/${encodeURIComponent(idSeg)}/${encodeURIComponent(filename)}`;
-                    }
-                  }
-                }
-              } catch {
-                /* ignore */
-              }
-
-              // If watch type, rewrite /images/:id/:filename -> /images/watch/:id/:filename
-              if (typed === 'watch') {
-                try {
-                  const obj = new URL(u, window.location.origin);
-                  const parts = obj.pathname.split('/');
-                  // Expect ['', 'images', id, filename]
-                  if (parts.length >= 4 && parts[1] === 'images' && /^\d+$/.test(parts[2]) && parts[3]) {
-                    // Only rewrite if not already /images/watch
-                    if (parts[2] !== 'watch') {
-                      obj.pathname = ['', 'images', 'watch', parts[2], ...parts.slice(3)].join('/');
-                      u = obj.toString();
-                    }
-                  }
-                } catch { /* ignore */ }
-              }
-              const abs = toApiImageAbsolute(ensureHttps(u));
-              return withToken(abs, token);
+        if (res.data && Array.isArray(res.data) && res.data.length > 0) {
+          const urls = res.data
+            .map((item: any) => {
+              // Handle different response formats
+              if (typeof item === 'string') return item;
+              if (item?.url) return item.url;
+              if (item?.path) return item.path;
+              if (item?.href) return item.href;
+              if (item?.src) return item.src;
+              return null;
             })
-            .filter(Boolean);
-          setImageUrls((prev) => ({ ...prev, [id]: list }));
-          return;
+            .filter(Boolean)
+            .map((url: string) => {
+              // Ensure absolute URLs with token
+              if (url.startsWith('http://') || url.startsWith('https://')) {
+                return withToken(url, token);
+              }
+              if (url.startsWith('/')) {
+                return withToken(`${window.location.origin}${url}`, token);
+              }
+              return withToken(`${window.location.origin}/${url}`, token);
+            });
+
+          console.log('[fetchImages] Processed URLs:', urls);
+
+          if (urls.length > 0) {
+            setImageUrls((prev) => ({ ...prev, [id]: urls }));
+            console.log('[fetchImages] SUCCESS - Set URLs for ID:', id);
+            return;
+          }
         }
-      } catch {
-        /* try fallback */
+      } catch (err) {
+        console.log('[fetchImages] Endpoint failed:', endpoint, err);
+        // Continue to next endpoint
       }
     }
+
+    // If we get here, no endpoint worked
+    console.log('[fetchImages] All endpoints failed for ID:', id);
     setImageUrls((prev) => ({ ...prev, [id]: [] }));
-  };
+    
+  } catch (error) {
+    console.error('[fetchImages] Error:', error);
+    setImageUrls((prev) => ({ ...prev, [id]: [] }));
+  }
+}, [API_BASEImage, imageUrls]);
+
+// Simplify the blob URL conversion - don't use blobs, use direct URLs
+useEffect(() => {
+  console.log('[ImageUrls Updated]:', imageUrls);
+}, [imageUrls]);
+
+// Trigger image fetching when data loads
+useEffect(() => {
+  console.log('[Trigger] Data changed, fetching images...', data.length, 'invoices');
+  
+  const idsToFetch = new Set<{ id: number; type: string }>();
+  
+  data.forEach((row: any) => {
+    const supplierType = row?.ACHATs?.[0]?.Fournisseur?.TYPE_SUPPLIER || '';
+    
+    // Try multiple ID sources
+    const possibleIds = [
+      row.picint,
+      row.id_fact,
+      row.id_achat,
+      row.id_art,
+      row.ID_ART,
+      ...(row.ACHATs || []).map((a: any) => a.id_achat || a.ID_ACHAT || a.picint || a.id_art || a.ID_ART).filter(Boolean)
+    ].filter(Boolean);
+
+    possibleIds.forEach(id => {
+      if (id) {
+        idsToFetch.add({ id: Number(id), type: supplierType });
+      }
+    });
+  });
+
+  console.log('[Trigger] IDs to fetch:', Array.from(idsToFetch));
+
+  Array.from(idsToFetch).forEach(({ id, type }) => {
+    fetchImages(id, type);
+  });
+}, [data, fetchImages]);
+
+  // Add debug logging to see what's happening
+useEffect(() => {
+  console.log('[SalesReports] imageUrls state:', imageUrls);
+  console.log('[SalesReports] imageBlobUrls state:', imageBlobUrls);
+}, [imageUrls, imageBlobUrls]);
 
   // Helper to fetch image as blob and store object URL
   const fetchImageBlobs = async (picint: number, urls: string[]) => {
@@ -709,7 +837,7 @@ const SalesReportsTable = ({
       }
     });
     // eslint-disable-next-line
-  }, [imageUrls, imageBlobUrls]);
+  }, [imageUrls]); // Remove imageBlobUrls from dependencies
 
   // Cleanup created blob URLs on unmount only. We track created URLs in a ref
   // to avoid revoking active object URLs when imageBlobUrls updates incrementally
@@ -727,130 +855,100 @@ const SalesReportsTable = ({
   }, []);
 
   useEffect(() => {
-    const fetchData = async () => {
-      setLoading(true);
-      const token = localStorage.getItem("token");
-      const typeFilters = (selectedTypes || []).filter((t) => t !== "all");
+  const fetchData = async () => {
+    setLoading(true);
+    const token = localStorage.getItem("token");
+    const typeFilters = (selectedTypes || []).filter((t) => t !== "all");
 
-      // If "All" selected, fetch per point-of-sale and merge results since backend may not support global listing.
-      if (selectedPs === "all") {
-        try {
-          // If psOptions not yet loaded, wait until they are.
-          if (!psOptions || psOptions.length === 0) {
-            setData([]);
-            return;
-          }
-          const requests: Promise<any>[] = [];
-          psOptions.forEach((p) => {
-            if (typeFilters.length > 1) {
-              typeFilters.forEach((t) => {
-                requests.push(
-                  axios.get(`/invoices/allDetailsP`, {
-                    headers: { Authorization: token ? `Bearer ${token}` : undefined },
-                    params: {
-                      ps: p.Id_point,
-                      type: t,
-                      from: periodFrom || undefined,
-                      to: periodTo || undefined,
-                      usr: localStorage.getItem("Cuser") || '-1',
-                    },
-                  })
-                );
-              });
-            } else {
-              const singleType = typeFilters[0];
-              requests.push(
-                axios.get(`/invoices/allDetailsP`, {
-                  headers: { Authorization: token ? `Bearer ${token}` : undefined },
-                  params: {
-                    ps: p.Id_point,
-                    ...(singleType ? { type: singleType } : {}),
-                    from: periodFrom || undefined,
-                    to: periodTo || undefined,
-                    usr: localStorage.getItem("Cuser") || '-1',
-                  },
-                })
-              );
-            }
+    try {
+      let allInvoices: any[] = [];
+      
+      // Fetch ALL invoices without filters to get complete data
+      const psToFetch = selectedPs === "all" ? psOptions.map(p => p.Id_point) : [selectedPs];
+      
+      for (const ps of psToFetch) {
+        const requests: Promise<any>[] = [];
+        
+        if (typeFilters.length > 1 || typeFilters.length === 0) {
+          // Fetch all types
+          ['gold', 'diamond', 'watch'].forEach((t) => {
+            requests.push(
+              axios.get(`/invoices/allDetailsP`, {
+                headers: { Authorization: token ? `Bearer ${token}` : undefined },
+                params: {
+                  ps: ps,
+                  type: t,
+                  // Remove date filters to get all items
+                  // from: periodFrom || undefined,
+                  // to: periodTo || undefined,
+                  usr: localStorage.getItem("Cuser") || '-1',
+                },
+              }).catch(() => ({ data: [] }))
+            );
           });
-          const results = await Promise.allSettled(requests);
-          const merged: any[] = [];
-          results.forEach((r) => {
-            if (r.status === "fulfilled" && Array.isArray(r.value.data)) {
-              merged.push(...r.value.data);
-            }
-          });
-          // Deduplicate by invoice number or picint
-          const seen = new Set<string>();
-          const dedup = merged.filter((row) => {
-            const key = String(row.num_fact || row.id_fact || row.picint || Math.random());
-            if (seen.has(key)) return false;
-            seen.add(key);
-            return true;
-          });
-          setData(dedup);
-        } catch (err) {
-
-          setData([]);
-        } finally {
-          setLoading(false);
-        }
-        return;
-      }
-
-      // Single PS (or undefined) fetch
-      try {
-        const psParam = selectedPs && selectedPs !== "all" ? selectedPs : undefined;
-        if (typeFilters.length > 1) {
-          const reqs = typeFilters.map((t) =>
+        } else {
+          // Fetch single type
+          const singleType = typeFilters[0];
+          requests.push(
             axios.get(`/invoices/allDetailsP`, {
               headers: { Authorization: token ? `Bearer ${token}` : undefined },
               params: {
-                ...(psParam ? { ps: psParam } : {}),
-                type: t,
-                from: periodFrom || undefined,
-                to: periodTo || undefined,
+                ps: ps,
+                type: singleType,
+                // Remove date filters
+                // from: periodFrom || undefined,
+                // to: periodTo || undefined,
                 usr: localStorage.getItem("Cuser") || '-1',
               },
-            })
+            }).catch(() => ({ data: [] }))
           );
-          const results = await Promise.allSettled(reqs);
-          const merged: any[] = [];
-          results.forEach((r) => {
-            if (r.status === "fulfilled" && Array.isArray(r.value.data)) {
-              merged.push(...r.value.data);
-            }
-          });
-          const seen = new Set<string>();
-          const dedup = merged.filter((row) => {
-            const key = String(row.num_fact || row.id_fact || row.picint || Math.random());
-            if (seen.has(key)) return false;
-            seen.add(key);
-            return true;
-          });
-          setData(dedup);
-        } else {
-          const singleType = typeFilters[0];
-          const res = await axios.get(`/invoices/allDetailsP`, {
-            headers: { Authorization: token ? `Bearer ${token}` : undefined },
-            params: {
-              ...(psParam ? { ps: psParam } : {}),
-              ...(singleType ? { type: singleType } : {}),
-              from: periodFrom || undefined,
-              to: periodTo || undefined,
-              usr: localStorage.getItem("Cuser") || '-1',
-            },
-          });
-          setData(res.data);
         }
-      } catch (err) {
-        setData([]);
-      } finally {
-        setLoading(false);
+        
+        const results = await Promise.all(requests);
+        results.forEach((r) => {
+          if (Array.isArray(r.data)) {
+            allInvoices.push(...r.data);
+          }
+        });
       }
-    };
+      
+      // Deduplicate by invoice number
+      const seen = new Set<string>();
+      const dedup = allInvoices.filter((row) => {
+        const key = String(row.num_fact || row.id_fact || row.picint || Math.random());
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
+      
+      console.log('[SalesReports] Fetched invoices:', dedup.length);
+      
+      // Now apply client-side filtering for date range
+      const filtered = dedup.filter((row) => {
+        const invoiceDate = new Date(row.date_fact);
+        const fromDate = periodFrom ? new Date(periodFrom) : null;
+        const toDate = periodTo ? new Date(periodTo) : null;
+        
+        if (fromDate && invoiceDate < fromDate) return false;
+        if (toDate && invoiceDate > toDate) return false;
+        
+        return true;
+      });
+      
+      console.log('[SalesReports] After date filter:', filtered.length);
+      setData(filtered);
+    } catch (err) {
+      console.error('[SalesReports] Fetch error:', err);
+      setData([]);
+    } finally {
+      setLoading(false);
+    }
+  };
+  
+  if (psOptions.length > 0) {
     fetchData();
-  }, [selectedTypes, periodFrom, periodTo, selectedPs, chiraRefreshFlag, invoiceRefreshFlag, psOptions]);
+  }
+}, [selectedTypes, periodFrom, periodTo, selectedPs, chiraRefreshFlag, invoiceRefreshFlag, psOptions]);
 
   // Fetch watch details (OriginalAchatWatches) for watch invoices using invoice picint
   useEffect(() => {
@@ -1044,13 +1142,25 @@ const SalesReportsTable = ({
           achat.id_achat ?? achat.ID_ACHAT ?? achat.Id_Achat ?? achat.idAchat ?? "";
         const picint = achat.picint ?? "";
         const imageId = (() => {
-          // Gold/watch images are stored under purchase id_achat on the server.
-          if (typeLower.includes("gold") || typeLower.includes("watch")) {
-            return idAchat || achat.picint || row.picint || "";
-          }
-          // Diamonds (and others) often work by picint.
-          return achat.picint || idAchat || row.picint || "";
-        })();
+        const typeSupplier = achat.Fournisseur?.TYPE_SUPPLIER || "";
+        const typeLower = String(typeSupplier).toLowerCase();
+        
+        // Gold images are stored under id_art
+        if (typeLower.includes("gold")) {
+          return achat.id_art || achat.ID_ART || achat.Id_Art || 
+                achat.id_achat || achat.ID_ACHAT || achat.Id_Achat || 
+                achat.picint || row.picint || "";
+        }
+        
+        // Watch images are stored under id_achat
+        if (typeLower.includes("watch")) {
+          return achat.id_achat || achat.ID_ACHAT || achat.Id_Achat || 
+                achat.picint || row.picint || "";
+        }
+        
+        // Diamond images are stored under picint
+        return achat.picint || achat.id_achat || row.picint || "";
+      })();
 
         const IS_GIFT = row.IS_GIFT || "";
 
@@ -1090,36 +1200,71 @@ const SalesReportsTable = ({
 
 
   // Fetch images for all invoices in sortedData when data changes
-  useEffect(() => {
-    const queued: { id: number; type?: string }[] = [];
-    data.forEach((row: any) => {
-      const supplierType = row?.ACHATs?.[0]?.Fournisseur?.TYPE_SUPPLIER;
-      if (row.picint && String(supplierType || "").toLowerCase().includes("diamond")) {
-        queued.push({ id: row.picint, type: supplierType });
-      }
-      (row.ACHATs || []).forEach((a: any) => {
-        const t = String(a?.Fournisseur?.TYPE_SUPPLIER || supplierType || "").toLowerCase();
-        const prodId =
-          t.includes("gold") || t.includes("watch")
-            ? a.id_achat || a.ID_ACHAT || a.Id_Achat || a.picint
-            : a.picint || a.id_achat || a.ID_ACHAT || a.Id_Achat;
-        if (prodId)
-          queued.push({
-            id: prodId,
-            type: a?.Fournisseur?.TYPE_SUPPLIER || supplierType,
-          });
+  // Fetch images for all invoices in sortedData when data changes
+useEffect(() => {
+  console.log('[SalesReports] Triggering image fetch for data:', data);
+  const queued: { id: number; type?: string }[] = [];
+  
+  data.forEach((row: any) => {
+    const supplierType = row?.ACHATs?.[0]?.Fournisseur?.TYPE_SUPPLIER;
+    const typeLower = String(supplierType || "").toLowerCase();
+    
+    console.log('[SalesReports] Processing row:', { 
+      num_fact: row.num_fact, 
+      picint: row.picint, 
+      supplierType,
+      achats: row.ACHATs 
+    });
+    
+    // For diamond invoices, use picint
+    if (typeLower.includes("diamond") && row.picint) {
+      queued.push({ id: row.picint, type: supplierType });
+    }
+    
+    // Process each ACHAT
+    (row.ACHATs || []).forEach((a: any) => {
+      const achatType = String(a?.Fournisseur?.TYPE_SUPPLIER || supplierType || "").toLowerCase();
+      
+      console.log('[SalesReports] Processing ACHAT:', {
+        id_achat: a.id_achat,
+        ID_ACHAT: a.ID_ACHAT,
+        Id_Achat: a.Id_Achat,
+        picint: a.picint,
+        id_art: a.id_art,
+        achatType
       });
-    });
-    // Fetch distinct
-    const seen = new Set<number>();
-    queued.forEach((q) => {
-      if (!seen.has(q.id)) {
-        seen.add(q.id);
-        fetchImages(q.id, q.type);
+      
+      // For gold/watch, use id_achat (or id_art for gold)
+      if (achatType.includes("gold")) {
+        const goldId = a.id_art || a.ID_ART || a.Id_Art || a.id_achat || a.ID_ACHAT || a.Id_Achat;
+        if (goldId) {
+          queued.push({ id: goldId, type: a?.Fournisseur?.TYPE_SUPPLIER || supplierType });
+        }
+      } else if (achatType.includes("watch")) {
+        const watchId = a.id_achat || a.ID_ACHAT || a.Id_Achat || a.picint;
+        if (watchId) {
+          queued.push({ id: watchId, type: a?.Fournisseur?.TYPE_SUPPLIER || supplierType });
+        }
+      } else if (achatType.includes("diamond")) {
+        const diamondId = a.picint || a.id_achat || a.ID_ACHAT || a.Id_Achat;
+        if (diamondId) {
+          queued.push({ id: diamondId, type: a?.Fournisseur?.TYPE_SUPPLIER || supplierType });
+        }
       }
     });
-    // eslint-disable-next-line
-  }, [sortedData]);
+  });
+  
+  console.log('[SalesReports] Queued for fetch:', queued);
+  
+  // Fetch distinct
+  const seen = new Set<number>();
+  queued.forEach((q) => {
+    if (!seen.has(q.id)) {
+      seen.add(q.id);
+      fetchImages(q.id, q.type);
+    }
+  });
+}, [data]); // Only depend on data
 
   // Fetch images for all product-level picints in sortedData when data changes
   useEffect(() => {
@@ -1137,8 +1282,8 @@ const SalesReportsTable = ({
         const t = String(a?.Fournisseur?.TYPE_SUPPLIER || supplierType || "").toLowerCase();
         const prodId =
           t.includes("gold") || t.includes("watch")
-            ? a.id_achat || a.ID_ACHAT || a.Id_Achat || a.picint
-            : a.picint || a.id_achat || a.ID_ACHAT || a.Id_Achat;
+            ? a.id_art || a.ID_ART || a.id_art || a.id_art
+            : a.id_art || a.id_achat || a.ID_ACHAT || a.Id_Achat;
         if (prodId && imageUrls[prodId] === undefined)
           pending.push({
             id: prodId,
@@ -2111,893 +2256,531 @@ const SalesReportsTable = ({
 
   // ---- CARD RENDERER (replaces table row) ----
   const renderInvoiceCard = (row: any) => {
-    const date = formatDate(row.date_fact) || "";
-    const num = row.num_fact || "";
-    const createdStr = formatDateTime(row.d_time);
-    const ps = row.ps || "";
-    const user =
-      row.Utilisateur && row.Utilisateur.name_user
-        ? row.Utilisateur.name_user
-        : "";
-    const isChiraVal = row.is_chira === true || row.is_chira === 1;
-    const returnChira = row.return_chira;
-    const commentChira = row.comment_chira;
-    const usrReceiveChira = row.usr_receive_chira;
-    const invoiceComment = stripInternalMetaTags((row as any).COMMENT ?? "");
-
-    // Primary label: show Chira No when chira=yes, otherwise Invoice No
-    const primaryLabel = isChiraVal
-      ? `Chira No: ${row.num_fact || row.num || row.id_fact || ""}`
-      : `Invoice No: ${row.num_fact || row.num || row.id_fact || ""}`;
-
-    // Find user name from users array by id_user
-    let usrReceiveChiraName: any = usrReceiveChira;
-    if (usrReceiveChira && Array.isArray(users) && users.length > 0) {
-      const foundUser = users.find(
-        (u) => String(u.id_user) === String(usrReceiveChira)
-      );
-      if (foundUser) {
-        usrReceiveChiraName = foundUser.name_user;
-      }
+  const date = formatDate(row.date_fact) || "";
+  const num = row.num_fact || "";
+  const createdStr = formatDateTime(row.d_time);
+  const ps = row.ps || "";
+  const psCode = resolvePointOfSaleCode(ps);
+  const user = row.Utilisateur?.name_user || "";
+  const isChiraVal = row.is_chira === true || row.is_chira === 1;
+  const invoiceComment = stripInternalMetaTags(row.COMMENT ?? "");
+  
+  const clientValue = row.Client || row.client || null;
+  let clientDisplay = "";
+  if (clientValue && typeof clientValue === "object") {
+    const name = clientValue.client_name || clientValue.name || "";
+    const tel = clientValue.tel_client || clientValue.phone || "";
+    clientDisplay = `${name}${name && tel ? " - " : ""}${tel}`;
+  }
+  const customerIdRaw =
+    row.Client?.id_client ??
+    row.Client?.ID_CLIENT ??
+    row.Client?.idClient ??
+    row.client?.id_client ??
+    row.client?.ID_CLIENT ??
+    row.client?.idClient ??
+    row.id_client ??
+    row.ID_CLIENT ??
+    row.Id_client ??
+    row.client_id ??
+    row.clientID ??
+    row.ClientID ??
+    null;
+  const customerIdForLink =
+    customerIdRaw !== null && customerIdRaw !== undefined
+      ? Number(customerIdRaw)
+      : NaN;
+  const hasCustomerProfileLink = Number.isFinite(customerIdForLink);
+  
+  const details: any[] = row._productDetails || [];
+  const isClosed = !!row.IS_OK;
+  
+  const rawTypeSupplier = row?.ACHATs?.[0]?.Fournisseur?.TYPE_SUPPLIER || "";
+  let invoiceTypeLabel = "";
+  let typeColor = "default";
+  
+  if (rawTypeSupplier) {
+    const t = String(rawTypeSupplier).toLowerCase();
+    if (t.includes("gold")) {
+      invoiceTypeLabel = "Gold";
+      typeColor = "#FFD700";
+    } else if (t.includes("diamond")) {
+      invoiceTypeLabel = "Diamond";
+      typeColor = "#B9F2FF";
+    } else if (t.includes("watch")) {
+      invoiceTypeLabel = "Watch";
+      typeColor = "#DDA15E";
     }
+  }
 
-    const isChiraFieldsEmpty =
-      (!returnChira || returnChira === "0") &&
-      (!commentChira || commentChira === "0") &&
-      (!usrReceiveChira || usrReceiveChira === "0");
+  const numFactAction = row?.num_fact ?? row?.num ?? row?.id_fact ?? null;
+  const isReturning = numFactAction !== null && returningIds.includes(String(numFactAction));
 
-    const numFactAction = row?.num_fact ?? row?.num ?? row?.id_fact ?? null;
-    const isReturning =
-      numFactAction !== null && returningIds.includes(String(numFactAction));
-
-    const clientValue = row.Client || row.client || null;
-    let clientDisplay = "";
-    if (clientValue && typeof clientValue === "object") {
-      const name = clientValue.client_name || clientValue.name || "";
-      const tel = clientValue.tel_client || clientValue.phone || "";
-      clientDisplay = `${name}${name && tel ? " - " : ""}${tel}`;
-    }
-    const clientId =
-      (clientValue &&
-        (clientValue.id_client ||
-          clientValue.Id_client ||
-          clientValue.client_id)) ||
-      row?.id_client ||
-      row?.client_id ||
-      row?.Id_client ||
-      null;
-
-    const totalRemiseFinal = row.total_remise_final ?? "";
-    // amount fields are accessed directly from `row` where needed
-
-    const details: any[] = row._productDetails || [];
-    const invoicePrixVenteRemise = row.prix_vente_remise;
-
-    const isClosed = !!row.IS_OK;
-    // derive a short invoice type label from first product supplier type
-    const rawTypeSupplier = row?.ACHATs?.[0]?.Fournisseur?.TYPE_SUPPLIER || "";
-    let invoiceTypeLabel = "";
-    if (rawTypeSupplier) {
-      const t = String(rawTypeSupplier).toLowerCase();
-      if (t.includes("gold")) invoiceTypeLabel = "Gold";
-      else if (t.includes("diamond")) invoiceTypeLabel = "Diamond";
-      else if (t.includes("watch")) invoiceTypeLabel = "Watch";
-      else invoiceTypeLabel = rawTypeSupplier;
-    }
-    return (
-      <Card
-        key={row.num_fact || row.id_fact || row.picint}
+  return (
+    <Card
+      key={row.num_fact || row.id_fact || row.picint}
+      sx={{
+        mb: 3,
+        borderRadius: 3,
+        boxShadow: '0 4px 12px rgba(0,0,0,0.08)',
+        border: '1px solid #e5e7eb',
+        overflow: 'hidden',
+        transition: 'all 0.3s ease',
+        '&:hover': {
+          boxShadow: '0 8px 24px rgba(0,0,0,0.12)',
+          transform: 'translateY(-2px)',
+        }
+      }}
+    >
+      {/* Header Section */}
+      <Box
         sx={{
-          borderRadius: 2,
-          boxShadow: 2,
-          display: "flex",
-          flexDirection: "column",
-          width: "100%",
-          mb: 2, // add margin between cards
+          background: '#68a5bf',
+          p: 2.5,
         }}
       >
-        <CardContent
-          sx={{ display: "flex", flexDirection: "column", gap: 1.5 }}
-        >
-          {/* Top: Invoice Info + State */}
-          <Box
-            sx={{
-              display: "flex",
-              justifyContent: "space-between",
-              flexWrap: "wrap",
-              gap: 1,
-            }}
-          >
-            <Box
-              sx={{
-                fontSize: 12,
-                display: "flex",
-                flexDirection: "column",
-                gap: 1,
-              }}
-            >
-              {/* Row 1: Primary labels */}
-              <Box
+        <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', mb: 1.5 }}>
+          <Box>
+            <Typography variant="h5" sx={{ fontWeight: 800, mb: 0.5 }}>
+              {isChiraVal ? `Chira #${num}` : `Invoice #${num}`}
+            </Typography>
+            <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap', alignItems: 'center' }}>
+              <Chip
+                label={invoiceTypeLabel}
+                size="small"
                 sx={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: 1,
-                  flexWrap: "wrap",
+                  backgroundColor: typeColor,
+                  color: '#000',
+                  fontWeight: 700,
+                  fontSize: 11,
                 }}
-              >
-                {invoiceTypeLabel ? (
-                  <Chip
-                    label={invoiceTypeLabel}
-                    color="error"
-                    sx={{ fontWeight: 700 }}
-                  />
-                ) : null}
-                <Typography sx={{ fontSize: 16, fontWeight: 800 }}>
-                  {primaryLabel}
-                </Typography>
-                {invoiceComment ? (
-                  <Chip
-                    label={`Comment: ${invoiceComment}`}
-                    size="small"
-                    variant="outlined"
-                  />
-                ) : null}
-              </Box>
-
-              {/* Row 2: Meta info */}
-              <Box
-                sx={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: 1,
-                  flexWrap: "wrap",
-                }}
-              >
-                <Chip
-                  label={`Date: ${date || "—"}`}
-                  size="small"
-                  variant="outlined"
-                />
-                <Chip
-                  label={`Time: ${createdStr || "—"}`}
-                  size="small"
-                  variant="outlined"
-                />
-                <Chip
-                  label={`Point of Sale: ${ps || "—"}`}
-                  size="small"
-                  variant="outlined"
-                />
-                {user ? (
-                  <Chip
-                    label={`Sold by: ${user}`}
-                    size="small"
-                    color="secondary"
-                    onClick={() => {
-                      let sellerId: number | null = null;
-                      try {
-                        sellerId = row?.Utilisateur?.id_user ?? null;
-                      } catch { }
-                      if (
-                        !sellerId &&
-                        Array.isArray(users) &&
-                        users.length > 0
-                      ) {
-                        const found = users.find(
-                          (u) => String(u.name_user) === String(user)
-                        );
-                        if (found) sellerId = Number(found.id_user);
-                      }
-                      if (sellerId) {
-                        const path = buildEncryptedSellerPath(sellerId);
-                        try {
-                          if (typeof window !== "undefined") {
-                            localStorage.setItem(
-                              "sellerFocusId",
-                              String(sellerId)
-                            );
-                            window.location.assign(path);
-                          }
-                        } catch {
-                          navigate(path);
-                        }
-                      }
-                    }}
-                    clickable
-                  />
-                ) : (
-                  <Chip label={`Sold by: —`} size="small" variant="outlined" />
-                )}
-                {isAdmin && (
-                  <Button
-                    variant="outlined"
-                    size="small"
-                    sx={{ ml: 0.5, fontSize: 11, py: 0.2, px: 0.8, textTransform: "none" }}
-                    onClick={() => handleOpenEditSeller(row)}
-                  >
-                   Changing the seller
-                  </Button>
-                )}
-              </Box>
-
-              {/* Row 3: Client / Source / Chira / State */}
-              <Box
-                sx={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: 1,
-                  flexWrap: "wrap",
-                }}
-              >
-                {clientDisplay ? (
-                  <Chip
-                    label={clientDisplay}
-                    size="small"
-                    color="primary"
-                    onClick={() => {
-                      const idNum = Number(clientId);
-                      const namePart =
-                        (clientValue &&
-                          (clientValue.client_name || clientValue.name)) ||
-                        String(clientDisplay).split(" - ")[0] ||
-                        "";
-                      try {
-                        if (typeof window !== "undefined") {
-                          if (Number.isFinite(idNum) && idNum > 0) {
-                            localStorage.setItem("customerFocusId", String(idNum));
-                          } else {
-                            // Prevent stale focus id from forcing the previous customer.
-                            localStorage.removeItem("customerFocusId");
-                          }
-                          if (namePart) {
-                            localStorage.setItem("customerFocusName", String(namePart));
-                          }
-                          // Ensure we don't route by phone anymore
-                          localStorage.removeItem("customerFocusPhone");
-                        }
-                      } catch { }
-                      const path = "/invoice/customerProfile";
-                      // Hard navigation so the profile always remounts and reads the latest focus id.
-                      try {
-                        if (typeof window !== "undefined") {
-                          window.location.assign(path);
-                          return;
-                        }
-                      } catch { }
-                      navigate(path);
-                    }}
-                    clickable
-                  />
-                ) : (
-                  <Chip label="Client: —" size="small" variant="outlined" />
-                )}
-                {row.SourceMark ? (
-                  <Chip
-                    label={`Source: ${String(row.SourceMark)}`}
-                    size="small"
-                    color="info"
-                  />
-                ) : (
-                  <Chip label="Source: —" size="small" variant="outlined" />
-                )}
-                <Chip
-                  label={`Chira: ${isChiraVal ? "Yes" : "No"}`}
-                  size="small"
-                  color={isChiraVal ? "success" : "default"}
-                />
-                {isClosed ? (
-                  <Chip
-                    icon={<LockIcon fontSize="small" />}
-                    label="Closed Invoice"
-                    size="small"
-                    color="success"
-                  />
-                ) : (
-                  <Chip
-                    icon={<LockIcon fontSize="small" />}
-                    label="Open Invoice"
-                    size="small"
-                    color="warning"
-                  />
-                )}
-              </Box>
-            </Box>
-
-            <Box
-              sx={{
-                textAlign: "right",
-                fontSize: 12,
-                display: "flex",
-                flexDirection: "column",
-                gap: 1,
-                alignItems: "flex-end",
-              }}
-            >
-              {/* Amounts chip moved to the right side */}
-              <Box
-                sx={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: 0.5,
-                  justifyContent: "flex-end",
-                }}
-              >
-                <Box
-                  sx={{
-                    display: "flex",
-                    flexDirection: "column",
-                    alignItems: "flex-end",
-                    gap: 0.25,
-                    minHeight: 0,
-                    fontSize: 11,
-                  }}
-                >
-                  {(() => {
-                    const lines: Array<{ key: string; node: React.ReactNode }> = [];
-
-                    const moneyEps = 0.01;
-                    const normalizeMoney = (v: number) =>
-                      Math.round((Number(v) || 0) * 100) / 100;
-
-                    const isGold =
-                      !!row?.ACHATs?.[0]?.Fournisseur?.TYPE_SUPPLIER?.toLowerCase().includes(
-                        "gold"
-                      );
-
-                    const totalRemiseFinalLyd = row.total_remise_final_lyd ?? "";
-
-                    // Prefer comparing in LYD equivalent when available.
-                    const totalLyd = normalizeMoney(Number(totalRemiseFinalLyd) || 0);
-                    const paidLydEquiv = normalizeMoney(
-                      (Number(row.amount_lyd) || 0) +
-                        (Number(row.amount_currency_LYD) || 0) +
-                        (Number(row.amount_EUR_LYD) || 0)
-                    );
-
-                    // Match InvoiceTotalsDialog behavior for LYD: treat as whole LYD for paid-in-full status.
-                    const totalLyd0 = normalizeLyd0(totalLyd);
-                    const paidLydEquiv0 = normalizeLyd0(paidLydEquiv);
-
-                    // Fallback comparison (when LYD total is missing): compare in base invoice currency.
-                    const totalBase = normalizeMoney(Number(totalRemiseFinalLyd) || 0);
-                    const paidBase = normalizeMoney(
-                      isGold
-                        ? (Number(row.amount_lyd) || 0)
-                        : (Number(row.amount_currency) || 0)
-                    );
-
-                    const hasLydTotal = totalLyd > 0;
-                    const diff = hasLydTotal
-                      ? (isGold ? (totalLyd0 - paidLydEquiv0) : (totalLyd - paidLydEquiv))
-                      : totalBase - paidBase;
-                    const isPaidInFull = Math.abs(diff) <= moneyEps;
-                    const isPartial = diff > moneyEps;
-                    const statusColor = isPaidInFull ? "#2e7d32" : "#d04444ff";
-
-                    const total = Number(totalRemiseFinal) || 0;
-                    if (total) {
-                      lines.push({
-                        key: "total",
-                        node: (
-                          <span
-                            style={{
-                              fontWeight: 700,
-                              color: statusColor,
-                            }}
-                          >
-                            {isGold
-                              ? `LYD ${Number(normalizeLyd0(total)).toLocaleString("en-US", { minimumFractionDigits: 0, maximumFractionDigits: 0 })}`
-                              : `${formatNumber(total)} USD`}
-                          </span>
-                        ),
-                      });
-                    }
-
-                    const lyd = Number(row.amount_lyd) || 0;
-                    if (lyd !== 0) {
-                      lines.push({ key: "lyd", node: `LYD: ${formatNumber(lyd)}` });
-                    }
-
-                    const usd = Number(row.amount_currency) || 0;
-                    if (usd !== 0) {
-                      const usdEq = row.amount_currency_LYD
-                        ? ` (${formatNumber(row.amount_currency_LYD)} LYD)`
-                        : "";
-                      lines.push({ key: "usd", node: `USD: ${formatNumber(usd)}${usdEq}` });
-                    }
-
-                    const eur = Number(row.amount_EUR) || 0;
-                    if (eur !== 0) {
-                      const eurEq = row.amount_EUR_LYD
-                        ? ` (${formatNumber(row.amount_EUR_LYD)} LYD)`
-                        : "";
-                      lines.push({ key: "eur", node: `EUR: ${formatNumber(eur)}${eurEq}` });
-                    }
-
-                    if (isPartial) {
-                      // Match InvoiceTotalsDialog-style whole-LYD remainder; don't display "0" remainders.
-                      const remLyd0 = normalizeLyd0(Math.abs(diff));
-                      if ((hasLydTotal || isGold) && remLyd0 <= 0) {
-                        // no-op
-                      } else {
-                        lines.push({
-                          key: "remainder",
-                          node: (
-                            <span style={{ color: "#d04444ff" }}>
-                              {hasLydTotal || isGold
-                                ? `Remainder: ${Number(remLyd0).toLocaleString("en-US", { minimumFractionDigits: 0, maximumFractionDigits: 0 })} LYD`
-                                : `Remainder: ${formatNumber(Math.abs(diff))} USD`}
-                            </span>
-                          ),
-                        });
-                      }
-                    }
-
-                    const restPieces: string[] = [];
-                    const restLYD =
-                      row.rest_of_money != null ? Number(row.rest_of_money) : 0;
-                    const restUSD =
-                      row.rest_of_moneyUSD != null
-                        ? Number(row.rest_of_moneyUSD)
-                        : 0;
-                    const restEUR =
-                      row.rest_of_moneyEUR != null
-                        ? Number(row.rest_of_moneyEUR)
-                        : 0;
-                    if (!isNaN(restLYD) && restLYD !== 0)
-                      restPieces.push(`LYD ${formatNumber(restLYD)}`);
-                    if (!isNaN(restUSD) && restUSD !== 0)
-                      restPieces.push(`USD ${formatNumber(restUSD)}`);
-                    if (!isNaN(restEUR) && restEUR !== 0)
-                      restPieces.push(`EUR ${formatNumber(restEUR)}`);
-                    if (restPieces.length > 0) {
-                      lines.push({
-                        key: "restCombined",
-                        node: (
-                          <span style={{ color: "#d04444ff" }}>
-                            {`Remaining: ${restPieces.join(" | ")}`}
-                          </span>
-                        ),
-                      });
-                    }
-
-                    if (lines.length === 0) {
-                      lines.push({ key: "empty", node: "Amounts" });
-                    }
-
-                    return lines.map((l) => (
-                      <Typography
-                        key={l.key}
-                        sx={{
-                          fontSize: 11,
-                          lineHeight: 1.25,
-                          background: "transparent",
-                        }}
-                      >
-                        {l.node}
-                      </Typography>
-                    ));
-                  })()}
-                </Box>
-              </Box>
-
-              {!isChiraVal && !isChiraFieldsEmpty && (
-                <Box
-                  sx={{
-                    mt: 0,
-                    background: "#f9fbe7",
-                    borderRadius: 1,
-                    p: 1,
-                    fontSize: 11,
-                  }}
-                >
-                  <div>
-                    <span style={{ fontWeight: "bold", color: "#388e3c" }}>
-                      Return Date:
-                    </span>
-                    <span style={{ marginLeft: 6 }}>{returnChira || "-"}</span>
-                  </div>
-                  <div>
-                    <span style={{ fontWeight: "bold", color: "#d32f2f" }}>
-                      Return By:
-                    </span>
-                    <span style={{ marginLeft: 6 }}>
-                      {usrReceiveChiraName || "-"}
-                    </span>
-                  </div>
-                  <div>
-                    <span style={{ fontWeight: "bold", color: "#1976d2" }}>
-                      Comment Chira:
-                    </span>
-                    <span style={{ marginLeft: 6 }}>{commentChira || "-"}</span>
-                  </div>
-                </Box>
-              )}
-
-              {/* client/amounts/source moved into the invoice info chips */}
+              />
+              <Typography sx={{ fontSize: 13, opacity: 0.9 }}>
+                {date} • {createdStr}
+              </Typography>
             </Box>
           </Box>
+          
+          <Box sx={{ textAlign: 'right' }}>
+            <Chip
+              icon={isClosed ? <LockIcon fontSize="small" /> : undefined}
+              label={isClosed ? "Closed" : "Open"}
+              size="small"
+              sx={{
+                backgroundColor: isClosed ? '#10b981' : '#f59e0b',
+                color: 'white',
+                fontWeight: 700,
+              }}
+            />
+          </Box>
+        </Box>
 
-          {/* Product Details + Images (grouped by supplier type) */}
-          {details.length > 0 && (
-            <Box sx={{ mt: 1 }}>
-              <Typography
-                variant="subtitle2"
-                sx={{ fontWeight: "bold", fontSize: 12, mb: 0.5 }}
-              >
-                Product Details
-              </Typography>
-
-              {/* Group details by typeSupplier */}
-              {(() => {
-                const grouped: Record<string, any[]> = {};
-
-                details.forEach((d) => {
-                  const k =
-                    (d.typeSupplier && String(d.typeSupplier)) || "Other";
-                  if (!grouped[k]) grouped[k] = [];
-                  grouped[k].push(d);
-                });
-                return Object.entries(grouped).map(([groupName, items]) => (
-                  <Box
-                    key={groupName}
+        {/* Meta Info Row */}
+        <Box sx={{ display: 'flex', gap: 2, flexWrap: 'wrap', fontSize: 13, opacity: 0.95 }}>
+          {psCode && (
+            <Chip
+              label={`${psCode}`}
+              size="small"
+              sx={{
+                backgroundColor: 'rgba(255,255,255,0.2)',
+                color: 'white',
+                fontWeight: 700,
+                letterSpacing: 0.5,
+              }}
+            />
+          )}
+          {(user || clientDisplay) && (
+            <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0.5 }}>
+              {user && row.Utilisateur?.id_user && (
+                <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                  <Button
+                    component={RouterLink}
+                    to={buildEncryptedSellerPath(row.Utilisateur.id_user)}
+                    size="small"
                     sx={{
-                      display: "flex",
-                      flexDirection: "row",
-                      gap: 2,
-                      alignItems: "flex-start",
-                      border: "1px solid #f0f0f0",
-                      borderRadius: 1,
-                      p: 1,
+                      p: 0.5,
+                      minWidth: 0,
+                      color: 'primary.main',
+                      textTransform: 'none',
+                      fontWeight: 700,
+                      background: 'none',
+                      '&:hover': { textDecoration: 'underline', background: 'none' },
                     }}
                   >
-                    <Box
-                      sx={{
-                        display: "flex",
-                        flexDirection: "row",
-                        gap: 1,
-                        flexWrap: "wrap",
-                        flex: 1,
-                      }}
-                    >
-                      {items.map((d: any, idx: number) => {
-                        const productImageId = d.imageId ?? d.id_achat ?? d.picint;
-                        const productBlobUrls = productImageId
-                          ? imageBlobUrls[productImageId] || []
-                          : [];
-                        const invoiceIdForLine =
-                          d.id_fact || row.id_fact || row.num_fact;
-                        const rawPrice =
-                          d.prix_vente_remise ??
-                          invoicePrixVenteRemise ??
-                          "";
-                        const resolvedPriceLabel =
-                          rawPrice !== "" && rawPrice !== null && rawPrice !== undefined
-                            ? `${formatNumber(rawPrice)} ${d.typeSupplier
-                              ?.toLowerCase()
-                              .includes("gold")
-                              ? "LYD"
-                              : "USD"}`
-                            : "—";
-                        return (
-                          <Box
-                            key={idx}
-                            sx={{
-                              display: "flex",
-                              flexDirection: "column",
-                              gap: 1,
-                              alignItems: "stretch",
-                              border: "1px solid #eee",
-                              borderRadius: 2,
-                              p: 1,
-                              width: 220,
-                              minHeight: 260,
-                              boxShadow: 0,
-                              transition: "box-shadow 150ms ease",
-                              "&:hover": { boxShadow: 3 },
-                            }}
-                          >
-                            {/* Image on top */}
-                            <Box
-                              sx={{
-                                width: "100%",
-                                display: "flex",
-                                alignItems: "center",
-                                justifyContent: "center",
-                              }}
-                            >
-                              {productBlobUrls.length > 0 ? (
-                                <img
-                                  src={productBlobUrls[0]}
-                                  alt={`Product Img`}
-                                  style={{
-                                    width: "100%",
-                                    height: 140,
-                                    objectFit: "fill",
-                                    borderRadius: 6,
-                                    border: "1px solid #eee",
-                                    cursor: "pointer",
-                                  }}
-                                  onClick={(e) => {
-                                    try {
-                                      const src = (e.currentTarget as HTMLImageElement).src;
-                                      setImageDialogUrl(src);
-                                    } catch {
-                                      setImageDialogUrl(productBlobUrls[0]);
-                                    }
-                                    setImageDialogOpen(true);
-                                  }}
-                                  onError={(e) => {
-                                    // Attempt fallback only for watch items and only if current src has /images/watch
-                                    try {
-                                      if (String(d.typeSupplier || '').toLowerCase().includes('watch')) {
-                                        const imgEl = e.currentTarget as HTMLImageElement;
-                                        const tried = imgEl.getAttribute('data-fallback-tried');
-                                        const origSrc = imgEl.getAttribute('data-orig-src') || imgEl.src;
-                                        if (!tried && /\/images\/watch\//.test(origSrc)) {
-                                          imgEl.setAttribute('data-orig-src', origSrc);
-                                          // Build fallback chain
-                                          const urlObj = new URL(origSrc, window.location.origin);
-                                          const parts = urlObj.pathname.split('/'); // ['', 'images', 'watch', id, filename]
-                                          if (parts.length >= 5) {
-                                            const idPart = parts[3];
-                                            const filenamePart = parts.slice(4).join('/').split('?')[0];
-                                            const token = urlObj.searchParams.get('token');
-                                            const generic = `${urlObj.protocol}//${urlObj.host}/images/${idPart}/${filenamePart}` + (token ? `?token=${encodeURIComponent(token)}` : '');
-                                            const staticUrl = `${urlObj.protocol}//${urlObj.host}/uploads/WatchPic/${idPart}/${filenamePart}`;
-                                            imgEl.setAttribute('data-fallback-tried', '1');
-                                            // Try generic first
-                                            imgEl.onerror = () => {
-                                              imgEl.onerror = null; // final fallback
-                                              imgEl.src = staticUrl;
-                                            };
-                                            imgEl.src = generic;
-                                          }
-                                        }
-                                      }
-                                    } catch {/* ignore */ }
-                                  }}
-                                />
-                              ) : (
-                                (() => {
-                                  // Fallback: show first raw URL while blob is still loading (or if blob fetch failed)
-                                  const productRawUrls = productImageId
-                                    ? imageUrls[productImageId] || []
-                                    : [];
-                                  const first = (productRawUrls[0] || "").trim();
-                                  if (first) {
-                                    return (
-                                      <img
-                                        src={first}
-                                        alt="Product Img"
-                                        style={{
-                                          width: "100%",
-                                          height: 140,
-                                          objectFit: "cover",
-                                          borderRadius: 6,
-                                          border: "1px solid #eee",
-                                          cursor: "pointer",
-                                        }}
-                                        onClick={(e) => {
-                                          try {
-                                            const src = (e.currentTarget as HTMLImageElement).src;
-                                            setImageDialogUrl(src);
-                                          } catch {
-                                            setImageDialogUrl(productRawUrls[0]);
-                                          }
-                                          setImageDialogOpen(true);
-                                        }}
-                                        onError={(e) => {
-                                          try {
-                                            if (String(d.typeSupplier || '').toLowerCase().includes('watch')) {
-                                              const imgEl = e.currentTarget as HTMLImageElement;
-                                              const tried = imgEl.getAttribute('data-fallback-tried');
-                                              const origSrc = imgEl.getAttribute('data-orig-src') || imgEl.src;
-                                              // Handle both /images/watch and /images direct paths
-                                              if (!tried && /\/images\//.test(origSrc)) {
-                                                imgEl.setAttribute('data-orig-src', origSrc);
-                                                const urlObj = new URL(origSrc, window.location.origin);
-                                                const p = urlObj.pathname.split('/');
-                                                // Shapes:
-                                                // ['', 'images', id, filename]
-                                                // ['', 'images', 'watch', id, filename]
-                                                let idPart: string | null = null;
-                                                let filenamePart: string | null = null;
-                                                if (p.length >= 4 && p[1] === 'images' && p[2] !== 'watch') {
-                                                  idPart = p[2];
-                                                  filenamePart = p.slice(3).join('/');
-                                                } else if (p.length >= 5 && p[1] === 'images' && p[2] === 'watch') {
-                                                  idPart = p[3];
-                                                  filenamePart = p.slice(4).join('/');
-                                                }
-                                                if (idPart && filenamePart) {
-                                                  filenamePart = filenamePart.split('?')[0];
-                                                  const token = urlObj.searchParams.get('token');
-                                                  // Build ordered fallbacks
-                                                  const watchUrl = `${urlObj.protocol}//${urlObj.host}/images/watch/${idPart}/${filenamePart}` + (token ? `?token=${encodeURIComponent(token)}` : '');
-                                                  const staticUrl = `${urlObj.protocol}//${urlObj.host}/uploads/WatchPic/${idPart}/${filenamePart}`;
-                                                  imgEl.setAttribute('data-fallback-tried', '1');
-                                                  // If we were already /images/watch/, skip directly to static
-                                                  if (/\/images\/watch\//.test(origSrc)) {
-                                                    imgEl.onerror = null;
-                                                    imgEl.src = staticUrl;
-                                                  } else {
-                                                    imgEl.onerror = () => {
-                                                      imgEl.onerror = null;
-                                                      imgEl.src = staticUrl;
-                                                    };
-                                                    imgEl.src = watchUrl;
-                                                  }
-                                                }
-                                              }
-                                            }
-                                          } catch {/* ignore */ }
-                                        }}
-                                      />
-                                    );
-                                  }
-                                  return (
-                                    <Box
-                                      sx={{
-                                        width: "100%",
-                                        height: 140,
-                                        border: "1px dashed #ccc",
-                                        borderRadius: 2,
-                                        display: "flex",
-                                        alignItems: "center",
-                                        justifyContent: "center",
-                                        color: "#aaa",
-                                        fontSize: 12,
-                                      }}
-                                    >
-                                      No Image
-                                    </Box>
-                                  );
-                                })()
-                              )}
-                            </Box>
-
-                            {/* Title */}
-                            <Typography sx={{ fontWeight: 800, fontSize: 13 }}>
-                              {d.design} {d.IS_GIFT === true ? "🎁" : ""}
-                            </Typography>
-
-                            {/* Price */}
-                            <Typography
-                              sx={{
-                                fontWeight: 700,
-                                fontSize: 13,
-                                color: "primary.main",
-                              }}
-                            >
-                              {resolvedPriceLabel}
-                            </Typography>
-
-                            {/* Details */}
-                            <Typography sx={{ fontSize: 12, color: "#555" }}>
-                              {d.typeSupplier} {d.weight ? `• ${d.weight}` : ""}{" "}
-                              {d.code ? `• ${d.code}` : ""}
-                              {String(d.typeSupplier || "")
-                                .toLowerCase()
-                                .includes("diamond") && d.CODE_EXTERNAL
-                                ? ` • Ref: ${d.CODE_EXTERNAL}`
-                                : ""}
-                            </Typography>
-
-                            {/* Actions */}
-                            {isChiraVal && (
-                              <Box sx={{ mt: "auto" }}>
-                                <Button
-                                  variant="outlined"
-                                  size="small"
-                                  color="primary"
-                                  fullWidth
-                                  sx={{ fontSize: 11, py: 0.5, px: 1.5 }}
-                                  onClick={() => {
-                                    setChiraDialogIdFact(invoiceIdForLine);
-                                    setChiraDialogOpen(true);
-                                  }}
-                                >
-                                  Return Chira
-                                </Button>
-                              </Box>
-                            )}
-                          </Box>
-                        );
-                      })}
-                    </Box>
-                  </Box>
-                ));
-              })()}
+                    👤 {user}
+                  </Button>
+                  {isAdmin && (
+                    <Tooltip title="Change seller">
+                      <IconButton
+                        size="small"
+                        onClick={() => handleOpenEditSeller(row)}
+                        sx={{ color: 'white', bgcolor: 'rgba(0,0,0,0.2)', '&:hover': { bgcolor: 'rgba(0,0,0,0.35)' } }}
+                      >
+                        <EditIcon fontSize="inherit" />
+                      </IconButton>
+                    </Tooltip>
+                  )}
+                </Box>
+              )}
+              {clientDisplay && (
+                hasCustomerProfileLink ? (
+                  <Button
+                    component={RouterLink}
+                    to={buildEncryptedClientPath(customerIdForLink)}
+                    size="small"
+                    sx={{
+                      p: 0.5,
+                      minWidth: 0,
+                      color: 'secondary.main',
+                      textTransform: 'none',
+                      fontWeight: 700,
+                      background: 'none',
+                      '&:hover': { textDecoration: 'underline', background: 'none' },
+                    }}
+                  >
+                    🛍️ {clientDisplay}
+                  </Button>
+                ) : (
+                  <Typography component="span" sx={{ fontWeight: 600 }}>
+                    🛍️ {clientDisplay}
+                  </Typography>
+                )
+              )}
             </Box>
           )}
+        </Box>
+        
+        {invoiceComment && (
+          <Box sx={{ mt: 1, p: 1, backgroundColor: 'rgba(255,255,255,0.2)', borderRadius: 1 }}>
+            <Typography sx={{ fontSize: 12, fontStyle: 'italic' }}>
+              💬 {invoiceComment}
+            </Typography>
+          </Box>
+        )}
+      </Box>
 
-          {/* Amounts moved to top info row */}
+      <CardContent sx={{ p: 3 }}>
+        {/* Financial Summary */}
+        <Box sx={{ mb: 3, p: 2, backgroundColor: '#f8fafc', borderRadius: 2 }}>
+          <Typography variant="subtitle2" sx={{ fontWeight: 700, mb: 1.5, color: '#1e293b' }}>
+            Financial Summary
+          </Typography>
+          <Box sx={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: 2 }}>
+            {(() => {
+              const isGold = !!rawTypeSupplier?.toLowerCase().includes("gold");
+              const total = Number(row.total_remise_final) || 0;
+              const totalLyd = Number(row.total_remise_final_lyd || row.total_remise_final_LYD) || 0;
+              const amountLyd = Number(row.amount_lyd) || 0;
+              const amountUsd = Number(row.amount_currency) || 0;
+              const amountUsdLyd = Number(row.amount_currency_LYD) || 0;
+              const amountEur = Number(row.amount_EUR) || 0;
+              const amountEurLyd = Number(row.amount_EUR_LYD) || 0;
 
-          {/* Source Mark moved to top info row */}
+              const paidEquiv = amountLyd + amountUsdLyd + amountEurLyd;
+              const remaining = Math.max(0, (totalLyd || total) - paidEquiv);
 
-          {/* Actions */}
-          <Box
-            sx={{
-              mt: 1.5,
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "flex-end",
-              gap: 1,
-              flexWrap: "wrap",
+              return (
+                <>
+                  {total > 0 && (
+                    <Box>
+                      <Typography sx={{ fontSize: 11, color: '#64748b', mb: 0.5 }}>Invoice Total</Typography>
+                      <Typography sx={{ fontSize: 18, fontWeight: 800, color: '#1e293b' }}>
+                        {formatWholeAmount(total)} {isGold ? 'LYD' : 'USD'}
+                      </Typography>
+                    </Box>
+                  )}
+                  
+                  {amountLyd > 0 && (
+                    <Box>
+                      <Typography sx={{ fontSize: 11, color: '#64748b', mb: 0.5 }}>Paid (LYD)</Typography>
+                      <Typography sx={{ fontSize: 16, fontWeight: 700, color: '#10b981' }}>
+                        {formatWholeAmount(amountLyd)} LYD
+                      </Typography>
+                    </Box>
+                  )}
+                  
+                  {amountUsd > 0 && (
+                    <Box>
+                      <Typography sx={{ fontSize: 11, color: '#64748b', mb: 0.5 }}>Paid (USD)</Typography>
+                      <Typography sx={{ fontSize: 16, fontWeight: 700, color: '#10b981' }}>
+                        {formatWholeAmount(amountUsd)} USD
+                        {amountUsdLyd > 0 && (
+                          <Typography component="span" sx={{ fontSize: 11, ml: 0.5, color: '#64748b' }}>
+                            ({formatWholeAmount(amountUsdLyd)} LYD)
+                          </Typography>
+                        )}
+                      </Typography>
+                    </Box>
+                  )}
+                  
+                  {amountEur > 0 && (
+                    <Box>
+                      <Typography sx={{ fontSize: 11, color: '#64748b', mb: 0.5 }}>Paid (EUR)</Typography>
+                      <Typography sx={{ fontSize: 16, fontWeight: 700, color: '#10b981' }}>
+                        {formatWholeAmount(amountEur)} EUR
+                        {amountEurLyd > 0 && (
+                          <Typography component="span" sx={{ fontSize: 11, ml: 0.5, color: '#64748b' }}>
+                            ({formatWholeAmount(amountEurLyd)} LYD)
+                          </Typography>
+                        )}
+                      </Typography>
+                    </Box>
+                  )}
+                  
+                  {remaining > 0 && (
+                    <Box>
+                      <Typography sx={{ fontSize: 11, color: '#64748b', mb: 0.5 }}>Remaining</Typography>
+                      <Typography sx={{ fontSize: 16, fontWeight: 700, color: '#ef4444' }}>
+                        {formatWholeAmount(remaining)} LYD
+                      </Typography>
+                    </Box>
+                  )}
+                </>
+              );
+            })()}
+          </Box>
+        </Box>
+
+        {/* Products Section */}
+        {details.length > 0 && (
+          <Box>
+            <Typography variant="subtitle2" sx={{ fontWeight: 700, mb: 2, color: 'text.primary', fontSize: 16 }}>
+              Products ({details.length})
+            </Typography>
+            <Box
+              sx={{
+                display: 'grid',
+                gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))',
+                gap: 2.5,
+              }}
+            >
+              {details.map((d: any, idx: number) => {
+                const productImageId = d.imageId ?? d.id_achat ?? d.picint ?? d.id_art ?? d.ID_ART;
+                const productBlobUrls = productImageId ? (imageBlobUrls[productImageId] || []) : [];
+                const productRawUrls = productImageId ? (imageUrls[productImageId] || []) : [];
+                const invoiceIdForLine = d.id_fact || row.id_fact || row.num_fact;
+                const rawPrice = d.prix_vente_remise ?? row.prix_vente_remise ?? "";
+                const resolvedPriceLabel =
+                  rawPrice !== "" && rawPrice !== null && rawPrice !== undefined
+                    ? `${formatNumber(rawPrice)} ${d.typeSupplier?.toLowerCase().includes("gold") ? "LYD" : "USD"}`
+                    : "—";
+                return (
+                  <Card
+                    key={idx}
+                    variant="outlined"
+                    sx={{
+                      display: 'flex',
+                      flexDirection: 'column',
+                      borderRadius: 2,
+                      overflow: 'hidden',
+                      transition: 'all 0.2s',
+                      border: theme => `1px solid ${theme.palette.divider}`,
+                      background: theme => theme.palette.background.paper,
+                      color: theme => theme.palette.text.primary,
+                      '&:hover': {
+                        boxShadow: 4,
+                        borderColor: theme => theme.palette.primary.main,
+                      }
+                    }}
+                  >
+                    {/* Product Image */}
+                    <Box
+                      sx={{
+                        width: "100%",
+                        height: 200,
+                        backgroundColor: theme => theme.palette.mode === 'dark' ? '#222' : '#f8fafc',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        overflow: 'hidden',
+                        position: 'relative',
+                      }}
+                    >
+                      {productBlobUrls.length > 0 ? (
+                        <img
+                          src={productBlobUrls[0]}
+                          alt="Product"
+                          style={{
+                            width: "100%",
+                            height: "100%",
+                            objectFit: "cover",
+                            cursor: "pointer",
+                          }}
+                          onClick={() => {
+                            setImageDialogUrl(productBlobUrls[0]);
+                            setImageDialogOpen(true);
+                          }}
+                          onError={(e) => {
+                            // fallback to raw url if blob fails
+                            const target = e.currentTarget as HTMLImageElement;
+                            if (productRawUrls.length > 0) {
+                              target.src = productRawUrls[0];
+                            } else {
+                              target.style.display = 'none';
+                            }
+                          }}
+                        />
+                      ) : productRawUrls.length > 0 ? (
+                        <img
+                          src={productRawUrls[0]}
+                          alt="Product"
+                          style={{
+                            width: "100%",
+                            height: "100%",
+                            objectFit: "cover",
+                            cursor: "pointer",
+                          }}
+                          onClick={() => {
+                            setImageDialogUrl(productRawUrls[0]);
+                            setImageDialogOpen(true);
+                          }}
+                          onError={e => {
+                            const target = e.currentTarget as HTMLImageElement;
+                            target.style.display = 'none';
+                          }}
+                        />
+                      ) : (
+                        <Box
+                          sx={{
+                            display: 'flex',
+                            flexDirection: 'column',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            color: 'text.disabled',
+                            textAlign: 'center',
+                          }}
+                        >
+                          <Typography sx={{ fontSize: 48 }}>📦</Typography>
+                          <Typography sx={{ fontSize: 12, mt: 1 }}>No Image</Typography>
+                          <Typography sx={{ fontSize: 10, color: 'text.disabled', mt: 0.5 }}>
+                            ID: {productImageId || 'N/A'}
+                          </Typography>
+                        </Box>
+                      )}
+                      {d.IS_GIFT && (
+                        <Chip
+                          label="🎁 Gift"
+                          size="small"
+                          sx={{
+                            position: 'absolute',
+                            top: 8,
+                            right: 8,
+                            backgroundColor: '#fbbf24',
+                            color: '#000',
+                            fontWeight: 700,
+                          }}
+                        />
+                      )}
+                    </Box>
+                    {/* Product Details */}
+                    <Box sx={{ p: 2 }}>
+                      <Typography sx={{ fontWeight: 700, fontSize: 15, mb: 1, lineHeight: 1.3, color: 'text.primary' }}>
+                        {d.design || 'Unnamed Product'}
+                      </Typography>
+                      <Typography sx={{ fontWeight: 700, fontSize: 18, color: 'primary.main', mb: 1.5 }}>
+                        {resolvedPriceLabel}
+                      </Typography>
+                      <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0.5, fontSize: 12, color: 'text.secondary' }}>
+                        <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
+                          <span>•</span>
+                          <span>{d.typeSupplier}</span>
+                        </Box>
+                        {d.weight && (
+                          <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
+                            <span>⚖️</span>
+                            <span>{d.weight}g</span>
+                          </Box>
+                        )}
+                        {d.code && (
+                          <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
+                            <span>🔖</span>
+                            <span>{d.code}</span>
+                          </Box>
+                        )}
+                        {d.CODE_EXTERNAL && (
+                          <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
+                            <span>📋</span>
+                            <span>Ref: {d.CODE_EXTERNAL}</span>
+                          </Box>
+                        )}
+                      </Box>
+                      {isChiraVal && (
+                        <Button
+                          variant="contained"
+                          size="small"
+                          fullWidth
+                          sx={{ mt: 2, fontSize: 11, py: 0.75, textTransform: 'none' }}
+                          onClick={() => {
+                            setChiraDialogIdFact(invoiceIdForLine);
+                            setChiraDialogOpen(true);
+                          }}
+                        >
+                          Return Chira
+                        </Button>
+                      )}
+                    </Box>
+                  </Card>
+                );
+              })}
+            </Box>
+          </Box>
+        )}
+
+        {/* Action Buttons */}
+        <Box sx={{ mt: 3, display: 'flex', gap: 2, justifyContent: 'flex-end', flexWrap: 'wrap' }}>
+          <Button
+            variant="outlined"
+            startIcon={<FileCopyIcon />}
+            onClick={() => {
+              setSelectedInvoice(row);
+              setPrintDialogOpen(true);
             }}
+            sx={{ textTransform: 'none', fontWeight: 600 }}
           >
-            {/* Left: Return to cart (ghost) 
-            <Box>
-              {isAdmin && numFactAction && (
-                <Button
-                  variant="outlined"
-                  color="warning"
-                  size="small"
-                  sx={{ fontSize: 12, py: 0.5, px: 1.5 }}
-                  disabled={isReturning}
-                  onClick={() => handleReturnToCart(numFactAction)}
-                >
-                  {isReturning ? "Returning..." : "Return to cart"}
-                </Button>
-              )}
-            </Box>*/}
+            View Invoice
+          </Button>
+          
+          {!isClosed && (
+            <Button
+              variant="contained"
+              color="error"
+              onClick={async () => {
+                setCloseError("");
+                setClosePayLydStr("");
+                setClosePayUsdStr("");
+                setClosePayUsdLydStr("");
+                setClosePayEurStr("");
+                setClosePayEurLydStr("");
+                setCloseMakeCashVoucher(true);
+                setCloseInvoice(row);
+                setCloseDialogOpen(true);
 
-            {/* Right: Confirm Order (solid) */}
-            <Box sx={{ display: "flex", gap: 1, flexWrap: "wrap" }}>
-              <Button
-                variant="contained"
-                color="primary"
-                sx={{ padding: "6px 14px", fontSize: 12, fontWeight: 700 }}
-                onClick={() => {
-                  setSelectedInvoice(row);
-                  setPrintDialogOpen(true);
-                }}
-              >
-                Show Invoice
-              </Button>
-              <Button
-                variant="contained"
-                color="error"
-                sx={{ padding: "6px 14px", fontSize: 12, fontWeight: 800 }}
-                disabled={!!row?.IS_OK}
-                onClick={async () => {
-                  setCloseError("");
-                  setClosePayLydStr("");
-                  setClosePayUsdStr("");
-                  setClosePayUsdLydStr("");
-                  setClosePayEurStr("");
-                  setClosePayEurLydStr("");
-                  setCloseMakeCashVoucher(true);
-
-                  setCloseInvoice(row);
-                  setCloseDialogOpen(true);
-
-                  // Fetch full invoice rows so we can persist payment updates safely
-                  try {
-                    const token = localStorage.getItem("token");
-                    const psParam = String(row?.ps ?? "");
-                    const usrParam = String(row?.usr ?? "");
-                    const nfParam = String(row?.num_fact ?? "");
-                    if (!token || !psParam || !usrParam || !nfParam) return;
+                try {
+                  const token = localStorage.getItem("token");
+                  const psParam = String(row?.ps ?? "");
+                  const usrParam = String(row?.usr ?? "");
+                  const nfParam = String(row?.num_fact ?? "");
+                  if (token && psParam && usrParam && nfParam) {
                     const verifyRes = await axios.get(`/invoices/Getinvoice/`, {
                       params: { ps: psParam, usr: usrParam, num_fact: nfParam },
                       headers: { Authorization: `Bearer ${token}` },
                     });
                     setCloseInvoiceRows(Array.isArray(verifyRes.data) ? verifyRes.data : []);
-                  } catch {
-                    setCloseInvoiceRows([]);
                   }
-                }}
-              >
-                Close Invoice
-              </Button>
-            </Box>
-          </Box>
-        </CardContent>
-      </Card>
-    );
-  };
+                } catch {
+                  setCloseInvoiceRows([]);
+                }
+              }}
+              sx={{ textTransform: 'none', fontWeight: 700 }}
+            >
+              Close Invoice
+            </Button>
+          )}
+        </Box>
+      </CardContent>
+    </Card>
+  );
+};
 
   const parseAmt = (s: string) => {
     if (!s) return 0;
@@ -3046,6 +2829,112 @@ const SalesReportsTable = ({
     }
     return NaN;
   }, [closeInvoice]);
+
+  const convertItemsImagesToBase64 = useCallback(
+    async (urls: string[]): Promise<string[]> => {
+      if (!urls || !urls.length) return [];
+      if (typeof window === "undefined" || typeof fetch !== "function") return urls;
+      const token = localStorage.getItem("token") || undefined;
+      const prepared: string[] = [];
+      for (const raw of urls) {
+        if (!raw) continue;
+        const lower = raw.toLowerCase();
+        if (raw.startsWith("data:")) {
+          prepared.push(raw);
+          continue;
+        }
+        if (lower.includes(".avif")) {
+          try {
+            const converted = await convertAvifUrlToPngBase64(raw, token);
+            prepared.push(converted);
+            continue;
+          } catch (err) {
+            console.warn("[SalesReports] Failed to convert AVIF", err);
+          }
+        }
+        prepared.push(raw);
+      }
+      return prepared;
+    },
+    []
+  );
+
+  const normalizeToSecureImagePath = (rawUrl: string): string => {
+    if (!rawUrl) return rawUrl;
+    if (rawUrl.startsWith("data:") || rawUrl.startsWith("blob:")) return rawUrl;
+
+    try {
+      const u = new URL(rawUrl, window.location.origin);
+      const parts = u.pathname.split("/").filter(Boolean);
+      const len = parts.length;
+      if (len >= 3) {
+        const filename = parts[len - 1];
+        const idSeg = parts[len - 2];
+        const mount = parts.slice(0, len - 2).join("/").toLowerCase();
+
+        // GOLD
+        if (
+          mount.includes("uploads/goldpic") ||
+          mount.includes("uploads/opurchases/upload-attachment") ||
+          mount.includes("uploads/purchase")
+        ) {
+          return `/images/gold/${encodeURIComponent(idSeg)}/${encodeURIComponent(filename)}`;
+        }
+
+        // WATCH
+        if (mount.includes("uploads/watchpic")) {
+          return `/images/watch/${encodeURIComponent(idSeg)}/${encodeURIComponent(filename)}`;
+        }
+
+        // DIAMOND
+        if (mount.includes("uploads/diamondpic") || mount.includes("uploads/diamond")) {
+          return `/images/diamond/${encodeURIComponent(idSeg)}/${encodeURIComponent(filename)}`;
+        }
+      }
+
+      // already secure
+      if (u.pathname.startsWith("/images/")) return u.pathname;
+
+      return rawUrl;
+    } catch {
+      return rawUrl;
+    }
+  };
+
+  const fetchImagesTyped = useCallback(async (
+    id: number | string,
+    type: "watch" | "diamond" | "gold"
+  ): Promise<string[] | null> => {
+    const token = localStorage.getItem("token");
+    try {
+      for (const base of IMAGE_BASES) {
+        const url = `${base}/list/${type}/${id}`;
+        try {
+          const res = await axios.get(url, {
+            headers: { Authorization: `Bearer ${token}` },
+          });
+          const outRaw = Array.isArray(res.data) ? res.data : [];
+          const out = outRaw
+            .map((it: any) => {
+              if (typeof it === "string") return it;
+              if (it && typeof it === "object") return it.url || it.path || it.href || it.src || "";
+              return "";
+            })
+            .filter(Boolean)
+            .map(normalizeToSecureImagePath);
+
+          if (out.length) {
+            return await convertItemsImagesToBase64(out);
+          }
+        } catch {
+          /* try next base */
+        }
+      }
+    } catch {
+      // ignore
+    }
+    return null;
+  }, [IMAGE_BASES, convertItemsImagesToBase64]);
 
   const closeTotals = React.useMemo(() => {
     const inv = closeInvoice;
@@ -3096,6 +2985,41 @@ const SalesReportsTable = ({
   
   const closeUsdEquivMissing = closeEntered.usd > moneyEps && closeEntered.usdLyd <= moneyEps;
   const closeEurEquivMissing = closeEntered.eur > moneyEps && closeEntered.eurLyd <= moneyEps;
+
+  const closeCustomerDisplay = React.useMemo(() => {
+    const inv = closeInvoice;
+    if (!inv) return "";
+    const rawClient = inv.Client || inv.client || null;
+    if (rawClient && typeof rawClient === "object") {
+      const name =
+        rawClient.client_name ||
+        rawClient.name ||
+        rawClient.name_client ||
+        rawClient.ClientName ||
+        rawClient.NAME_CLIENT ||
+        rawClient.fullName ||
+        "";
+      const phone =
+        rawClient.tel_client ||
+        rawClient.phone ||
+        rawClient.tel ||
+        rawClient.telephone ||
+        rawClient.contact ||
+        "";
+      const parts = [name, phone].filter(Boolean);
+      if (parts.length) {
+        return parts.join(" • ");
+      }
+    }
+    const fallback =
+      inv.client_name ||
+      inv.ClientName ||
+      inv.clientName ||
+      inv.name_client ||
+      inv.client ||
+      "";
+    return String(fallback || "").trim();
+  }, [closeInvoice]);
 
   // Remaining/remainder after reconciliation per currency.
   const closeOverpayNow = { lyd: lydDiff, usd: usdDiff, eur: eurDiff };
@@ -3696,186 +3620,178 @@ const SalesReportsTable = ({
             if (closeLoading) return;
             setCloseDialogOpen(false);
           }}
-          maxWidth="sm"
+          maxWidth="md"
           fullWidth
         >
           <DialogTitle>Close Invoice</DialogTitle>
           <DialogContent sx={{ pt: 2 }}>
-            <Box sx={{ display: "flex", flexDirection: "column", gap: 1.25 }}>
-              <Typography sx={{ fontWeight: 800 }}>
-                Invoice #{closeInvoice?.num_fact}
-              </Typography>
-
-              <Box sx={{ display: "flex", justifyContent: "space-between" }}>
-                <Typography sx={{ fontWeight: 700 }}>Total (LYD)</Typography>
-                {(() => {
-                  return (
-                    <Box sx={{ textAlign: "right" }}>
-                      <Typography sx={{ fontWeight: 900 }}>
-                        {Number(closeTotals.totalLyd).toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 0 })}
-                      </Typography>
-                    </Box>
-                  );
-                })()}
+            <Box sx={{ display: "flex", flexDirection: "column", gap: 3 }}>
+              {/* Invoice Summary */}
+              <Box>
+                <Typography variant="h6" sx={{ mb: 2 }}>Invoice Summary</Typography>
+                <Grid container spacing={2}>
+                  <Grid>
+                    <Typography variant="body2" color="textSecondary">Customer</Typography>
+                    <Typography variant="h6" sx={{ fontWeight: 'bold', minWidth: 200 }}>
+                      {closeCustomerDisplay || "—"}
+                    </Typography>
+                  </Grid>
+                  <Grid>
+                    <Typography variant="body2" color="textSecondary">Invoice #</Typography>
+                    <Typography variant="h5" sx={{ fontWeight: 'bold' }}>{closeInvoice?.num_fact}</Typography>
+                  </Grid>
+                  <Grid>
+                    <Typography variant="body2" color="textSecondary">Total (LYD)</Typography>
+                    <Typography variant="h5" sx={{ fontWeight: 'bold' }}>{formatWholeAmount(closeTotals.totalLyd)}</Typography>
+                  </Grid>
+                  <Grid>
+                    <Typography variant="body2" color="textSecondary">Paid So Far (LYD equiv)</Typography>
+                    <Typography variant="h5" sx={{ fontWeight: 'bold' }}>{formatWholeAmount(closeTotals.paidLydEquiv)}</Typography>
+                  </Grid>
+                  <Grid>
+                    <Typography variant="body2" color="textSecondary">Remaining (LYD)</Typography>
+                    <Typography variant="h5" sx={{ fontWeight: 'bold', color: closeTotals.remainingLyd > 0 ? 'error.main' : 'success.main' }}>
+                      {formatWholeAmount(closeTotals.remainingLyd)}
+                    </Typography>
+                  </Grid>
+                </Grid>
               </Box>
-
-              <Box sx={{ display: "flex", justifyContent: "space-between" }}>
-                <Typography sx={{ fontWeight: 700 }}>Paid so far (LYD equiv)</Typography>
-                {(() => {
-                  return (
-                    <Box sx={{ textAlign: "right" }}>
-                      <Typography sx={{ fontWeight: 900 }}>
-                        {Number(closeTotals.paidLydEquiv).toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 0 })}
-                      </Typography>
-                    </Box>
-                  );
-                })()}
+              <Divider />
+              {/* Recorded Payments */}
+              <Box>
+                <Typography variant="h6" sx={{ mb: 2 }}>Recorded Payments at Invoice Creation</Typography>
+                <Card variant="outlined" sx={{ p: 2, backgroundColor: '#b7a27d' }}>
+                  <Typography variant="body1">
+                    <strong>LYD:</strong> {formatWholeAmount(closeTotals.recorded.lyd || 0)}
+                    <br />
+                    <strong>USD:</strong> {formatWholeAmount(closeTotals.recorded.usd || 0)} (LYD {formatWholeAmount(closeTotals.recorded.usdLyd || 0)})
+                    <br />
+                    <strong>EUR:</strong> {formatWholeAmount(closeTotals.recorded.eur || 0)} (LYD {formatWholeAmount(closeTotals.recorded.eurLyd || 0)})
+                  </Typography>
+                </Card>
               </Box>
-
-              <Box sx={{ textAlign: "center", mt: 0.5, p: 1, border: "1px solid #eee", borderRadius: 1, background: "#68a5bf" }}>
-                <Typography sx={{ fontWeight: 900, fontSize: 16, mb: 0.5 }}>
-                  Recorded at invoice creation
-                </Typography>
-                <Typography sx={{ fontSize: 16, color: "primary" }}>
-                  LYD: {Number(closeTotals.recorded.lyd || 0).toLocaleString(undefined, { maximumFractionDigits: 0 })}
-                  {"  "} | USD: {Number(closeTotals.recorded.usd || 0).toLocaleString(undefined, { maximumFractionDigits: 2 })} (LYD {Number(closeTotals.recorded.usdLyd || 0).toLocaleString(undefined, { maximumFractionDigits: 0 })})
-                  {"  "} | EUR: {Number(closeTotals.recorded.eur || 0).toLocaleString(undefined, { maximumFractionDigits: 2 })} (LYD {Number(closeTotals.recorded.eurLyd || 0).toLocaleString(undefined, { maximumFractionDigits: 0 })})
-                </Typography>
+              <Divider />
+              {/* Remaining After Payment */}
+              <Box>
+                <Typography variant="h6" sx={{ mb: 2 }}>Remaining After This Payment</Typography>
+                <Box sx={{ p: 2, border: '1px solid #ddd', borderRadius: 1, backgroundColor: closeIsOverpayNow ? '#ffebee' : (closeRemainingAfter.lyd > 0 || closeRemainingAfter.usd > 0 || closeRemainingAfter.eur > 0) ? '#fff3e0' : '#e8f5e8' }}>
+                  <Typography variant="h6" sx={{ color: closeIsOverpayNow ? 'error.main' : (closeRemainingAfter.lyd > 0 || closeRemainingAfter.usd > 0 || closeRemainingAfter.eur > 0) ? 'warning.main' : 'success.main' }}>
+                    {closeIsOverpayNow ? `Overpayment: ${closeOverpayNow.lyd > 0.01 ? `LYD ${Number(Math.abs(closeOverpayNow.lyd)).toLocaleString()}` : ''} ${closeOverpayNow.usd > 0.01 ? `USD ${Number(Math.abs(closeOverpayNow.usd)).toLocaleString()}` : ''} ${closeOverpayNow.eur > 0.01 ? `EUR ${Number(Math.abs(closeOverpayNow.eur)).toLocaleString()}` : ''}`.trim() : `${closeRemainingAfter.lyd > 0 ? `LYD ${Number(closeRemainingAfter.lyd).toLocaleString()} ` : ''}${closeRemainingAfter.usd > 0 ? `USD ${Number(closeRemainingAfter.usd).toLocaleString()} ` : ''}${closeRemainingAfter.eur > 0 ? `EUR ${Number(closeRemainingAfter.eur).toLocaleString()} ` : ''}${closeRemainingAfter.lyd === 0 && closeRemainingAfter.usd === 0 && closeRemainingAfter.eur === 0 ? '0' : ''}`.trim()}
+                  </Typography>
+                </Box>
               </Box>
-
-              <Box sx={{ display: "flex", justifyContent: "space-between" }}>
-                <Typography sx={{ fontWeight: 700 }}>Remaining (LYD)</Typography>
-                {(() => {
-                  return (
-                    <Box sx={{ textAlign: "right" }}>
-                      <Typography sx={{ fontWeight: 900, color: closeTotals.remainingLyd > 0 ? "error.main" : "success.main" }}>
-                        {Number(closeTotals.remainingLyd).toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 0 })}
-                      </Typography>
-                    </Box>
-                  );
-                })()}
+              <Divider />
+              {/* Payment Inputs */}
+              <Box>
+                <Typography variant="h6" sx={{ mb: 2 }}>Enter Payment Now</Typography>
+                <Typography variant="body2" color="textSecondary" sx={{ mb: 2 }}>Partial payments are allowed, but overpayment is not permitted.</Typography>
+                <Grid container spacing={2}>
+                  <Grid>
+                    <TextField
+                      label="Pay now (LYD)"
+                      value={closePayLydStr}
+                      onChange={(e) => setClosePayLydStr(e.target.value)}
+                      onBlur={() => {
+                        const v = parseAmt(closePayLydStr);
+                        setClosePayLydStr(v ? String(normalizeMoney(v)) : "");
+                      }}
+                      size="small"
+                      fullWidth
+                      inputMode="decimal"
+                      inputProps={{ pattern: "[0-9.,-]*" }}
+                      helperText="Enter amount in LYD"
+                    />
+                  </Grid>
+                  <Grid>
+                    <TextField
+                      label="Pay now (USD)"
+                      value={closePayUsdStr}
+                      onChange={(e) => setClosePayUsdStr(e.target.value)}
+                      onBlur={() => {
+                        const usd = parseAmt(closePayUsdStr);
+                        const r = getUsdRate();
+                        setClosePayUsdStr(usd ? String(normalizeMoney(usd)) : "");
+                        if (usd > 0 && (!parseAmt(closePayUsdLydStr) || parseAmt(closePayUsdLydStr) <= 0) && Number.isFinite(r) && r > 0) {
+                          setClosePayUsdLydStr(String(normalizeMoney(usd * r)));
+                        }
+                      }}
+                      size="small"
+                      fullWidth
+                      inputMode="decimal"
+                      inputProps={{ pattern: "[0-9.,-]*" }}
+                      helperText="USD amount"
+                    />
+                  </Grid>
+                  <Grid>
+                    <TextField
+                      label="USD equiv (LYD)"
+                      value={closePayUsdLydStr}
+                      onChange={(e) => setClosePayUsdLydStr(e.target.value)}
+                      onBlur={() => {
+                        const v = parseAmt(closePayUsdLydStr);
+                        setClosePayUsdLydStr(v ? String(normalizeMoney(v)) : "");
+                      }}
+                      size="small"
+                      fullWidth
+                      inputMode="decimal"
+                      inputProps={{ pattern: "[0-9.,-]*" }}
+                      helperText="LYD equivalent for USD"
+                    />
+                  </Grid>
+                  <Grid>
+                    <TextField
+                      label="Pay now (EUR)"
+                      value={closePayEurStr}
+                      onChange={(e) => setClosePayEurStr(e.target.value)}
+                      onBlur={() => {
+                        const eur = parseAmt(closePayEurStr);
+                        const r = getEurRate();
+                        setClosePayEurStr(eur ? String(normalizeMoney(eur)) : "");
+                        if (eur > 0 && (!parseAmt(closePayEurLydStr) || parseAmt(closePayEurLydStr) <= 0) && Number.isFinite(r) && r > 0) {
+                          setClosePayEurLydStr(String(normalizeMoney(eur * r)));
+                        }
+                      }}
+                      size="small"
+                      fullWidth
+                      inputMode="decimal"
+                      inputProps={{ pattern: "[0-9.,-]*" }}
+                      helperText="EUR amount"
+                    />
+                  </Grid>
+                  <Grid>
+                    <TextField
+                      label="EUR equiv (LYD)"
+                      value={closePayEurLydStr}
+                      onChange={(e) => setClosePayEurLydStr(e.target.value)}
+                      onBlur={() => {
+                        const v = parseAmt(closePayEurLydStr);
+                        setClosePayEurLydStr(v ? String(normalizeMoney(v)) : "");
+                      }}
+                      size="small"
+                      fullWidth
+                      inputMode="decimal"
+                      inputProps={{ pattern: "[0-9.,-]*" }}
+                      helperText="LYD equivalent for EUR"
+                    />
+                  </Grid>
+                </Grid>
               </Box>
-
-              <Box sx={{ display: "flex", justifyContent: "space-between" }}>
-                <Typography sx={{ fontWeight: 800 }}>Remaining after this payment</Typography>
-                <Typography sx={{ fontWeight: 900, color: closeIsOverpayNow ? "error.main" : (closeRemainingAfter.lyd > 0 || closeRemainingAfter.usd > 0 || closeRemainingAfter.eur > 0) ? "warning.main" : "success.main" }}>
-                  {closeIsOverpayNow ? (
-                    <Box component="span">
-                      Overpayment:
-                      {closeOverpayNow.lyd > moneyEps && ` LYD ${Number(Math.abs(closeOverpayNow.lyd)).toLocaleString(undefined, { maximumFractionDigits: 0 })}`}
-                      {closeOverpayNow.usd > moneyEps && ` USD ${Number(Math.abs(closeOverpayNow.usd)).toLocaleString(undefined, { maximumFractionDigits: 2 })}`}
-                      {closeOverpayNow.eur > moneyEps && ` EUR ${Number(Math.abs(closeOverpayNow.eur)).toLocaleString(undefined, { maximumFractionDigits: 2 })}`}
-                    </Box>
-                  ) : (
-                    <Box component="span">
-                      {closeRemainingAfter.lyd > 0 && `LYD ${Number(closeRemainingAfter.lyd).toLocaleString(undefined, { maximumFractionDigits: 0 })} `}
-                      {closeRemainingAfter.usd > 0 && `USD ${Number(closeRemainingAfter.usd).toLocaleString(undefined, { maximumFractionDigits: 2 })} `}
-                      {closeRemainingAfter.eur > 0 && `EUR ${Number(closeRemainingAfter.eur).toLocaleString(undefined, { maximumFractionDigits: 2 })} `}
-                      {closeRemainingAfter.lyd === 0 && closeRemainingAfter.usd === 0 && closeRemainingAfter.eur === 0 && '0'}
-                    </Box>
-                  )}
-                </Typography>
-              </Box>
-
-              <Box sx={{ mt: 1, fontWeight: 900 }}>Enter payment now (partial allowed, no overpay)</Box>
-
-              <TextField
-                label="Pay now (LYD)"
-                value={closePayLydStr}
-                onChange={(e) => setClosePayLydStr(e.target.value)}
-                onBlur={() => {
-                  const v = parseAmt(closePayLydStr);
-                  setClosePayLydStr(v ? String(normalizeMoney(v)) : "");
-                }}
-                size="small"
-                fullWidth
-                inputMode="decimal"
-                inputProps={{ pattern: "[0-9.,-]*" }}
-              />
-              <TextField
-                label="Pay now (USD)"
-                value={closePayUsdStr}
-                onChange={(e) => setClosePayUsdStr(e.target.value)}
-                onBlur={() => {
-                  const usd = parseAmt(closePayUsdStr);
-                  const r = getUsdRate();
-                  setClosePayUsdStr(usd ? String(normalizeMoney(usd)) : "");
-                  if (usd > 0 && (!parseAmt(closePayUsdLydStr) || parseAmt(closePayUsdLydStr) <= 0) && Number.isFinite(r) && r > 0) {
-                    setClosePayUsdLydStr(String(normalizeMoney(usd * r)));
-                  }
-                }}
-                size="small"
-                fullWidth
-                inputMode="decimal"
-                inputProps={{ pattern: "[0-9.,-]*" }}
-              />
-              <TextField
-                label="USD equiv (LYD)"
-                value={closePayUsdLydStr}
-                onChange={(e) => setClosePayUsdLydStr(e.target.value)}
-                onBlur={() => {
-                  const v = parseAmt(closePayUsdLydStr);
-                  setClosePayUsdLydStr(v ? String(normalizeMoney(v)) : "");
-                }}
-                size="small"
-                fullWidth
-                inputMode="decimal"
-                inputProps={{ pattern: "[0-9.,-]*" }}
-              />
-              <TextField
-                label="Pay now (EUR)"
-                value={closePayEurStr}
-                onChange={(e) => setClosePayEurStr(e.target.value)}
-                onBlur={() => {
-                  const eur = parseAmt(closePayEurStr);
-                  const r = getEurRate();
-                  setClosePayEurStr(eur ? String(normalizeMoney(eur)) : "");
-                  if (eur > 0 && (!parseAmt(closePayEurLydStr) || parseAmt(closePayEurLydStr) <= 0) && Number.isFinite(r) && r > 0) {
-                    setClosePayEurLydStr(String(normalizeMoney(eur * r)));
-                  }
-                }}
-                size="small"
-                fullWidth
-                inputMode="decimal"
-                inputProps={{ pattern: "[0-9.,-]*" }}
-              />
-              <TextField
-                label="EUR equiv (LYD)"
-                value={closePayEurLydStr}
-                onChange={(e) => setClosePayEurLydStr(e.target.value)}
-                onBlur={() => {
-                  const v = parseAmt(closePayEurLydStr);
-                  setClosePayEurLydStr(v ? String(normalizeMoney(v)) : "");
-                }}
-                size="small"
-                fullWidth
-                inputMode="decimal"
-                inputProps={{ pattern: "[0-9.,-]*" }}
-              />
-
-              <Box sx={{ display: "flex", justifyContent: "space-between", mt: 0.5 }}>
-                <Typography sx={{ fontWeight: 800 }}>Entered (LYD equiv)</Typography>
-                <Typography sx={{ fontWeight: 900, color: closeMismatch ? "error.main" : "text.primary" }}>
-                  {closeEntered.totalLydEquiv.toLocaleString(undefined, { maximumFractionDigits: 0 })}
-                </Typography>
-              </Box>
-
-              <Box sx={{ display: "flex", justifyContent: "space-between" }}>
-                <Typography sx={{ fontWeight: 800 }}>Compare vs recorded</Typography>
-                <Typography sx={{ fontWeight: 900 }}>
-                  {closeMismatch ? (
-                    <Box component="span" sx={{ color: closeIsOverpay ? "error.main" : "warning.main" }}>
-                      {closeIsOverpay ? "Overpayment" : "Remainder"}:
-                      {Math.abs(lydDiff) > moneyEps && ` LYD ${Math.abs(lydDiff).toLocaleString(undefined, { maximumFractionDigits: 0 })}`}
-                      {Math.abs(usdDiff) > moneyEps && ` USD ${Math.abs(usdDiff).toLocaleString(undefined, { maximumFractionDigits: 2 })}`}
-                      {Math.abs(eurDiff) > moneyEps && ` EUR ${Math.abs(eurDiff).toLocaleString(undefined, { maximumFractionDigits: 2 })}`}
-                    </Box>
-                  ) : (
-                    <Box component="span" sx={{ color: "success.main" }}>
-                      Match
-                    </Box>
-                  )}
-                </Typography>
+              <Divider />
+              {/* Validation */}
+              <Box>
+                <Typography variant="h6" sx={{ mb: 2 }}>Validation</Typography>
+                <Grid container spacing={2}>
+                  <Grid>
+                    <Typography variant="body2" color="textSecondary">Entered Total (LYD equiv)</Typography>
+                    <Typography variant="h6" sx={{ fontWeight: 'bold', color: closeMismatch ? 'error.main' : 'textPrimary' }}>{closeEntered.totalLydEquiv.toLocaleString()}</Typography>
+                  </Grid>
+                  <Grid>
+                    <Typography variant="body2" color="textSecondary">Comparison to Recorded</Typography>
+                    <Typography variant="h6" sx={{ fontWeight: 'bold', color: closeMismatch ? (closeIsOverpay ? 'error.main' : 'warning.main') : 'success.main' }}>
+                      {closeMismatch ? `${closeIsOverpay ? "Overpayment" : "Remainder"}: ${Math.abs(lydDiff) > 0.01 ? `LYD ${Math.abs(lydDiff).toLocaleString()}` : ''} ${Math.abs(usdDiff) > 0.01 ? `USD ${Math.abs(usdDiff).toLocaleString()}` : ''} ${Math.abs(eurDiff) > 0.01 ? `EUR ${Math.abs(eurDiff).toLocaleString()}` : ''}`.trim() : "Match"}
+                    </Typography>
+                  </Grid>
+                </Grid>
               </Box>
             </Box>
           </DialogContent>
@@ -3897,10 +3813,7 @@ const SalesReportsTable = ({
         <Dialog
           open={chiraDialogOpen}
           onClose={() => setChiraDialogOpen(false)}
-          maxWidth="sm"
-          fullWidth
         >
-          <DialogTitle>Return Chira</DialogTitle>
           <DialogContent>
             {chiraDialogIdFact && (
               <ChiraReturnPage

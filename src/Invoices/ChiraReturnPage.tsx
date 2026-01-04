@@ -79,11 +79,9 @@ const ChiraReturnPage = ({
       sx={{
         maxWidth: 480,
         mx: "auto",
-        mt: 6,
         p: 3,
         boxShadow: 2,
         borderRadius: 2,
-        background: "#fff",
       }}
     >
       <Typography variant="h5" sx={{ mb: 3, fontWeight: 700 }}>

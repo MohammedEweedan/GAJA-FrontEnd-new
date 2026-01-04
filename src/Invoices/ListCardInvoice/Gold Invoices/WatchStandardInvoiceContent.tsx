@@ -776,16 +776,16 @@ const pickNumber = (...values: any[]) => {
         .filter(Boolean);
     }, []);
 
-    // Typed fetch helper (watch | diamond) with dual base support
+    // Typed fetch helper (watch | diamond | gold) with dual base support
     const fetchImagesTyped = async (
       id: number | string,
-      type: "watch" | "diamond"
+      type: "watch" | "diamond" | "gold"
     ): Promise<string[] | null> => {
       const token = localStorage.getItem("token");
       try {
         for (const base of IMAGE_BASES) {
           const url = `${base}/list/${type}/${id}`;
-          try { console.log('[InvoiceImages:fetch] GET', url); } catch {}
+          try { console.log("[InvoiceImages:fetch] GET", url); } catch {}
           try {
             const res = await axios.get(url, {
               headers: { Authorization: `Bearer ${token}` },
@@ -798,6 +798,7 @@ const pickNumber = (...values: any[]) => {
                 return "";
               })
               .filter(Boolean);
+
             if (out.length) {
               return await convertItemsImagesToBase64(out);
             }
@@ -811,27 +812,25 @@ const pickNumber = (...values: any[]) => {
       return null;
     };
 
+
     // Fetch images for watch, diamond, or gold when detected (typed endpoints)
     useEffect(() => {
       const isWatch = !!(typeinv && typeinv.toLowerCase().includes("watch"));
       const isGold = !!(typeinv && typeinv.toLowerCase().includes("gold"));
-      // Diamond should not trigger for gold-only; honor explicit diamond type or detected diamond details without gold
       const isDiamond = !!(
         (typeinv && typeinv.toLowerCase().includes("diamond")) ||
         (hasDiamondData && !isGold)
       );
-      if (!(isWatch || isDiamond || isGold)) return;
 
-      // Build candidate ids
+      if (!(isWatch || isGold || isDiamond)) return;
+
+      // Build candidate ids based on invoice type
       let sourceIds: string[] = [];
+
       if (isWatch) {
         sourceIds = Object.keys(allWatchDetails);
-        // Fallback: if no watch details yet, use invoice/item picint-based ids
         if (sourceIds.length === 0) {
-          sourceIds = pdata
-            .map((inv) => inv.picint)
-            .filter(Boolean)
-            .map(String);
+          sourceIds = pdata.map((inv) => inv.picint).filter(Boolean).map(String);
           if (sourceIds.length === 0) {
             sourceIds = items
               .map((it: any) => it.picint || it.id_fact || it.id_achat)
@@ -839,61 +838,76 @@ const pickNumber = (...values: any[]) => {
               .map(String);
           }
         }
-      } else if (isDiamond) {
+      }
+
+      if (isDiamond) {
         sourceIds = Object.keys(allDiamondDetails);
         if (sourceIds.length === 0) {
-          sourceIds = pdata.map((inv) => inv.picint).filter(Boolean);
+          sourceIds = pdata.map((inv) => inv.picint).filter(Boolean).map(String);
         }
-      } else if (isGold) {
-        // For gold, images are stored per ACHAT id_achat; fetch by those ids ONLY.
-        const collectGoldIds = (arr: any[]): string[] =>
+      }
+
+      if (isGold) {
+        // Gold images are stored per id_art (NOT id_achat)
+        const collectGoldArtIds = (arr: any[]): string[] =>
           (arr || [])
             .flatMap((inv: any) => {
               const ids: any[] = [];
+
+              // parent invoice row id_art (BEST)
+              if (inv?.id_art != null) ids.push(inv.id_art);
+              if (inv?.ID_ART != null) ids.push(inv.ID_ART);
+              if (inv?.Id_Art != null) ids.push(inv.Id_Art);
+
+              // sometimes item level has id_art
               (inv?.ACHATs || []).forEach((a: any) => {
-                if (a?.id_achat) ids.push(a.id_achat);
-                if (a?.ID_ACHAT) ids.push(a.ID_ACHAT);
-                if (a?.Id_Achat) ids.push(a.Id_Achat);
+                if (a?.id_art != null) ids.push(a.id_art);
+                if (a?.ID_ART != null) ids.push(a.ID_ART);
+                if (a?.Id_Art != null) ids.push(a.Id_Art);
               });
+
               return ids;
             })
-            .filter((v) => v !== undefined && v !== null)
-            .map(String);
+            .filter((v) => v !== undefined && v !== null && String(v).trim() !== "")
+            .map((v) => String(v));
 
-        sourceIds = collectGoldIds(pdata);
+        sourceIds = collectGoldArtIds(pdata);
         if (sourceIds.length === 0) {
-          sourceIds = collectGoldIds(items || []);
+          sourceIds = collectGoldArtIds(items || []);
         }
       }
+
+
       const unique = Array.from(new Set(sourceIds)).filter(Boolean);
-      // Emit a clear log so we can see mode and ids considered
-      console.log('[InvoiceImages:config]', { API_BASEImage, axiosBase: (axios as any)?.defaults?.baseURL });
-      console.log('[InvoiceImages:init]', { isWatch, isGold, isDiamond, sourceCount: sourceIds.length, unique });
+
+      console.log("[InvoiceImages:init]", { isWatch, isGold, isDiamond, unique });
+
       (async () => {
         for (const id of unique) {
           if (!id) continue;
-          if (imageUrls[id]) continue; // already have
-          // Debug: trace image fetch attempts (use console.log to avoid stripped debug)
-          console.log('[InvoiceImages] fetching for key', id, { typeinv, isWatch, isGold, isDiamond });
+          if (imageUrls[id]) continue;
+
+          console.log("[InvoiceImages] fetching", { id, isWatch, isGold, isDiamond });
+
+          // WATCH
           if (isWatch) {
-            // For watches, images are stored under id_achat on the server.
-            // Map picint -> candidate id_achat values and fetch using those.
+            // Your existing watch logic stays, but keep it simple:
+            // fetch by id_achat candidates (best), fallback to legacy list.
             const detail = allWatchDetails[id];
             const candidateIds: string[] = [];
+
             const pushId = (v: any) => {
               if (v !== undefined && v !== null) {
                 const s = String(v).trim();
-                if (s !== "" && !candidateIds.includes(s)) candidateIds.push(s);
+                if (s && !candidateIds.includes(s)) candidateIds.push(s);
               }
             };
+
             if (detail) {
-              // common fields that may carry purchase id
               pushId(detail.id_achat);
               pushId(detail.ID_ACHAT);
               pushId(detail.purchase_id);
               pushId(detail.idAchat);
-              pushId(detail.IDACHAT);
-              // nested common shapes
               const nestedA =
                 detail.OriginalAchat ||
                 detail.originalAchat ||
@@ -904,79 +918,25 @@ const pickNumber = (...values: any[]) => {
               if (nestedA && typeof nestedA === "object") {
                 pushId(nestedA.id_achat);
                 pushId(nestedA.ID_ACHAT);
-                pushId(nestedA.idAchat);
-                pushId(nestedA.IDACHAT);
                 pushId(nestedA.purchase_id);
               }
             }
-            // Also scan ACHAT rows from the matching invoice by picint
+
+            // also scan pdata achat rows
             pdata
               .filter((inv) => String(inv.picint) === String(id))
-              .forEach((inv) => {
-                (inv.ACHATs || []).forEach((a: any) => pushId(a?.id_achat));
-              });
+              .forEach((inv) => (inv.ACHATs || []).forEach((a: any) => pushId(a?.id_achat)));
 
-            let fetched = false;
-            console.log("[InvoiceImages] watch candidateIds", candidateIds);
             for (const cid of candidateIds) {
               if (!cid) continue;
-              console.log("[InvoiceImages] watch candidate id_achat", cid);
-              // Avoid re-fetching if we already have URLs under this cid
-              if (imageUrls[cid]) {
-                setImageUrls((prev) => ({ ...prev, [id]: prev[cid] }));
-                fetched = true;
-                break;
-              }
+
               let urls = await fetchImagesTyped(cid, "watch");
-              // Fallback to default watch list if typed returns empty
+
+              // fallback legacy
               if (!urls || urls.length === 0) {
                 try {
                   const token = localStorage.getItem("token");
                   const fUrl = `${API_BASEImage}/list/${cid}`;
-                  try {
-                    console.log("[InvoiceImages:fetch-fallback] GET", fUrl);
-                  } catch {}
-                  const r = await axios.get(fUrl, {
-                    headers: { Authorization: `Bearer ${token}` },
-                  });
-                  if (Array.isArray(r.data) && r.data.length) {
-                    const normalized = normalizeImageList(r.data).map(normalizeToSecureImagePath);
-                    if (normalized.length) {
-                      const converted = await convertItemsImagesToBase64(normalized);
-                      urls = converted.length ? converted : normalized;
-                    }
-                  }
-                  try {
-                    console.log("[InvoiceImages:fetch-fallback] OK", {
-                      url: fUrl,
-                      count: Array.isArray(r.data) ? r.data.length : 0,
-                    });
-                  } catch {}
-                } catch {}
-              }
-              if (urls && urls.length) {
-                // Store under both the picint key and id_achat key for easy lookup later
-                setImageUrls((prev) => ({ ...prev, [id]: urls, [cid]: urls }));
-                fetched = true;
-                console.log("[InvoiceImages] watch fetched", {
-                  key: id,
-                  id_achat: cid,
-                  count: urls.length,
-                });
-                break;
-              }
-            }
-            // If no candidate id_achat found, last resort try the picint (legacy paths)
-            if (!fetched) {
-              console.log("[InvoiceImages] watch fallback picint", id);
-              let urls = await fetchImagesTyped(id, "watch");
-              if (!urls || urls.length === 0) {
-                try {
-                  const token = localStorage.getItem("token");
-                  const fUrl = `${API_BASEImage}/list/${id}`;
-                  try {
-                    console.log("[InvoiceImages:fetch-fallback] GET", fUrl);
-                  } catch {}
                   const r = await axios.get(fUrl, {
                     headers: { Authorization: `Bearer ${token}` },
                   });
@@ -985,89 +945,70 @@ const pickNumber = (...values: any[]) => {
                     const converted = await convertItemsImagesToBase64(normalized);
                     urls = converted.length ? converted : normalized;
                   }
-                  try {
-                    console.log("[InvoiceImages:fetch-fallback] OK", {
-                      url: fUrl,
-                      count: Array.isArray(r.data) ? r.data.length : 0,
-                    });
-                  } catch {}
                 } catch {}
               }
+
               if (urls && urls.length) {
-                setImageUrls((prev) => ({ ...prev, [id]: urls }));
-                console.log("[InvoiceImages] watch fallback picint fetched", {
-                  key: id,
-                  count: urls.length,
-                });
+                setImageUrls((prev) => ({ ...prev, [id]: urls, [cid]: urls }));
+                break;
               }
             }
-          } else if (isDiamond) {
-            // Gold images are stored per id_achat. Build candidates and fetch.
-            const token = localStorage.getItem("token");
-            // Here `id` is expected to already be an id_achat.
-            const cid = String(id);
-            let fetched = false;
-            if (cid) {
-              // If we already fetched for this cid, map it to this id and stop
-              if (imageUrls[cid]) {
-                setImageUrls((prev) => ({ ...prev, [id]: prev[cid] }));
-                fetched = true;
-              }
+            continue;
+          }
+
+          // GOLD
+          if (isGold) {
+            const artId = String(id);
+            let urls = await fetchImagesTyped(artId, "gold");
+
+            // fallback legacy if your API also supports /list/:id
+            if (!urls || urls.length === 0) {
               try {
-                console.log('[InvoiceImages] gold id_achat', cid);
-                let urls: string[] = [];
-                try {
-                  for (const base of IMAGE_BASES) {
-                    const gUrl = `${base}/list/gold/${cid}`;
-                    try {
-                      console.log("[InvoiceImages:fetch-gold] GET", gUrl);
-                    } catch {}
-                    try {
-                      const r = await axios.get(gUrl, {
-                        headers: { Authorization: `Bearer ${token}` },
-                      });
-                      if (Array.isArray(r.data) && r.data.length) {
-                        const normalized = normalizeImageList(r.data).map(normalizeToSecureImagePath);
-                        const converted = await convertItemsImagesToBase64(normalized);
-                        urls = converted.length ? converted : normalized;
-                        break;
-                      }
-                    } catch {
-                      /* try next */
-                    }
-                    // Fallback to legacy list endpoint if gold route empty
-                    try {
-                      const legacyUrl = `${base}/list/${cid}`;
-                      try {
-                        console.log("[InvoiceImages:fetch-gold-legacy] GET", legacyUrl);
-                      } catch {}
-                      const r2 = await axios.get(legacyUrl, {
-                        headers: { Authorization: `Bearer ${token}` },
-                      });
-                      if (Array.isArray(r2.data) && r2.data.length) {
-                        const normalized = normalizeImageList(r2.data).map(normalizeToSecureImagePath);
-                        const converted = await convertItemsImagesToBase64(normalized);
-                        urls = converted.length ? converted : normalized;
-                        break;
-                      }
-                    } catch {
-                      /* continue */
-                    }
-                  }
-                } catch {}
-                if (urls && urls.length) {
-                  setImageUrls((prev) => ({ ...prev, [id]: urls, [cid]: urls }));
-                  fetched = true;
-                  console.log('[InvoiceImages] gold fetched', { id_achat: cid, count: urls.length });
+                const token = localStorage.getItem("token");
+                const legacyUrl = `${API_BASEImage}/list/${artId}`;
+                const r2 = await axios.get(legacyUrl, {
+                  headers: { Authorization: `Bearer ${token}` },
+                });
+                if (Array.isArray(r2.data) && r2.data.length) {
+                  const normalized = normalizeImageList(r2.data).map(normalizeToSecureImagePath);
+                  const converted = await convertItemsImagesToBase64(normalized);
+                  urls = converted.length ? converted : normalized;
                 }
               } catch {}
             }
-            if (!fetched) {
-              setImageUrls((prev) => ({ ...prev, [id]: [] }));
+
+            setImageUrls((prev) => ({ ...prev, [artId]: urls || [] }));
+            continue;
+          }
+
+
+          // DIAMOND
+          if (isDiamond) {
+            const cid = String(id);
+            let urls = await fetchImagesTyped(cid, "diamond");
+
+            // fallback legacy
+            if (!urls || urls.length === 0) {
+              try {
+                const token = localStorage.getItem("token");
+                const legacyUrl = `${API_BASEImage}/list/${cid}`;
+                const r2 = await axios.get(legacyUrl, {
+                  headers: { Authorization: `Bearer ${token}` },
+                });
+                if (Array.isArray(r2.data) && r2.data.length) {
+                  const normalized = normalizeImageList(r2.data).map(normalizeToSecureImagePath);
+                  const converted = await convertItemsImagesToBase64(normalized);
+                  urls = converted.length ? converted : normalized;
+                }
+              } catch {}
             }
+
+            setImageUrls((prev) => ({ ...prev, [cid]: urls || [] }));
+            continue;
           }
         }
       })();
+
       // eslint-disable-next-line
     }, [pdata, allWatchDetails, allDiamondDetails, typeinv, hasDiamondData, items]);
 
@@ -1159,7 +1100,6 @@ const pickNumber = (...values: any[]) => {
                 marginBottom: 8,
                 borderRadius: 12,
                 padding: 4,
-                background: "#fff",
               }}
             />
 
@@ -1577,6 +1517,14 @@ const pickNumber = (...values: any[]) => {
                                 parentInvoice?.id_fact ??
                                 invoice?.id_fact ??
                                 invoice?.num_fact;
+                              const rowGoldArtId =
+                                parentInvoice?.id_art ??
+                                parentInvoice?.ID_ART ??
+                                parentInvoice?.Id_Art ??
+                                item?.id_art ??
+                                item?.ID_ART ??
+                                item?.Id_Art ??
+                                invoice?.id_art;
                               const rowIdAchatCandidate =
                                 item?.id_achat ??
                                 item?.ID_ACHAT ??
@@ -1584,6 +1532,8 @@ const pickNumber = (...values: any[]) => {
                                 parentInvoice?.id_achat ??
                                 parentInvoice?.ID_ACHAT ??
                                 parentInvoice?.Id_Achat;
+
+
 
                               const makeKey = (v: any) =>
                                 v !== undefined && v !== null && String(v).trim() !== ""
@@ -1598,12 +1548,17 @@ const pickNumber = (...values: any[]) => {
                               let urls: string[] = [];
 
                               const orderedKeys = [
+                                // GOLD MUST USE id_art FIRST
+                                makeKey(rowGoldArtId),
+
+                                // keep the rest for watch/diamond fallbacks
                                 makeKey(rowIdAchatCandidate),
                                 makeKey(rowPicint),
                                 makeKey(rowIdFact),
                                 makeKey(invoice?.picint),
                                 makeKey(invoice?.id_fact ?? invoice?.num_fact),
                               ].filter(Boolean);
+
 
                               for (const key of orderedKeys) {
                                 if (key && imageUrls[key] && imageUrls[key].length) {
@@ -1713,7 +1668,7 @@ const pickNumber = (...values: any[]) => {
                                       const filename = parts[len - 1];
                                       const idSeg = parts[len - 2];
                                       if (idSeg) {
-                                        return `/images/${encodeURIComponent(idSeg)}/${encodeURIComponent(filename)}`;
+                                        return `/images/watch/${encodeURIComponent(idSeg)}/${encodeURIComponent(filename)}`;
                                       }
                                     }
                                   } catch {}
@@ -2628,4 +2583,4 @@ const pickNumber = (...values: any[]) => {
   }
 );
 
-export default WatchStandardInvoiceContent;
+export default WatchStandardInvoiceContent; 

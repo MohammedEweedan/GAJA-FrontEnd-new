@@ -153,6 +153,29 @@ const formatWholeAmount = (value: any, opts?: { allowNegative?: boolean }) => {
   });
 };
 
+const toFiniteNumber = (value: any): number | null => {
+  if (value === null || value === undefined) return null;
+  if (typeof value === "number") {
+    return Number.isFinite(value) ? value : null;
+  }
+  if (typeof value === "string") {
+    const cleaned = value.replace(/[, ]+/g, "").trim();
+    if (!cleaned) return null;
+    const parsed = Number(cleaned);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+};
+
+const pickNumber = (...values: any[]): number | null => {
+  for (const val of values) {
+    const num = toFiniteNumber(val);
+    if (num !== null) return num;
+  }
+  return null;
+};
+
 const PS_CODE_LOOKUP: Record<string, string> = {
   "0": "P0",
   "1": "P1",
@@ -398,6 +421,100 @@ async function fetchImageListForExport(
   }
   return [];
 }
+
+type ImageKind = "gold" | "diamond" | "watch" | "generic";
+
+const preferFiniteNumber = (...values: any[]): number => {
+  for (const val of values) {
+    const num = Number(val);
+    if (Number.isFinite(num)) {
+      return num;
+    }
+  }
+  return 0;
+};
+
+const preferPositiveNumber = (...values: any[]): number => {
+  for (const val of values) {
+    const num = Number(val);
+    if (Number.isFinite(num) && num > 0) {
+      return num;
+    }
+  }
+  return 0;
+};
+
+const normalizeKind = (raw?: string | null): ImageKind => {
+  const lower = String(raw || "").toLowerCase();
+  if (lower.includes("gold")) return "gold";
+  if (lower.includes("diamond")) return "diamond";
+  if (lower.includes("watch")) return "watch";
+  return "generic";
+};
+
+const getImageStoreKey = (kind: ImageKind, id: number | string | null | undefined) => {
+  const normalizedKind = kind || "generic";
+  const normalizedId = id !== null && id !== undefined ? String(id) : "";
+  return `${normalizedKind}:${normalizedId}`;
+};
+
+interface ImageRequestDescriptor {
+  kind: ImageKind;
+  storeKey: string;
+  primaryId: number | string;
+  fallbackIds: Array<number | string>;
+}
+
+const normalizeImageList = (arr: any): string[] => {
+  if (!Array.isArray(arr)) return [];
+  return arr
+    .map((item: any) => {
+      if (typeof item === "string") return item;
+      if (item && typeof item === "object") {
+        return item.url || item.path || item.href || item.src || "";
+      }
+      return "";
+    })
+    .filter(Boolean);
+};
+
+const extractDateFromFilename = (filename: string): number => {
+  const dateMatch = filename.match(/(\d{4})[-_]?((\d{2})[-_]?(\d{2}))/);
+  if (dateMatch) {
+    const year = dateMatch[1];
+    const month = dateMatch[3];
+    const day = dateMatch[4];
+    if (year && month && day) {
+      const parsed = Date.parse(`${year}-${month}-${day}`);
+      if (!Number.isNaN(parsed)) return parsed;
+    }
+  }
+  return filename ? filename.length : 0;
+};
+
+const getNamePriorityFromUrl = (url: string): number => {
+  try {
+    const base = (url || "").split("?")[0];
+    const file = base.split("/").pop() || base;
+    const lower = file.toLowerCase();
+    if (lower.includes("marketing")) return 0;
+    if (lower.includes("invoice")) return 1;
+  } catch {
+    /* ignore */
+  }
+  return 2;
+};
+
+const sortByMarketingInvoicePreference = (urls: string[]): string[] => {
+  return [...urls].sort((a, b) => {
+    const pa = getNamePriorityFromUrl(a);
+    const pb = getNamePriorityFromUrl(b);
+    if (pa !== pb) return pa - pb;
+    const fa = a.split("/").pop() || "";
+    const fb = b.split("/").pop() || "";
+    return extractDateFromFilename(fb) - extractDateFromFilename(fa);
+  });
+};
 
 const typeOptions = [
   { label: "All", value: "all" },
@@ -647,6 +764,7 @@ const SalesReportsTable = ({
   const [psOptions, setPsOptions] = useState<
     Array<{ Id_point: number; name_point: string }>
   >([]);
+  const [psOptionsLoaded, setPsOptionsLoaded] = useState(false);
 
   // Load available points of sale for the PS filter
   useEffect(() => {
@@ -660,7 +778,8 @@ const SalesReportsTable = ({
       })
       .catch(() => {
         /* ignore */
-      });
+      })
+      .finally(() => setPsOptionsLoaded(true));
   }, []);
 
   // If the current user has ROLE_USER, force selectedPs to user's ps and keep the select disabled
@@ -670,6 +789,15 @@ const SalesReportsTable = ({
       if (raw) setSelectedPs(String(raw));
     }
   }, [isUser]);
+
+  useEffect(() => {
+    if (!psOptionsLoaded) return;
+    if (selectedPs === "all") return;
+    const available = new Set(psOptions.map((p) => String(p.Id_point)));
+    if (!available.has(selectedPs)) {
+      setSelectedPs("all");
+    }
+  }, [psOptionsLoaded, psOptions, selectedPs]);
 
   // Fetch all images for a given picint (or id_achat) with optional supplier type to select correct folder
   // Typed fetch similar to WatchStandardInvoiceContent: only attempt the explicit folder based on supplier type, with a legacy fallback if none
@@ -771,35 +899,32 @@ useEffect(() => {
   console.log('[ImageUrls Updated]:', imageUrls);
 }, [imageUrls]);
 
-// Trigger image fetching when data loads
 useEffect(() => {
-  console.log('[Trigger] Data changed, fetching images...', data.length, 'invoices');
-  
-  const idsToFetch = new Set<{ id: number; type: string }>();
+  const idsMap = new Map<number, string>();
   
   data.forEach((row: any) => {
-    const supplierType = row?.ACHATs?.[0]?.Fournisseur?.TYPE_SUPPLIER || '';
-    
-    // Try multiple ID sources
-    const possibleIds = [
-      row.picint,
-      row.id_fact,
-      row.id_achat,
-      row.id_art,
-      row.ID_ART,
-      ...(row.ACHATs || []).map((a: any) => a.id_achat || a.ID_ACHAT || a.picint || a.id_art || a.ID_ART).filter(Boolean)
-    ].filter(Boolean);
-
-    possibleIds.forEach(id => {
-      if (id) {
-        idsToFetch.add({ id: Number(id), type: supplierType });
+    // Process each ACHAT individually
+    (row.ACHATs || []).forEach((achat: any) => {
+      const supplierType = achat?.Fournisseur?.TYPE_SUPPLIER || '';
+      const typeLower = String(supplierType).toLowerCase();
+      
+      // Get correct ID based on type
+      let imageId = null;
+      if (typeLower.includes('gold')) {
+        imageId = achat.id_art || achat.ID_ART;
+      } else if (typeLower.includes('watch')) {
+        imageId = achat.id_achat || achat.ID_ACHAT;
+      } else if (typeLower.includes('diamond')) {
+        imageId = achat.picint;
+      }
+      
+      if (imageId) {
+        idsMap.set(Number(imageId), supplierType);
       }
     });
   });
 
-  console.log('[Trigger] IDs to fetch:', Array.from(idsToFetch));
-
-  Array.from(idsToFetch).forEach(({ id, type }) => {
+  idsMap.forEach((type, id) => {
     fetchImages(id, type);
   });
 }, [data, fetchImages]);
@@ -856,12 +981,13 @@ useEffect(() => {
 
   useEffect(() => {
   const fetchData = async () => {
+    if (!psOptionsLoaded) return;
     setLoading(true);
     const token = localStorage.getItem("token");
     const typeFilters = (selectedTypes || []).filter((t) => t !== "all");
 
     try {
-      let allInvoices: any[] = [];
+      const dedupMap = new Map<string, any>();
       
       // Fetch ALL invoices without filters to get complete data
       const psToFetch = selectedPs === "all" ? psOptions.map(p => p.Id_point) : [selectedPs];
@@ -905,26 +1031,82 @@ useEffect(() => {
         }
         
         const results = await Promise.all(requests);
+        const preferFields = [
+          "amount_lyd",
+          "amount_currency",
+          "amount_currency_LYD",
+          "amount_EUR",
+          "amount_EUR_LYD",
+          "rest_of_money",
+          "rest_of_moneyLYD",
+          "rest_of_money_lyd",
+          "rest_of_moneyUSD",
+          "rest_of_money_usd",
+          "rest_of_moneyUSD_LYD",
+          "rest_of_money_usd_lyd",
+          "rest_of_moneyEUR",
+          "rest_of_money_eur",
+          "rest_of_moneyEUR_LYD",
+          "rest_of_money_eur_lyd",
+          "total_remise_final_lyd",
+          "total_remise_final_LYD",
+          "totalAmountUsd",
+          "total_amount_usd",
+          "totalAmountEur",
+          "total_amount_eur",
+          "usd_to_lyd_rate",
+          "rate_usd",
+          "currency_rate_usd",
+          "exchange_rate_usd",
+          "eur_to_lyd_rate",
+          "rate_eur",
+          "currency_rate_eur",
+          "exchange_rate_eur",
+        ];
+        const cloneAchats = (achats: any) =>
+          Array.isArray(achats) ? [...achats] : [];
         results.forEach((r) => {
           if (Array.isArray(r.data)) {
-            allInvoices.push(...r.data);
+            r.data.forEach((row: any) => {
+              const key = String(row.num_fact ?? row.id_fact ?? row.picint ?? Math.random());
+              if (!dedupMap.has(key)) {
+                dedupMap.set(key, {
+                  ...row,
+                  ACHATs: cloneAchats(row.ACHATs),
+                });
+              } else {
+                // Merge ACHATs from multiple rows with the same num_fact
+                const existing = dedupMap.get(key);
+                const existingAchats = cloneAchats(existing.ACHATs);
+                const incomingAchats = cloneAchats(row.ACHATs);
+                existing.ACHATs = [...existingAchats, ...incomingAchats];
+                preferFields.forEach((field) => {
+                  const current = existing[field];
+                  const incoming = row[field];
+                  const hasCurrent =
+                    current !== undefined &&
+                    current !== null &&
+                    !(typeof current === "number" && isNaN(current));
+                  const hasIncoming =
+                    incoming !== undefined &&
+                    incoming !== null &&
+                    !(typeof incoming === "number" && isNaN(incoming));
+                  if (!hasCurrent && hasIncoming) {
+                    existing[field] = incoming;
+                  }
+                });
+              }
+            });
           }
         });
       }
       
-      // Deduplicate by invoice number
-      const seen = new Set<string>();
-      const dedup = allInvoices.filter((row) => {
-        const key = String(row.num_fact || row.id_fact || row.picint || Math.random());
-        if (seen.has(key)) return false;
-        seen.add(key);
-        return true;
-      });
+      const allInvoices = Array.from(dedupMap.values());
       
-      console.log('[SalesReports] Fetched invoices:', dedup.length);
+      console.log('[SalesReports] Fetched invoices:', allInvoices.length);
       
       // Now apply client-side filtering for date range
-      const filtered = dedup.filter((row) => {
+      const filtered = allInvoices.filter((row) => {
         const invoiceDate = new Date(row.date_fact);
         const fromDate = periodFrom ? new Date(periodFrom) : null;
         const toDate = periodTo ? new Date(periodTo) : null;
@@ -945,10 +1127,10 @@ useEffect(() => {
     }
   };
   
-  if (psOptions.length > 0) {
+  if (psOptionsLoaded) {
     fetchData();
   }
-}, [selectedTypes, periodFrom, periodTo, selectedPs, chiraRefreshFlag, invoiceRefreshFlag, psOptions]);
+}, [selectedTypes, periodFrom, periodTo, selectedPs, chiraRefreshFlag, invoiceRefreshFlag, psOptions, psOptionsLoaded]);
 
   // Fetch watch details (OriginalAchatWatches) for watch invoices using invoice picint
   useEffect(() => {
@@ -1074,121 +1256,198 @@ useEffect(() => {
 
   // --- Merge rows by num_fact and aggregate product details ---
   function mergeRowsByInvoice(data: any[]) {
-    const invoiceMap = new Map<string, any>();
-    data.forEach((row: any) => {
-      const numFact = row.num_fact;
-      if (!invoiceMap.has(numFact)) {
-        // Clone the row and initialize product details list
-        invoiceMap.set(numFact, { ...row, _productDetails: [] });
+  const invoiceMap = new Map<string, any>();
+  
+  data.forEach((row: any) => {
+    const numFact = row.num_fact;
+    
+    if (!invoiceMap.has(numFact)) {
+      // Clone the row and initialize product details list
+      invoiceMap.set(numFact, { ...row, _productDetails: [] });
+    }
+    
+    // Extract product details from ACHATs
+    const achats: any[] = row.ACHATs || [];
+    
+    achats.forEach((achat: any) => {
+      // For watch items: use model from OriginalAchatWatches via invoice picint/DistributionPurchase.
+      // For non-watch items: keep existing Design_art/design name.
+      let watch: any = undefined;
+      const dp: any = (achat as any).DistributionPurchase;
+      if (Array.isArray(dp) && dp.length > 0 && typeof dp[0] === "object") {
+        watch = dp[0]?.OriginalAchatWatch;
+      } else if (dp && typeof dp === "object") {
+        watch = dp?.OriginalAchatWatch;
       }
-      // Extract product details from ACHATs
-      const achats: any[] = row.ACHATs || [];
-      achats.forEach((achat: any) => {
-        // For watch items: use model from OriginalAchatWatches via invoice picint/DistributionPurchase.
-        // For non-watch items: keep existing Design_art/design name.
-        let watch: any = undefined;
-        const dp: any = (achat as any).DistributionPurchase;
-        if (Array.isArray(dp) && dp.length > 0 && typeof dp[0] === "object") {
-          watch = dp[0]?.OriginalAchatWatch;
-        } else if (dp && typeof dp === "object") {
-          watch = dp?.OriginalAchatWatch;
-        }
-        if (!watch && (achat as any).OriginalAchatWatch) {
-          watch = (achat as any).OriginalAchatWatch;
-        }
+      if (!watch && (achat as any).OriginalAchatWatch) {
+        watch = (achat as any).OriginalAchatWatch;
+      }
 
-        const typeSupplier = achat.Fournisseur?.TYPE_SUPPLIER || "";
-        const typeLower = String(typeSupplier).toLowerCase();
+      const typeSupplier = achat.Fournisseur?.TYPE_SUPPLIER || "";
+      const typeLower = String(typeSupplier).toLowerCase();
 
-        // If it's a watch sale, show model (and serial number when available) as product name.
-        // Prefer values from watchDetailsMap (OriginalAchatWatches),
-        // then DistributionPurchase/ACHAT fields. Do NOT fall back to Design_art for watches.
-        let design: string;
-        if (typeLower.includes("watch")) {
-          const invoicePicint = row.picint;
-          const watchDetails =
-            (invoicePicint !== undefined && invoicePicint !== null
-              ? watchDetailsMap[String(invoicePicint)]
-              : undefined) || undefined;
-          const model =
-            (watchDetails?.model as string | undefined) ||
-            (watchDetails?.Model as string | undefined) ||
-            (watch?.model as string | undefined) ||
-            (watch?.Model as string | undefined) ||
-            (achat.Model as string | undefined) ||
-            (achat.model as string | undefined) ||
-            "";
-          const serial =
-            (watchDetails?.serial_number as string | undefined) ||
-            (watch?.serial_number as string | undefined) ||
-            (achat.serial_number as string | undefined) ||
-            "";
+      // If it's a watch sale, show model (and serial number when available) as product name.
+      // Prefer values from watchDetailsMap (OriginalAchatWatches),
+      // then DistributionPurchase/ACHAT fields. Do NOT fall back to Design_art for watches.
+      let design: string;
+      if (typeLower.includes("watch")) {
+        const invoicePicint = row.picint;
+        const watchDetails =
+          (invoicePicint !== undefined && invoicePicint !== null
+            ? watchDetailsMap[String(invoicePicint)]
+            : undefined) || undefined;
+        const model =
+          (watchDetails?.model as string | undefined) ||
+          (watchDetails?.Model as string | undefined) ||
+          (watch?.model as string | undefined) ||
+          (watch?.Model as string | undefined) ||
+          (achat.Model as string | undefined) ||
+          (achat.model as string | undefined) ||
+          "";
+        const serial =
+          (watchDetails?.serial_number as string | undefined) ||
+          (watch?.serial_number as string | undefined) ||
+          (achat.serial_number as string | undefined) ||
+          "";
 
-          design = serial ? `${model} | SN: ${serial}` : model;
-        } else {
-          // Non-watch (gold/diamond/etc.): keep previous behaviour using Design_art/design
-          design =
-            (achat.Design_art as string | undefined) ||
-            (achat.design as string | undefined) ||
-            "";
-        }
+        design = serial ? `${model} | SN: ${serial}` : model;
+      } else {
+        // Non-watch (gold/diamond/etc.): keep previous behaviour using Design_art/design
+        design =
+          (achat.Design_art as string | undefined) ||
+          (achat.design as string | undefined) ||
+          "";
+      }
 
-        const code = achat.id_fact || "";
-        let weight = "";
+      const code = achat.id_fact || "";
+      let weight = "";
+      if (typeLower.includes("gold")) {
+        weight = achat.qty?.toString() || "";
+      }
+      
+      // Extract purchase record properly
+      const purchaseRecord = Array.isArray(dp) && dp.length > 0 
+        ? (dp[0]?.purchase || dp[0]) 
+        : (dp?.purchase || dp?.purchaseW || dp?.purchaseD || dp || null);
+      const achatId = purchaseRecord?.id_achat || achat.id_achat || achat.ID_ACHAT || achat.picint;
+      
+      const picint = achat.picint ?? row.picint ?? "";
+      
+      // Get imageId based on supplier type
+      const imageId = (() => {
+        // Gold images are stored under id_art from the purchase record or ACHAT
         if (typeLower.includes("gold")) {
-          weight = achat.qty?.toString() || "";
-        }
-        const idAchat =
-          achat.id_achat ?? achat.ID_ACHAT ?? achat.Id_Achat ?? achat.idAchat ?? "";
-        const picint = achat.picint ?? "";
-        const imageId = (() => {
-        const typeSupplier = achat.Fournisseur?.TYPE_SUPPLIER || "";
-        const typeLower = String(typeSupplier).toLowerCase();
-        
-        // Gold images are stored under id_art
-        if (typeLower.includes("gold")) {
-          return achat.id_art || achat.ID_ART || achat.Id_Art || 
-                achat.id_achat || achat.ID_ACHAT || achat.Id_Achat || 
-                achat.picint || row.picint || "";
+          const goldId = purchaseRecord?.id_art || achat.id_art || achat.ID_ART || achat.Id_Art || achatId || picint;
+          console.log('[mergeRowsByInvoice] Gold imageId:', goldId, 'from purchase:', purchaseRecord);
+          return goldId;
         }
         
-        // Watch images are stored under id_achat
+        // Watch images are stored under id_achat from the purchase record or ACHAT
         if (typeLower.includes("watch")) {
-          return achat.id_achat || achat.ID_ACHAT || achat.Id_Achat || 
-                achat.picint || row.picint || "";
+          const watchId = purchaseRecord?.id_achat || achatId || picint || row.picint;
+          console.log('[mergeRowsByInvoice] Watch imageId:', watchId, 'from purchase:', purchaseRecord);
+          return watchId;
         }
         
         // Diamond images are stored under picint
-        return achat.picint || achat.id_achat || row.picint || "";
+        const diamondId = picint || achatId || row.picint;
+        console.log('[mergeRowsByInvoice] Diamond imageId:', diamondId);
+        return diamondId;
       })();
 
-        const IS_GIFT = row.IS_GIFT || "";
+      console.log('[mergeRowsByInvoice] Product:', {
+        design,
+        imageId,
+        typeSupplier,
+        achat: { 
+          id_art: achat.id_art, 
+          id_achat: achatId, 
+          picint: picint,
+          purchaseRecord: purchaseRecord 
+        }
+      });
 
-        // include common external reference fields so UI/export can access them
-        const codeExternal =
-          achat.CODE_EXTERNAL ||
-          achat.code_external ||
-          achat.CODE_EXTERNAL ||
-          achat.ref ||
-          achat.reference ||
-          "";
-        invoiceMap.get(numFact)._productDetails.push({
-          design,
-          weight,
-          code,
-          typeSupplier,
-          picint,
-          id_achat: idAchat,
-          imageId,
-          IS_GIFT,
-          CODE_EXTERNAL: codeExternal,
-          // Carry invoice-level selling price so downstream views can access it per detail
-          prix_vente_remise: row.prix_vente_remise ?? null,
-        });
+      const IS_GIFT = row.IS_GIFT || "";
+
+      // include common external reference fields so UI/export can access them
+      const codeExternal =
+        achat.CODE_EXTERNAL ||
+        achat.code_external ||
+        achat.CODE_EXTERNAL ||
+        achat.ref ||
+        achat.reference ||
+        "";
+        
+      const rawPriceCandidates = [
+        achat?.prix_vente_remise,
+        achat?.PRIX_VENTE_REMISE,
+        achat?.prix_vente,
+        achat?.PRIX_VENTE,
+        achat?.prixVente,
+        achat?.PrixVente,
+        achat?.selling_price,
+        achat?.Selling_price,
+        achat?.SELLING_PRICE,
+        achat?.price,
+        achat?.Price,
+        achat?.PRICE,
+        achat?.total_remise,
+        achat?.TOTAL_REMISE,
+        purchaseRecord?.prix_vente_remise,
+        purchaseRecord?.PRIX_VENTE_REMISE,
+        purchaseRecord?.prix_vente,
+        purchaseRecord?.PRIX_VENTE,
+        purchaseRecord?.selling_price,
+        purchaseRecord?.Selling_price,
+        purchaseRecord?.price,
+        purchaseRecord?.Price,
+        purchaseRecord?.total_remise,
+        purchaseRecord?.TOTAL_REMISE,
+      ];
+
+      // Add this console log before the normalization
+      console.log('[mergeRowsByInvoice] Raw price candidates for', design, ':', {
+        achat_fields: {
+          prix_vente_remise: achat?.prix_vente_remise,
+          PRIX_VENTE_REMISE: achat?.PRIX_VENTE_REMISE,
+          prix_vente: achat?.prix_vente,
+          selling_price: achat?.selling_price,
+          price: achat?.price,
+        },
+        purchaseRecord_fields: purchaseRecord ? {
+          prix_vente_remise: purchaseRecord?.prix_vente_remise,
+          prix_vente: purchaseRecord?.prix_vente,
+          selling_price: purchaseRecord?.selling_price,
+        } : null,
+        rawCandidates: rawPriceCandidates.filter(v => v !== undefined && v !== null),
+      });
+
+      const normalizedPriceCandidates = rawPriceCandidates
+        .map((val) => toFiniteNumber(val))
+        .filter((val): val is number => val !== null);
+      const itemPrice = normalizedPriceCandidates.length > 0 ? normalizedPriceCandidates[0] : null;
+
+      console.log('[mergeRowsByInvoice] Final item price:', itemPrice, 'from', normalizedPriceCandidates);
+
+      invoiceMap.get(numFact)._productDetails.push({
+        design,
+        weight,
+        code,
+        typeSupplier,
+        picint,
+        id_achat: achatId,
+        imageId,
+        IS_GIFT,
+        CODE_EXTERNAL: codeExternal,
+        prix_vente_remise: itemPrice,
+        unitPrice: itemPrice,
+        priceCandidates: normalizedPriceCandidates,
       });
     });
-    return Array.from(invoiceMap.values());
-  }
+  });
+  
+  return Array.from(invoiceMap.values());
+}
 
   // Sort data by date_fact descending using UTC to avoid timezone issues
   const mergedData = mergeRowsByInvoice(data);
@@ -1225,28 +1484,26 @@ useEffect(() => {
     (row.ACHATs || []).forEach((a: any) => {
       const achatType = String(a?.Fournisseur?.TYPE_SUPPLIER || supplierType || "").toLowerCase();
       
-      console.log('[SalesReports] Processing ACHAT:', {
-        id_achat: a.id_achat,
-        ID_ACHAT: a.ID_ACHAT,
-        Id_Achat: a.Id_Achat,
-        picint: a.picint,
-        id_art: a.id_art,
-        achatType
-      });
+      // Extract purchase record correctly
+      const dp = a.DistributionPurchase;
+      const purchaseRecord = Array.isArray(dp) && dp.length > 0 
+        ? (dp[0]?.purchase || dp[0]) 
+        : (dp?.purchase || dp?.purchaseW || dp?.purchaseD || dp || null);
       
-      // For gold/watch, use id_achat (or id_art for gold)
+      console.log('[SalesReports] Purchase record:', purchaseRecord);
+      
       if (achatType.includes("gold")) {
-        const goldId = a.id_art || a.ID_ART || a.Id_Art || a.id_achat || a.ID_ACHAT || a.Id_Achat;
+        const goldId = purchaseRecord?.id_achat || a.id_achat || a.ID_ACHAT;
         if (goldId) {
           queued.push({ id: goldId, type: a?.Fournisseur?.TYPE_SUPPLIER || supplierType });
         }
       } else if (achatType.includes("watch")) {
-        const watchId = a.id_achat || a.ID_ACHAT || a.Id_Achat || a.picint;
+        const watchId = purchaseRecord?.id_achat || a.id_achat || a.ID_ACHAT;
         if (watchId) {
           queued.push({ id: watchId, type: a?.Fournisseur?.TYPE_SUPPLIER || supplierType });
         }
       } else if (achatType.includes("diamond")) {
-        const diamondId = a.picint || a.id_achat || a.ID_ACHAT || a.Id_Achat;
+        const diamondId = a.picint || purchaseRecord?.picint;
         if (diamondId) {
           queued.push({ id: diamondId, type: a?.Fournisseur?.TYPE_SUPPLIER || supplierType });
         }
@@ -2121,7 +2378,24 @@ useEffect(() => {
       if (restField > 0) return sum + restField;
 
       // Fallback: compute remaining from totals vs paid LYD-equivalent when rest fields aren't populated.
-      const totalLyd = Number((row as any).total_remise_final_lyd ?? (row as any).total_remise_final_LYD ?? 0) || 0;
+      // Debug: log all available fields
+      console.log('[Financial Summary] Row fields:', {
+        num_fact: row.num_fact,
+        total_remise_final: row.total_remise_final,
+        total_remise_final_lyd: row.total_remise_final_lyd,
+        total_remise_final_LYD: row.total_remise_final_LYD,
+        totalAmountUsd: row.totalAmountUsd,
+        total_amount_usd: row.total_amount_usd,
+        totalAmountEur: row.totalAmountEur,
+        total_amount_eur: row.total_amount_eur,
+        amount_lyd: row.amount_lyd,
+        amount_currency: row.amount_currency,
+        amount_EUR: row.amount_EUR,
+      });
+
+      const totalLyd = Number(row.total_remise_final_lyd || row.total_remise_final_LYD) || 0;
+      const totalUsd = Number(row.total_remise_final) || 0; // Try this first
+      const totalEur = Number(row.totalAmountEur || row.total_amount_eur) || 0;
       const paidLydEquiv =
         (Number(row.amount_lyd) || 0) +
         (Number(row.amount_currency_LYD) || 0) +
@@ -2138,8 +2412,8 @@ useEffect(() => {
       if (restField > 0) return sum + restField;
 
       // Fallback: compute remaining USD from totals vs paid USD when rest fields aren't populated.
-      const totalUsd = Number((row as any).total_remise_final ?? 0) || 0;
       const paidUsd = Number(row.amount_currency ?? 0) || 0;
+      const totalUsd = Number(row.total_remise_final) || 0; // Try this first
       const diff = totalUsd - paidUsd;
       if (!Number.isFinite(diff) || diff <= 0) return sum;
       return sum + diff;
@@ -2152,8 +2426,8 @@ useEffect(() => {
       if (restField > 0) return sum + restField;
 
       // Fallback: compute remaining EUR from totals vs paid EUR when rest fields aren't populated.
-      const totalEur = Number((row as any).totalAmountEur ?? (row as any).total_amount_eur ?? (row as any).total_remise_final_eur ?? 0) || 0;
       const paidEur = Number(row.amount_EUR ?? 0) || 0;
+      const totalEur = Number(row.totalAmountEur || row.total_amount_eur) || 0;
       const diff = totalEur - paidEur;
       if (!Number.isFinite(diff) || diff <= 0) return sum;
       return sum + diff;
@@ -2266,12 +2540,17 @@ useEffect(() => {
   const invoiceComment = stripInternalMetaTags(row.COMMENT ?? "");
   
   const clientValue = row.Client || row.client || null;
-  let clientDisplay = "";
-  if (clientValue && typeof clientValue === "object") {
-    const name = clientValue.client_name || clientValue.name || "";
-    const tel = clientValue.tel_client || clientValue.phone || "";
-    clientDisplay = `${name}${name && tel ? " - " : ""}${tel}`;
-  }
+  const clientName =
+    clientValue && typeof clientValue === "object"
+      ? clientValue.client_name || clientValue.name || ""
+      : "";
+  const clientContact =
+    clientValue && typeof clientValue === "object"
+      ? clientValue.tel_client || clientValue.phone || ""
+      : "";
+  const clientDisplay = clientName
+    ? `${clientName}${clientContact ? ` - ${clientContact}` : ""}`
+    : clientContact;
   const customerIdRaw =
     row.Client?.id_client ??
     row.Client?.ID_CLIENT ??
@@ -2389,13 +2668,14 @@ useEffect(() => {
               }}
             />
           )}
-          {(user || clientDisplay) && (
+          {(user || clientName || clientContact) && (
             <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0.5 }}>
+              {/* User Section */}
               {user && row.Utilisateur?.id_user && (
                 <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
                   <Button
                     component={RouterLink}
-                    to={buildEncryptedSellerPath(row.Utilisateur.id_user)}
+                    to={buildEncryptedSellerPath(Number(row.Utilisateur.id_user))}
                     size="small"
                     sx={{
                       p: 0.5,
@@ -2422,29 +2702,48 @@ useEffect(() => {
                   )}
                 </Box>
               )}
-              {clientDisplay && (
-                hasCustomerProfileLink ? (
-                  <Button
-                    component={RouterLink}
-                    to={buildEncryptedClientPath(customerIdForLink)}
-                    size="small"
-                    sx={{
-                      p: 0.5,
-                      minWidth: 0,
-                      color: 'secondary.main',
-                      textTransform: 'none',
-                      fontWeight: 700,
-                      background: 'none',
-                      '&:hover': { textDecoration: 'underline', background: 'none' },
-                    }}
-                  >
-                    🛍️ {clientDisplay}
-                  </Button>
-                ) : (
-                  <Typography component="span" sx={{ fontWeight: 600 }}>
-                    🛍️ {clientDisplay}
-                  </Typography>
-                )
+
+              {/* Customer Section */}
+              {(clientName || clientContact) && (
+                <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0.25 }}>
+                  {clientName && (
+                    customerIdForLink != null ? (
+                      <Button
+                        size="small"
+                        component={RouterLink}
+                        to={buildEncryptedClientPath(Number(customerIdForLink))}
+                        sx={{
+                          p: 0.5,
+                          minWidth: 0,
+                          color: '#fbbf24',
+                          textTransform: 'none',
+                          fontWeight: 700,
+                          background: 'rgba(255,255,255,0.1)',
+                          '&:hover': { textDecoration: 'underline', background: 'rgba(255,255,255,0.2)' },
+                        }}
+                        onClick={() => {
+                          try {
+                            if (typeof window !== 'undefined') {
+                              localStorage.setItem('customerFocusId', String(customerIdForLink));
+                              localStorage.setItem('customerFocusName', clientName);
+                              if (clientContact) localStorage.setItem('customerFocusPhone', clientContact);
+                            }
+                          } catch {}
+                        }}
+                      >
+                        🛍️ {clientName}
+                      </Button>
+                    ) : (
+                      // fallback: just show text if no ID
+                      <Typography sx={{ fontWeight: 600, color: '#fbbf24' }}>
+                        🛍️ {clientName}
+                      </Typography>
+                    )
+                  )}
+                  {clientContact && (
+                    <Typography sx={{ fontSize: 12, opacity: 0.85 }}>📞 {clientContact}</Typography>
+                  )}
+                </Box>
               )}
             </Box>
           )}
@@ -2468,24 +2767,111 @@ useEffect(() => {
           <Box sx={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: 2 }}>
             {(() => {
               const isGold = !!rawTypeSupplier?.toLowerCase().includes("gold");
-              const total = Number(row.total_remise_final) || 0;
+              const isDiamond = !!rawTypeSupplier?.toLowerCase().includes("diamond");
+              const isWatch = !!rawTypeSupplier?.toLowerCase().includes("watch");
+              
+              // Invoice totals
               const totalLyd = Number(row.total_remise_final_lyd || row.total_remise_final_LYD) || 0;
+              const totalUsd = Number(row.total_remise_final) || 0;
+              const totalEur = Number(row.totalAmountEur || row.total_amount_eur) || 0;
+              
+              // Paid amounts
               const amountLyd = Number(row.amount_lyd) || 0;
               const amountUsd = Number(row.amount_currency) || 0;
               const amountUsdLyd = Number(row.amount_currency_LYD) || 0;
               const amountEur = Number(row.amount_EUR) || 0;
               const amountEurLyd = Number(row.amount_EUR_LYD) || 0;
-
-              const paidEquiv = amountLyd + amountUsdLyd + amountEurLyd;
-              const remaining = Math.max(0, (totalLyd || total) - paidEquiv);
-
+              
+              // Get remaining amounts from backend first
+              const restLydBackend = Number(row.rest_of_money ?? row.rest_of_moneyLYD ?? row.rest_of_money_lyd ?? 0) || 0;
+              const restUsdBackend = Number(row.rest_of_moneyUSD ?? row.rest_of_money_usd ?? 0) || 0;
+              const restEurBackend = Number(row.rest_of_moneyEUR ?? row.rest_of_money_eur ?? 0) || 0;
+              const restUsdLydBackend = Number(row.rest_of_moneyUSD_LYD ?? row.rest_of_money_usd_lyd ?? 0) || 0;
+              const restEurLydBackend = Number(row.rest_of_moneyEUR_LYD ?? row.rest_of_money_eur_lyd ?? 0) || 0;
+              
+              // Calculate remaining amounts:
+              // For Gold invoices: total is in LYD, but may have USD/EUR payments
+              // For Diamond/Watch: total is in USD, may have LYD/EUR payments
+              let remainingLyd = 0;
+              let remainingUsd = 0;
+              let remainingEur = 0;
+              let remainingUsdLyd = 0;
+              let remainingEurLyd = 0;
+              
+              if (isGold) {
+                // Gold: total is in LYD
+                // Use backend values if available, otherwise calculate
+                remainingLyd = restLydBackend > 0 
+                  ? restLydBackend 
+                  : Math.max(0, totalLyd - amountLyd - amountUsdLyd - amountEurLyd);
+                remainingUsd = restUsdBackend > 0 
+                  ? restUsdBackend 
+                  : Math.max(0, amountUsd > 0 ? 0 : 0); // No USD total for gold
+                remainingEur = restEurBackend > 0 
+                  ? restEurBackend 
+                  : Math.max(0, amountEur > 0 ? 0 : 0); // No EUR total for gold
+              } else {
+                // Diamond/Watch: total is in USD
+                remainingUsd = restUsdBackend > 0 
+                  ? restUsdBackend 
+                  : Math.max(0, totalUsd - amountUsd);
+                remainingEur = restEurBackend > 0 
+                  ? restEurBackend 
+                  : Math.max(0, totalEur - amountEur);
+                remainingLyd = restLydBackend > 0 
+                  ? restLydBackend 
+                  : 0; // LYD is just a payment method for USD invoices
+                
+                // Calculate LYD equivalents for remaining foreign currency
+                if (remainingUsd > 0) {
+                  remainingUsdLyd = restUsdLydBackend > 0 
+                    ? restUsdLydBackend 
+                    : amountUsd > 0 && amountUsdLyd > 0 
+                      ? (remainingUsd * (amountUsdLyd / amountUsd))
+                      : 0;
+                }
+                if (remainingEur > 0) {
+                  remainingEurLyd = restEurLydBackend > 0 
+                    ? restEurLydBackend 
+                    : amountEur > 0 && amountEurLyd > 0 
+                      ? (remainingEur * (amountEurLyd / amountEur))
+                      : 0;
+                }
+              }
+              
+              // Round to nearest whole number and filter out values less than 2
+              const roundedRemLyd = Math.round(remainingLyd);
+              const roundedRemUsd = Math.round(remainingUsd);
+              const roundedRemEur = Math.round(remainingEur);
+              const roundedRemUsdLyd = Math.round(remainingUsdLyd);
+              const roundedRemEurLyd = Math.round(remainingEurLyd);
+              
+              console.log('[Financial Summary] Calculated remainders:', {
+                num_fact: row.num_fact,
+                type: isGold ? 'gold' : isDiamond ? 'diamond' : 'watch',
+                totals: { totalLyd, totalUsd, totalEur },
+                paid: { amountLyd, amountUsd, amountUsdLyd, amountEur, amountEurLyd },
+                backend: { restLydBackend, restUsdBackend, restEurBackend, restUsdLydBackend, restEurLydBackend },
+                calculated: { remainingLyd, remainingUsd, remainingEur, remainingUsdLyd, remainingEurLyd },
+                rounded: { roundedRemLyd, roundedRemUsd, roundedRemEur, roundedRemUsdLyd, roundedRemEurLyd },
+              });
+              
               return (
                 <>
-                  {total > 0 && (
+                  {totalLyd > 0 && isGold && (
                     <Box>
                       <Typography sx={{ fontSize: 11, color: '#64748b', mb: 0.5 }}>Invoice Total</Typography>
                       <Typography sx={{ fontSize: 18, fontWeight: 800, color: '#1e293b' }}>
-                        {formatWholeAmount(total)} {isGold ? 'LYD' : 'USD'}
+                        {formatWholeAmount(totalLyd)} LYD
+                      </Typography>
+                    </Box>
+                  )}
+                  
+                  {totalUsd > 0 && !isGold && (
+                    <Box>
+                      <Typography sx={{ fontSize: 11, color: '#64748b', mb: 0.5 }}>Invoice Total</Typography>
+                      <Typography sx={{ fontSize: 18, fontWeight: 800, color: '#1e293b' }}>
+                        {formatWholeAmount(totalUsd)} USD
                       </Typography>
                     </Box>
                   )}
@@ -2527,11 +2913,39 @@ useEffect(() => {
                     </Box>
                   )}
                   
-                  {remaining > 0 && (
+                  {roundedRemLyd > 1 && (
                     <Box>
-                      <Typography sx={{ fontSize: 11, color: '#64748b', mb: 0.5 }}>Remaining</Typography>
+                      <Typography sx={{ fontSize: 11, color: '#64748b', mb: 0.5 }}>Remaining (LYD)</Typography>
                       <Typography sx={{ fontSize: 16, fontWeight: 700, color: '#ef4444' }}>
-                        {formatWholeAmount(remaining)} LYD
+                        {formatWholeAmount(roundedRemLyd)} LYD
+                      </Typography>
+                    </Box>
+                  )}
+
+                  {roundedRemUsd > 1 && (
+                    <Box>
+                      <Typography sx={{ fontSize: 11, color: '#64748b', mb: 0.5 }}>Remaining (USD)</Typography>
+                      <Typography sx={{ fontSize: 16, fontWeight: 700, color: '#ef4444' }}>
+                        {formatWholeAmount(roundedRemUsd)} USD
+                        {roundedRemUsdLyd > 1 && (
+                          <Typography component="span" sx={{ fontSize: 11, ml: 0.5, color: '#64748b' }}>
+                            ({formatWholeAmount(roundedRemUsdLyd)} LYD)
+                          </Typography>
+                        )}
+                      </Typography>
+                    </Box>
+                  )}
+
+                  {roundedRemEur > 1 && (
+                    <Box>
+                      <Typography sx={{ fontSize: 11, color: '#64748b', mb: 0.5 }}>Remaining (EUR)</Typography>
+                      <Typography sx={{ fontSize: 16, fontWeight: 700, color: '#ef4444' }}>
+                        {formatWholeAmount(roundedRemEur)} EUR
+                        {roundedRemEurLyd > 1 && (
+                          <Typography component="span" sx={{ fontSize: 11, ml: 0.5, color: '#64748b' }}>
+                            ({formatWholeAmount(roundedRemEurLyd)} LYD)
+                          </Typography>
+                        )}
                       </Typography>
                     </Box>
                   )}
@@ -2542,6 +2956,10 @@ useEffect(() => {
         </Box>
 
         {/* Products Section */}
+        {(() => {
+          console.log('[Card Debug] Invoice:', num, 'Details count:', details.length, 'Details:', details);
+          return null;
+        })()}
         {details.length > 0 && (
           <Box>
             <Typography variant="subtitle2" sx={{ fontWeight: 700, mb: 2, color: 'text.primary', fontSize: 16 }}>
@@ -2559,7 +2977,8 @@ useEffect(() => {
                 const productBlobUrls = productImageId ? (imageBlobUrls[productImageId] || []) : [];
                 const productRawUrls = productImageId ? (imageUrls[productImageId] || []) : [];
                 const invoiceIdForLine = d.id_fact || row.id_fact || row.num_fact;
-                const rawPrice = d.prix_vente_remise ?? row.prix_vente_remise ?? "";
+                const rawPrice = d.prix_vente_remise;
+                console.log('[Card Render] Item price:', { design: d.design, rawPrice, type: d.typeSupplier });
                 const resolvedPriceLabel =
                   rawPrice !== "" && rawPrice !== null && rawPrice !== undefined
                     ? `${formatNumber(rawPrice)} ${d.typeSupplier?.toLowerCase().includes("gold") ? "LYD" : "USD"}`
@@ -2773,7 +3192,7 @@ useEffect(() => {
               }}
               sx={{ textTransform: 'none', fontWeight: 700 }}
             >
-              Close Invoice
+              Validate Payment
             </Button>
           )}
         </Box>
@@ -3623,7 +4042,6 @@ useEffect(() => {
           maxWidth="md"
           fullWidth
         >
-          <DialogTitle>Close Invoice</DialogTitle>
           <DialogContent sx={{ pt: 2 }}>
             <Box sx={{ display: "flex", flexDirection: "column", gap: 3 }}>
               {/* Invoice Summary */}
@@ -3638,144 +4056,194 @@ useEffect(() => {
                   </Grid>
                   <Grid>
                     <Typography variant="body2" color="textSecondary">Invoice #</Typography>
-                    <Typography variant="h5" sx={{ fontWeight: 'bold' }}>{closeInvoice?.num_fact}</Typography>
+                    <Typography variant="h5" sx={{ fontWeight: 'bold' }}>
+                      {closeInvoice?.num_fact}
+                    </Typography>
                   </Grid>
                   <Grid>
                     <Typography variant="body2" color="textSecondary">Total (LYD)</Typography>
-                    <Typography variant="h5" sx={{ fontWeight: 'bold' }}>{formatWholeAmount(closeTotals.totalLyd)}</Typography>
-                  </Grid>
-                  <Grid>
-                    <Typography variant="body2" color="textSecondary">Paid So Far (LYD equiv)</Typography>
-                    <Typography variant="h5" sx={{ fontWeight: 'bold' }}>{formatWholeAmount(closeTotals.paidLydEquiv)}</Typography>
+                    <Typography variant="h5" sx={{ fontWeight: 'bold' }}>
+                      {formatWholeAmount(closeTotals.totalLyd)}
+                    </Typography>
                   </Grid>
                   <Grid>
                     <Typography variant="body2" color="textSecondary">Remaining (LYD)</Typography>
-                    <Typography variant="h5" sx={{ fontWeight: 'bold', color: closeTotals.remainingLyd > 0 ? 'error.main' : 'success.main' }}>
+                    <Typography
+                      variant="h5"
+                      sx={{
+                        fontWeight: 'bold',
+                        color: closeTotals.remainingLyd > 0 ? 'error.main' : 'success.main',
+                      }}
+                    >
                       {formatWholeAmount(closeTotals.remainingLyd)}
                     </Typography>
                   </Grid>
                 </Grid>
               </Box>
+
               <Divider />
+
               {/* Recorded Payments */}
               <Box>
-                <Typography variant="h6" sx={{ mb: 2 }}>Recorded Payments at Invoice Creation</Typography>
-                <Card variant="outlined" sx={{ p: 2, backgroundColor: '#b7a27d' }}>
-                  <Typography variant="body1">
-                    <strong>LYD:</strong> {formatWholeAmount(closeTotals.recorded.lyd || 0)}
-                    <br />
-                    <strong>USD:</strong> {formatWholeAmount(closeTotals.recorded.usd || 0)} (LYD {formatWholeAmount(closeTotals.recorded.usdLyd || 0)})
-                    <br />
-                    <strong>EUR:</strong> {formatWholeAmount(closeTotals.recorded.eur || 0)} (LYD {formatWholeAmount(closeTotals.recorded.eurLyd || 0)})
-                  </Typography>
+                <Card
+                  variant="outlined"
+                  sx={{
+                    p: 2,
+                    borderRadius: 2,
+                  }}
+                >
+                  <Box
+                    sx={{
+                      display: "flex",
+                      flexWrap: "wrap",
+                      gap: 3,
+                    }}
+                  >
+                    {/* LYD */}
+                    <Box sx={{ minWidth: 160 }}>
+                      <Typography variant="overline" color="textSecondary">
+                        LYD
+                      </Typography>
+                      <Typography variant="h6" sx={{ fontWeight: 'bold' }}>
+                        {formatWholeAmount(closeTotals.recorded.lyd || 0)}
+                      </Typography>
+                    </Box>
+
+                    {/* USD */}
+                    <Box sx={{ minWidth: 160 }}>
+                      <Typography variant="overline" color="textSecondary">
+                        USD
+                      </Typography>
+                      <Typography variant="h6" sx={{ fontWeight: 'bold' }}>
+                        {formatWholeAmount(closeTotals.recorded.usd || 0)}
+                      </Typography>
+                      <Typography variant="body2" color="textSecondary">
+                        ≈ LYD {formatWholeAmount(closeTotals.recorded.usdLyd || 0)}
+                      </Typography>
+                    </Box>
+
+                    {/* EUR */}
+                    <Box sx={{ minWidth: 160 }}>
+                      <Typography variant="overline" color="textSecondary">
+                        EUR
+                      </Typography>
+                      <Typography variant="h6" sx={{ fontWeight: 'bold' }}>
+                        {formatWholeAmount(closeTotals.recorded.eur || 0)}
+                      </Typography>
+                      <Typography variant="body2" color="textSecondary">
+                        ≈ LYD {formatWholeAmount(closeTotals.recorded.eurLyd || 0)}
+                      </Typography>
+                    </Box>
+                  </Box>
                 </Card>
               </Box>
+
               <Divider />
-              {/* Remaining After Payment */}
-              <Box>
-                <Typography variant="h6" sx={{ mb: 2 }}>Remaining After This Payment</Typography>
-                <Box sx={{ p: 2, border: '1px solid #ddd', borderRadius: 1, backgroundColor: closeIsOverpayNow ? '#ffebee' : (closeRemainingAfter.lyd > 0 || closeRemainingAfter.usd > 0 || closeRemainingAfter.eur > 0) ? '#fff3e0' : '#e8f5e8' }}>
-                  <Typography variant="h6" sx={{ color: closeIsOverpayNow ? 'error.main' : (closeRemainingAfter.lyd > 0 || closeRemainingAfter.usd > 0 || closeRemainingAfter.eur > 0) ? 'warning.main' : 'success.main' }}>
-                    {closeIsOverpayNow ? `Overpayment: ${closeOverpayNow.lyd > 0.01 ? `LYD ${Number(Math.abs(closeOverpayNow.lyd)).toLocaleString()}` : ''} ${closeOverpayNow.usd > 0.01 ? `USD ${Number(Math.abs(closeOverpayNow.usd)).toLocaleString()}` : ''} ${closeOverpayNow.eur > 0.01 ? `EUR ${Number(Math.abs(closeOverpayNow.eur)).toLocaleString()}` : ''}`.trim() : `${closeRemainingAfter.lyd > 0 ? `LYD ${Number(closeRemainingAfter.lyd).toLocaleString()} ` : ''}${closeRemainingAfter.usd > 0 ? `USD ${Number(closeRemainingAfter.usd).toLocaleString()} ` : ''}${closeRemainingAfter.eur > 0 ? `EUR ${Number(closeRemainingAfter.eur).toLocaleString()} ` : ''}${closeRemainingAfter.lyd === 0 && closeRemainingAfter.usd === 0 && closeRemainingAfter.eur === 0 ? '0' : ''}`.trim()}
-                  </Typography>
-                </Box>
-              </Box>
-              <Divider />
+
               {/* Payment Inputs */}
               <Box>
-                <Typography variant="h6" sx={{ mb: 2 }}>Enter Payment Now</Typography>
-                <Typography variant="body2" color="textSecondary" sx={{ mb: 2 }}>Partial payments are allowed, but overpayment is not permitted.</Typography>
+                <Typography variant="h6" sx={{ mb: 2 }}>Amounts received</Typography>
                 <Grid container spacing={2}>
+                  {/* LYD column */}
                   <Grid>
-                    <TextField
-                      label="Pay now (LYD)"
-                      value={closePayLydStr}
-                      onChange={(e) => setClosePayLydStr(e.target.value)}
-                      onBlur={() => {
-                        const v = parseAmt(closePayLydStr);
-                        setClosePayLydStr(v ? String(normalizeMoney(v)) : "");
-                      }}
-                      size="small"
-                      fullWidth
-                      inputMode="decimal"
-                      inputProps={{ pattern: "[0-9.,-]*" }}
-                      helperText="Enter amount in LYD"
-                    />
+                    <Box sx={{ minWidth: 220 }}>
+                      <TextField
+                        label="Pay now (LYD)"
+                        value={closePayLydStr}
+                        onChange={(e) => setClosePayLydStr(e.target.value)}
+                        onBlur={() => {
+                          const v = parseAmt(closePayLydStr);
+                          setClosePayLydStr(v ? String(normalizeMoney(v)) : "");
+                        }}
+                        size="small"
+                        fullWidth
+                        inputMode="decimal"
+                        inputProps={{ pattern: "[0-9.,-]*" }}
+                        helperText="Enter amount in LYD"
+                      />
+                    </Box>
                   </Grid>
+
+                  {/* USD column: main + LYD equiv underneath */}
                   <Grid>
-                    <TextField
-                      label="Pay now (USD)"
-                      value={closePayUsdStr}
-                      onChange={(e) => setClosePayUsdStr(e.target.value)}
-                      onBlur={() => {
-                        const usd = parseAmt(closePayUsdStr);
-                        const r = getUsdRate();
-                        setClosePayUsdStr(usd ? String(normalizeMoney(usd)) : "");
-                        if (usd > 0 && (!parseAmt(closePayUsdLydStr) || parseAmt(closePayUsdLydStr) <= 0) && Number.isFinite(r) && r > 0) {
-                          setClosePayUsdLydStr(String(normalizeMoney(usd * r)));
-                        }
-                      }}
-                      size="small"
-                      fullWidth
-                      inputMode="decimal"
-                      inputProps={{ pattern: "[0-9.,-]*" }}
-                      helperText="USD amount"
-                    />
+                    <Box sx={{ minWidth: 220, display: "flex", flexDirection: "column", gap: 1 }}>
+                      <TextField
+                        label="Pay now (USD)"
+                        value={closePayUsdStr}
+                        onChange={(e) => setClosePayUsdStr(e.target.value)}
+                        onBlur={() => {
+                          const usd = parseAmt(closePayUsdStr);
+                          const r = getUsdRate();
+                          setClosePayUsdStr(usd ? String(normalizeMoney(usd)) : "");
+                          if (
+                            usd > 0 &&
+                            (!parseAmt(closePayUsdLydStr) || parseAmt(closePayUsdLydStr) <= 0) &&
+                            Number.isFinite(r) &&
+                            r > 0
+                          ) {
+                            setClosePayUsdLydStr(String(normalizeMoney(usd * r)));
+                          }
+                        }}
+                        size="small"
+                        fullWidth
+                        inputMode="decimal"
+                        inputProps={{ pattern: "[0-9.,-]*" }}
+                        helperText="USD amount"
+                      />
+                      <TextField
+                        label="USD equiv (LYD)"
+                        value={closePayUsdLydStr}
+                        size="small"
+                        fullWidth
+                        inputMode="decimal"
+                        inputProps={{ pattern: "[0-9.,-]*" }}
+                        InputProps={{ readOnly: true }}
+                        helperText="LYD equivalent for USD (auto)"
+                      />
+                    </Box>
                   </Grid>
+
+                  {/* EUR column: main + LYD equiv underneath */}
                   <Grid>
-                    <TextField
-                      label="USD equiv (LYD)"
-                      value={closePayUsdLydStr}
-                      onChange={(e) => setClosePayUsdLydStr(e.target.value)}
-                      onBlur={() => {
-                        const v = parseAmt(closePayUsdLydStr);
-                        setClosePayUsdLydStr(v ? String(normalizeMoney(v)) : "");
-                      }}
-                      size="small"
-                      fullWidth
-                      inputMode="decimal"
-                      inputProps={{ pattern: "[0-9.,-]*" }}
-                      helperText="LYD equivalent for USD"
-                    />
-                  </Grid>
-                  <Grid>
-                    <TextField
-                      label="Pay now (EUR)"
-                      value={closePayEurStr}
-                      onChange={(e) => setClosePayEurStr(e.target.value)}
-                      onBlur={() => {
-                        const eur = parseAmt(closePayEurStr);
-                        const r = getEurRate();
-                        setClosePayEurStr(eur ? String(normalizeMoney(eur)) : "");
-                        if (eur > 0 && (!parseAmt(closePayEurLydStr) || parseAmt(closePayEurLydStr) <= 0) && Number.isFinite(r) && r > 0) {
-                          setClosePayEurLydStr(String(normalizeMoney(eur * r)));
-                        }
-                      }}
-                      size="small"
-                      fullWidth
-                      inputMode="decimal"
-                      inputProps={{ pattern: "[0-9.,-]*" }}
-                      helperText="EUR amount"
-                    />
-                  </Grid>
-                  <Grid>
-                    <TextField
-                      label="EUR equiv (LYD)"
-                      value={closePayEurLydStr}
-                      onChange={(e) => setClosePayEurLydStr(e.target.value)}
-                      onBlur={() => {
-                        const v = parseAmt(closePayEurLydStr);
-                        setClosePayEurLydStr(v ? String(normalizeMoney(v)) : "");
-                      }}
-                      size="small"
-                      fullWidth
-                      inputMode="decimal"
-                      inputProps={{ pattern: "[0-9.,-]*" }}
-                      helperText="LYD equivalent for EUR"
-                    />
+                    <Box sx={{ minWidth: 220, display: "flex", flexDirection: "column", gap: 1 }}>
+                      <TextField
+                        label="Pay now (EUR)"
+                        value={closePayEurStr}
+                        onChange={(e) => setClosePayEurStr(e.target.value)}
+                        onBlur={() => {
+                          const eur = parseAmt(closePayEurStr);
+                          const r = getEurRate();
+                          setClosePayEurStr(eur ? String(normalizeMoney(eur)) : "");
+                          if (
+                            eur > 0 &&
+                            (!parseAmt(closePayEurLydStr) || parseAmt(closePayEurLydStr) <= 0) &&
+                            Number.isFinite(r) &&
+                            r > 0
+                          ) {
+                            setClosePayEurLydStr(String(normalizeMoney(eur * r)));
+                          }
+                        }}
+                        size="small"
+                        fullWidth
+                        inputMode="decimal"
+                        inputProps={{ pattern: "[0-9.,-]*" }}
+                        helperText="EUR amount"
+                      />
+                      <TextField
+                        label="EUR equiv (LYD)"
+                        value={closePayEurLydStr}
+                        size="small"
+                        fullWidth
+                        inputMode="decimal"
+                        inputProps={{ pattern: "[0-9.,-]*" }}
+                        InputProps={{ readOnly: true }}
+                        helperText="LYD equivalent for EUR (auto)"
+                      />
+                    </Box>
                   </Grid>
                 </Grid>
               </Box>
+
               <Divider />
               {/* Validation */}
               <Box>

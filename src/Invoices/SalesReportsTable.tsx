@@ -1,4 +1,3 @@
-  /* eslint-disable @typescript-eslint/no-unused-vars */
 import React, { useEffect, useMemo, useState, useCallback } from "react";
 import {
   Box,
@@ -334,8 +333,8 @@ async function fetchImageListForExport(
     return "";
   };
   const t = supplierType?.toLowerCase() || "";
-  let typed: "watch" | "diamond" | "gold" | undefined;
-  if (t.includes("watch")) typed = "watch";
+  let typed: "watches" | "diamond" | "gold" | undefined;
+  if (t.includes("watches")) typed = "watches";
   else if (t.includes("diamond")) typed = "diamond";
   else if (t.includes("gold")) typed = "gold";
   const endpoints = typed
@@ -386,7 +385,7 @@ async function fetchImageListForExport(
                     u = `/images/gold/${encodeURIComponent(idSeg)}/${encodeURIComponent(filename)}`;
                   }
                 }
-                if (typed === "watch") {
+                if (typed === "watches") {
                   if (mount.includes("uploads/watchpic")) {
                     u = `/images/watch/${encodeURIComponent(idSeg)}/${encodeURIComponent(filename)}`;
                   }
@@ -397,12 +396,12 @@ async function fetchImageListForExport(
             }
 
             // Normalize watch routes (/images/:id/:file -> /images/watch/:id/:file)
-            if (typed === "watch") {
+            if (typed === "watches") {
               try {
                 const obj = new URL(u, window.location.origin);
                 const parts = obj.pathname.split("/");
-                if (parts.length >= 4 && parts[1] === "images" && parts[2] !== "watch" && /^\d+$/.test(parts[2])) {
-                  obj.pathname = ["", "images", "watch", parts[2], ...parts.slice(3)].join("/");
+                if (parts.length >= 4 && parts[1] === "images" && parts[2] !== "watches" && /^\d+$/.test(parts[2])) {
+                  obj.pathname = ["", "images", "watches", parts[2], ...parts.slice(3)].join("/");
                   u = obj.pathname;
                 }
               } catch {
@@ -422,60 +421,206 @@ async function fetchImageListForExport(
   return [];
 }
 
-type ImageKind = "gold" | "diamond" | "watch" | "generic";
+/****************************************************************************************
+ * 1) ADD THESE HELPERS / CONSTANTS (put near your other helpers, before SalesReportsTable)
+ ****************************************************************************************/
 
-const preferFiniteNumber = (...values: any[]): number => {
-  for (const val of values) {
-    const num = Number(val);
-    if (Number.isFinite(num)) {
-      return num;
-    }
+const MONEY_EPS = 0.01;
+
+const normalizeMoney = (v: number) => Math.round((Number(v) || 0) * 100) / 100;
+
+const normTypeKey = (t: any) => String(t || "").toLowerCase().trim();
+
+const makeImgKey = (type: any, id: any) => `${normTypeKey(type)}:${String(id ?? "")}`;
+
+// Inline placeholder (no network)
+// ---------- Helpers ----------
+const FALLBACK_ITEM_IMAGE =
+  "data:image/svg+xml;charset=UTF-8," +
+  encodeURIComponent(`
+  <svg xmlns="http://www.w3.org/2000/svg" width="280" height="200">
+    <rect width="100%" height="100%" fill="#f2f2f2"/>
+    <text x="50%" y="50%" dominant-baseline="middle" text-anchor="middle" fill="#888" font-family="Arial" font-size="14">
+      No Image
+    </text>
+  </svg>
+`);
+
+/**
+ * IMPORTANT:
+ * This must match your backend image "Type" expectation.
+ * Keep stable: "gold" | "diamond" | "watches"
+ */
+const resolveImageType = (row: any, d?: any) => {
+  const rowType = normTypeKey(row?.type ?? row?.Type ?? row?.invoice_type ?? "");
+  const supplierType = normTypeKey(row?.ACHATs?.[0]?.Fournisseur?.TYPE_SUPPLIER ?? "");
+
+  if (rowType.includes("watches") || supplierType.includes("watches")) return "watches";
+  if (rowType.includes("diamond") || supplierType.includes("diamond")) return "diamond";
+  if (rowType.includes("gold") || supplierType.includes("gold")) return "gold";
+
+  const dType = normTypeKey(d?.typeSupplier ?? d?.TYPE_SUPPLIER ?? "");
+  if (dType.includes("watches")) return "watches";
+  if (dType.includes("diamond")) return "diamond";
+  if (dType.includes("gold")) return "gold";
+
+  return "diamond";
+};
+
+const fmt2 = (n: number) =>
+  Number(n || 0).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+const money0 = (n: any) => Number(n || 0);
+
+// Normalize to 2 decimals like your existing normalizeMoney
+// (If you already have normalizeMoney, use that instead)
+const n2 = (n: number) => normalizeMoney ? normalizeMoney(n) : Math.round((n + Number.EPSILON) * 100) / 100;
+
+// Prefer first positive number; fallback to first finite number.
+const pickFirstPositive = (vals: any[]): number | null => {
+  const positives = vals
+    .map((v) => toFiniteNumber(v))
+    .filter((v): v is number => v !== null && v > 0);
+  if (positives.length) return positives[0];
+
+  const anyFinite = vals
+    .map((v) => toFiniteNumber(v))
+    .filter((v): v is number => v !== null);
+  return anyFinite.length ? anyFinite[0] : null;
+};
+
+type InvoicePaySummary = {
+  isGold: boolean;
+  isClosed: boolean;
+
+  total: { lyd: number; usd: number; eur: number };
+  paid: { lyd: number; usd: number; eur: number; usdLyd: number; eurLyd: number };
+  remaining: { lyd: number; usd: number; eur: number; usdLyd: number; eurLyd: number };
+
+  // for status
+  isFullyPaid: boolean;
+  isPartial: boolean;
+};
+
+const computeInvoicePaySummary = (row: any): InvoicePaySummary => {
+  const supplier = String(row?.ACHATs?.[0]?.Fournisseur?.TYPE_SUPPLIER || "").toLowerCase();
+
+  // totals (as stored by backend)
+  const totalLyd = Number(row?.total_remise_final_lyd ?? row?.total_remise_final_LYD ?? 0) || 0;
+  const totalUsd = Number(row?.total_remise_final ?? 0) || 0;
+  const totalEur = Number(row?.totalAmountEur ?? row?.total_amount_eur ?? 0) || 0;
+
+  const paidLyd = Number(row?.amount_lyd ?? 0) || 0;
+  const paidUsd = Number(row?.amount_currency ?? 0) || 0;
+  const paidUsdLyd = Number(row?.amount_currency_LYD ?? 0) || 0;
+  const paidEur = Number(row?.amount_EUR ?? 0) || 0;
+  const paidEurLyd = Number(row?.amount_EUR_LYD ?? 0) || 0;
+
+  const restLydBackend = Number(row?.rest_of_money ?? row?.rest_of_moneyLYD ?? row?.rest_of_money_lyd ?? 0) || 0;
+  const restUsdBackend = Number(row?.rest_of_moneyUSD ?? row?.rest_of_money_usd ?? 0) || 0;
+  const restEurBackend = Number(row?.rest_of_moneyEUR ?? row?.rest_of_money_eur ?? 0) || 0;
+  const restUsdLydBackend = Number(row?.rest_of_moneyUSD_LYD ?? row?.rest_of_money_usd_lyd ?? 0) || 0;
+  const restEurLydBackend = Number(row?.rest_of_moneyEUR_LYD ?? row?.rest_of_money_eur_lyd ?? 0) || 0;
+
+  const supplierType = String(row?.ACHATs?.[0]?.Fournisseur?.TYPE_SUPPLIER || "").toLowerCase();
+  const isGold = supplierType.includes("gold");
+  const isClosed = !!row?.IS_OK;
+
+  let remainingLyd = 0;
+  let remainingUsd = 0;
+  let remainingEur = 0;
+  let remainingUsdLyd = 0;
+  let remainingEurLyd = 0;
+
+  if (isGold) {
+    // ✅ Gold remainder is LYD (use backend rest first)
+    const computed = Math.max(0, totalLyd - (paidLyd + paidUsdLyd + paidEurLyd));
+    remainingLyd = restLydBackend > MONEY_EPS ? restLydBackend : computed;
+
+    // don’t show USD/EUR remainder for gold invoices
+    remainingUsd = 0;
+    remainingEur = 0;
+    remainingUsdLyd = 0;
+    remainingEurLyd = 0;
+  } else {
+    // ✅ Non-gold: USD/EUR remainders (use backend rest first)
+    const computedUsd = Math.max(0, totalUsd - paidUsd);
+    const computedEur = Math.max(0, totalEur - paidEur);
+
+    remainingUsd = restUsdBackend > MONEY_EPS ? restUsdBackend : computedUsd;
+    remainingEur = restEurBackend > MONEY_EPS ? restEurBackend : computedEur;
+
+    remainingUsdLyd = restUsdLydBackend > MONEY_EPS ? restUsdLydBackend : 0;
+    remainingEurLyd = restEurLydBackend > MONEY_EPS ? restEurLydBackend : 0;
+
+    // rarely used, but keep LYD remainder if backend provides it
+    remainingLyd = restLydBackend > MONEY_EPS ? restLydBackend : 0;
   }
-  return 0;
-};
 
-const preferPositiveNumber = (...values: any[]): number => {
-  for (const val of values) {
-    const num = Number(val);
-    if (Number.isFinite(num) && num > 0) {
-      return num;
+  const isFullyPaid =
+    remainingLyd <= MONEY_EPS &&
+    remainingUsd <= MONEY_EPS &&
+    remainingEur <= MONEY_EPS;
+
+  let remLyd = 0, remUsd = 0, remEur = 0, remUsdLyd = 0, remEurLyd = 0;
+
+  if (isGold) {
+    // Gold invoice total is LYD; USD/EUR payments contribute via LYD equivalents
+    const computed = Math.max(0, totalLyd - (paidLyd + paidUsdLyd + paidEurLyd));
+    remLyd = restLydBackend > MONEY_EPS ? restLydBackend : computed;
+
+    // Gold should NOT show “remaining USD/EUR” (invoice isn't denominated in USD/EUR)
+    remUsd = 0;
+    remEur = 0;
+    remUsdLyd = 0;
+    remEurLyd = 0;
+  } else {
+    // Watch/Diamond invoice total is USD (and may also track EUR total as separate)
+    const computedUsd = Math.max(0, totalUsd - paidUsd);
+    const computedEur = Math.max(0, totalEur - paidEur);
+
+    remUsd = restUsdBackend > MONEY_EPS ? restUsdBackend : computedUsd;
+    remEur = restEurBackend > MONEY_EPS ? restEurBackend : computedEur;
+
+    // Use backend LYD equivalents when available; else derive from paid ratio
+    if (remUsd > MONEY_EPS) {
+      remUsdLyd = restUsdLydBackend > MONEY_EPS
+        ? restUsdLydBackend
+        : (paidUsd > MONEY_EPS && paidUsdLyd > MONEY_EPS ? remUsd * (paidUsdLyd / paidUsd) : 0);
     }
+    if (remEur > MONEY_EPS) {
+      remEurLyd = restEurLydBackend > MONEY_EPS
+        ? restEurLydBackend
+        : (paidEur > MONEY_EPS && paidEurLyd > MONEY_EPS ? remEur * (paidEurLyd / paidEur) : 0);
+    }
+
+    // LYD isn't a “total currency” here; keep remainingLYD at backend rest if present (rare), else 0
+    remLyd = restLydBackend > MONEY_EPS ? restLydBackend : 0;
   }
-  return 0;
+
+  const isPartial =
+    !isFullyPaid && (
+      remLyd > MONEY_EPS ||
+      remUsd > MONEY_EPS ||
+      remEur > MONEY_EPS
+    );
+
+  return {
+    isGold,
+    isClosed,
+    total: { lyd: totalLyd, usd: totalUsd, eur: totalEur },
+    paid: { lyd: paidLyd, usd: paidUsd, eur: paidEur, usdLyd: paidUsdLyd, eurLyd: paidEurLyd },
+    remaining: { lyd: remLyd, usd: remUsd, eur: remEur, usdLyd: remUsdLyd, eurLyd: remEurLyd },
+    isFullyPaid,
+    isPartial,
+  };
 };
 
-const normalizeKind = (raw?: string | null): ImageKind => {
-  const lower = String(raw || "").toLowerCase();
-  if (lower.includes("gold")) return "gold";
-  if (lower.includes("diamond")) return "diamond";
-  if (lower.includes("watch")) return "watch";
-  return "generic";
-};
-
-const getImageStoreKey = (kind: ImageKind, id: number | string | null | undefined) => {
-  const normalizedKind = kind || "generic";
-  const normalizedId = id !== null && id !== undefined ? String(id) : "";
-  return `${normalizedKind}:${normalizedId}`;
-};
-
-interface ImageRequestDescriptor {
-  kind: ImageKind;
-  storeKey: string;
-  primaryId: number | string;
-  fallbackIds: Array<number | string>;
-}
-
-const normalizeImageList = (arr: any): string[] => {
-  if (!Array.isArray(arr)) return [];
-  return arr
-    .map((item: any) => {
-      if (typeof item === "string") return item;
-      if (item && typeof item === "object") {
-        return item.url || item.path || item.href || item.src || "";
-      }
-      return "";
-    })
-    .filter(Boolean);
+const getHeaderBgByStatus = (s: InvoicePaySummary): string => {
+  // requested: green if paid fully + closed, yellow/orange if open, red if remainder/partial
+  if (!s.isClosed) return "#f59e0b";      // yellowish orange
+  if (s.isFullyPaid) return "#10b981";    // green
+  return "#ef4444";                        // red
 };
 
 const extractDateFromFilename = (filename: string): number => {
@@ -492,6 +637,53 @@ const extractDateFromFilename = (filename: string): number => {
   return filename ? filename.length : 0;
 };
 
+// You should already have something like these states:
+/// const [imageUrls, setImageUrls] = React.useState<Record<string, string[]>>({});
+/// const [imageBlobUrls, setImageBlobUrls] = React.useState<Record<string, string[]>>({});
+
+// --------- Queue images to fetch (restore old behavior + fix watch IDs) ----------
+const buildImageQueue = React.useCallback((rows: any[]) => {
+  const queued: { type: string; id: number }[] = [];
+
+  for (const row of rows || []) {
+    const imgType = resolveImageType(row);
+
+    // GOLD: restore original behavior (use id_achat)
+    if (imgType === "gold") {
+      const goldId = row?.ACHATs?.[0]?.id_achat ?? row?.id_achat ?? row?.ID_ACHAT;
+      if (goldId) queued.push({ type: "gold", id: Number(goldId) });
+      continue;
+    }
+
+    // WATCH: restore typical watch identifiers (picint / id_art)
+    if (imgType === "watches") {
+      const watchId =
+        row?.picint ??
+        row?.PICINT ??
+        row?.id_art ??
+        row?.ID_ART ??
+        row?._productDetails?.[0]?.picint ??
+        row?._productDetails?.[0]?.id_art;
+
+      if (watchId) queued.push({ type: "watches", id: Number(watchId) });
+      continue;
+    }
+
+    // DIAMOND / other: keep typical art id
+    const diaId = row?.id_art ?? row?.ID_ART ?? row?.picint ?? row?.PICINT;
+    if (diaId) queued.push({ type: imgType, id: Number(diaId) });
+  }
+
+  // de-dupe
+  const seen = new Set<string>();
+  return queued.filter((q) => {
+    const k = makeImgKey(q.type, q.id);
+    if (seen.has(k)) return false;
+    seen.add(k);
+    return true;
+  });
+}, []);
+
 const getNamePriorityFromUrl = (url: string): number => {
   try {
     const base = (url || "").split("?")[0];
@@ -505,22 +697,11 @@ const getNamePriorityFromUrl = (url: string): number => {
   return 2;
 };
 
-const sortByMarketingInvoicePreference = (urls: string[]): string[] => {
-  return [...urls].sort((a, b) => {
-    const pa = getNamePriorityFromUrl(a);
-    const pb = getNamePriorityFromUrl(b);
-    if (pa !== pb) return pa - pb;
-    const fa = a.split("/").pop() || "";
-    const fb = b.split("/").pop() || "";
-    return extractDateFromFilename(fb) - extractDateFromFilename(fa);
-  });
-};
-
 const typeOptions = [
   { label: "All", value: "all" },
   { label: "Gold", value: "gold" },
   { label: "Diamond", value: "diamond" },
-  { label: "Watch", value: "watch" },
+  { label: "watches", value: "watches" },
 ];
 
 type Users = {
@@ -531,7 +712,7 @@ type Users = {
 const SalesReportsTable = ({
   type: initialType,
 }: {
-  type?: "gold" | "diamond" | "watch";
+  type?: "gold" | "diamond" | "watches";
 }) => {
   // Fetch users on mount
 
@@ -703,11 +884,8 @@ const SalesReportsTable = ({
   };
   const apiUrlWatches = "/WOpurchases";
   // Raw URL lists per picint/id_achat
-  const [imageUrls, setImageUrls] = useState<Record<string, string[]>>({});
-  // Blob/object URLs per picint/id_achat (used for display/export)
-  const [imageBlobUrls, setImageBlobUrls] = useState<Record<string, string[]>>(
-    {}
-  );
+  const [imageUrls, setImageUrls] = React.useState<Record<string, string[]>>({});
+  const [imageBlobUrls, setImageBlobUrls] = React.useState<Record<string, string[]>>({});
   // Keep a flat list of created object URLs so we can revoke them on unmount only
   const createdBlobUrlsRef = React.useRef<string[]>([]);
   // Watch details (OriginalAchatWatches) keyed by invoice picint
@@ -817,9 +995,9 @@ const fetchImages = useCallback(async (id: number, supplierType?: string) => {
   
   const token = localStorage.getItem("token");
   const t = supplierType?.toLowerCase() || "";
-  let typed: "watch" | "diamond" | "gold" | undefined;
+  let typed: "watches" | "diamond" | "gold" | undefined;
   
-  if (t.includes("watch")) typed = "watch";
+  if (t.includes("watches")) typed = "watches";
   else if (t.includes("diamond")) typed = "diamond";
   else if (t.includes("gold")) typed = "gold";
 
@@ -893,6 +1071,44 @@ const fetchImages = useCallback(async (id: number, supplierType?: string) => {
     setImageUrls((prev) => ({ ...prev, [id]: [] }));
   }
 }, [API_BASEImage, imageUrls]);
+
+// ---------- Fetch images (KEEP YOUR EXISTING ENDPOINTS) ----------
+// IMPORTANT: keep your old endpoint + params EXACTLY.
+// Only change how you STORE & KEY the results.
+const fetchImagesForQueue = React.useCallback(async (queue: { type: string; id: number }[]) => {
+  for (const q of queue) {
+    const key = makeImgKey(q.type, q.id);
+
+    // already have something stored? skip
+    if ((imageBlobUrls?.[key] && imageBlobUrls[key].length) || (imageUrls?.[key] && imageUrls[key].length)) {
+      continue;
+    }
+
+    try {
+      // ---- PUT YOUR OLD IMAGE FETCH HERE ----
+      // Example pattern (replace with your existing working call):
+      //
+      // const res = await axios.get("/files/GetImages", { params: { Type: q.type, Id: q.id } });
+      // const urlsArray = Array.isArray(res.data) ? res.data : [];
+      //
+      // Or if you fetch blobs:
+      // const blobRes = await axios.get("/files/Download", { params: { Type: q.type, Id: q.id }, responseType: "blob" });
+      // const blobUrl = URL.createObjectURL(blobRes.data);
+
+      const res = await axios.get("/files/GetImages", {
+        params: { Type: q.type, Id: q.id },
+      });
+
+      const urlsArray: string[] = Array.isArray(res.data) ? res.data.filter(Boolean) : [];
+
+      // Store with consistent key (type:id)
+      setImageUrls((prev) => ({ ...prev, [key]: urlsArray }));
+    } catch (e) {
+      // store empty so we don't spam requests
+      setImageUrls((prev) => ({ ...prev, [key]: [] }));
+    }
+  }
+}, [imageBlobUrls, imageUrls]);
 
 // Simplify the blob URL conversion - don't use blobs, use direct URLs
 useEffect(() => {
@@ -1141,7 +1357,7 @@ useEffect(() => {
       // Only consider invoices where supplier type is watch
       const watchRows = (data || []).filter((row: any) => {
         const t = String(row?.ACHATs?.[0]?.Fournisseur?.TYPE_SUPPLIER || "").toLowerCase();
-        return t.includes("watch");
+        return t.includes("watches");
       });
 
       const ids = Array.from(
@@ -1231,7 +1447,7 @@ useEffect(() => {
   }
   const totalGold = getMaxTotalByType("gold");
   const totalDiamond = getMaxTotalByType("diamond");
-  const totalWatch = getMaxTotalByType("watch");
+  const totalWatch = getMaxTotalByType("watches");
 
   // Helper to format numbers with comma and point
   const formatNumber = (value: any) => {
@@ -1290,7 +1506,7 @@ useEffect(() => {
       // Prefer values from watchDetailsMap (OriginalAchatWatches),
       // then DistributionPurchase/ACHAT fields. Do NOT fall back to Design_art for watches.
       let design: string;
-      if (typeLower.includes("watch")) {
+      if (typeLower.includes("watches")) {
         const invoicePicint = row.picint;
         const watchDetails =
           (invoicePicint !== undefined && invoicePicint !== null
@@ -1343,7 +1559,7 @@ useEffect(() => {
         }
         
         // Watch images are stored under id_achat from the purchase record or ACHAT
-        if (typeLower.includes("watch")) {
+        if (typeLower.includes("watches")) {
           const watchId = purchaseRecord?.id_achat || achatId || picint || row.picint;
           console.log('[mergeRowsByInvoice] Watch imageId:', watchId, 'from purchase:', purchaseRecord);
           return watchId;
@@ -1422,12 +1638,9 @@ useEffect(() => {
         rawCandidates: rawPriceCandidates.filter(v => v !== undefined && v !== null),
       });
 
-      const normalizedPriceCandidates = rawPriceCandidates
-        .map((val) => toFiniteNumber(val))
-        .filter((val): val is number => val !== null);
-      const itemPrice = normalizedPriceCandidates.length > 0 ? normalizedPriceCandidates[0] : null;
+      const itemPrice = pickFirstPositive(rawPriceCandidates); // uses helpers above
 
-      console.log('[mergeRowsByInvoice] Final item price:', itemPrice, 'from', normalizedPriceCandidates);
+      console.log('[mergeRowsByInvoice] Final item price:', itemPrice, 'from', rawPriceCandidates);
 
       invoiceMap.get(numFact)._productDetails.push({
         design,
@@ -1441,7 +1654,7 @@ useEffect(() => {
         CODE_EXTERNAL: codeExternal,
         prix_vente_remise: itemPrice,
         unitPrice: itemPrice,
-        priceCandidates: normalizedPriceCandidates,
+        priceCandidates: rawPriceCandidates,
       });
     });
   });
@@ -1494,10 +1707,8 @@ useEffect(() => {
       
       if (achatType.includes("gold")) {
         const goldId = purchaseRecord?.id_achat || a.id_achat || a.ID_ACHAT;
-        if (goldId) {
-          queued.push({ id: goldId, type: a?.Fournisseur?.TYPE_SUPPLIER || supplierType });
-        }
-      } else if (achatType.includes("watch")) {
+        if (goldId) queued.push({ id: Number(goldId), type: a?.Fournisseur?.TYPE_SUPPLIER || supplierType });
+      } else if (achatType.includes("watches")) {
         const watchId = purchaseRecord?.id_achat || a.id_achat || a.ID_ACHAT;
         if (watchId) {
           queued.push({ id: watchId, type: a?.Fournisseur?.TYPE_SUPPLIER || supplierType });
@@ -1538,7 +1749,7 @@ useEffect(() => {
       (row.ACHATs || []).forEach((a: any) => {
         const t = String(a?.Fournisseur?.TYPE_SUPPLIER || supplierType || "").toLowerCase();
         const prodId =
-          t.includes("gold") || t.includes("watch")
+          t.includes("gold") || t.includes("watches")
             ? a.id_art || a.ID_ART || a.id_art || a.id_art
             : a.id_art || a.id_achat || a.ID_ACHAT || a.Id_Achat;
         if (prodId && imageUrls[prodId] === undefined)
@@ -1827,7 +2038,7 @@ useEffect(() => {
 
   // Generate an MHTML document with embedded images (cid) for Excel
   async function generateExportMhtml(): Promise<string> {
-    let typed: "watch" | "diamond" | "gold" | undefined;
+    let typed: "watches" | "diamond" | "gold" | undefined;
     // 1) Collect images as base64
     const parseDataUrl = (
       dataUrl: string
@@ -2315,6 +2526,14 @@ useEffect(() => {
     return base;
   }, [sortedData, globalFilter, customerSearch, selectedTypes, saleKinds, paymentStatus, restOnly]);
 
+
+  // Trigger when filtered/paged data changes (or wherever you previously did it)
+  React.useEffect(() => {
+    // Use filteredData or pagedData depending on what you previously used
+    const queue = buildImageQueue(filteredData || []);
+    if (queue.length) fetchImagesForQueue(queue);
+  }, [filteredData, buildImageQueue, fetchImagesForQueue]);
+
   const sortedFilteredData = React.useMemo(() => {
     const base = [...filteredData];
 
@@ -2435,10 +2654,10 @@ useEffect(() => {
   }, [filteredData]);
 
   const summaryStats = React.useMemo(() => {
-    const typeMaps: Record<"gold" | "diamond" | "watch", Map<string, number>> = {
+    const typeMaps: Record<"gold" | "diamond" | "watches", Map<string, number>> = {
       gold: new Map(),
       diamond: new Map(),
-      watch: new Map(),
+      watches: new Map(),
     };
     let itemCount = 0;
     let totalWeightFiltered = 0;
@@ -2464,10 +2683,10 @@ useEffect(() => {
         }
       }
 
-      let targetType: "gold" | "diamond" | "watch" | null = null;
+      let targetType: "gold" | "diamond" | "watches" | null = null;
       if (supplierType.includes("gold")) targetType = "gold";
       else if (supplierType.includes("diamond")) targetType = "diamond";
-      else if (supplierType.includes("watch")) targetType = "watch";
+      else if (supplierType.includes("watches")) targetType = "watches";
 
       if (!targetType) {
         return;
@@ -2512,7 +2731,7 @@ useEffect(() => {
       totalWeight: totalWeightFiltered,
       totalGold: sumMap(typeMaps.gold),
       totalDiamond: sumMap(typeMaps.diamond),
-      totalWatch: sumMap(typeMaps.watch),
+      totalWatch: sumMap(typeMaps.watches),
     };
   }, [filteredData]);
   const [pageSize, setPageSize] = useState<number>(5);
@@ -2538,6 +2757,16 @@ useEffect(() => {
   const user = row.Utilisateur?.name_user || "";
   const isChiraVal = row.is_chira === true || row.is_chira === 1;
   const invoiceComment = stripInternalMetaTags(row.COMMENT ?? "");
+
+  const paySummary = computeInvoicePaySummary(row);
+  const headerBg = getHeaderBgByStatus(paySummary);
+
+  // OPTIONAL: readable label
+  const statusLabel = !paySummary.isClosed
+    ? "Open"
+    : paySummary.isFullyPaid
+      ? "Closed • Paid"
+      : "Closed • Remainder";
   
   const clientValue = row.Client || row.client || null;
   const clientName =
@@ -2586,8 +2815,8 @@ useEffect(() => {
     } else if (t.includes("diamond")) {
       invoiceTypeLabel = "Diamond";
       typeColor = "#B9F2FF";
-    } else if (t.includes("watch")) {
-      invoiceTypeLabel = "Watch";
+    } else if (t.includes("watches")) {
+      invoiceTypeLabel = "watches";
       typeColor = "#DDA15E";
     }
   }
@@ -2614,8 +2843,9 @@ useEffect(() => {
       {/* Header Section */}
       <Box
         sx={{
-          background: '#68a5bf',
-          p: 2.5,
+          background: headerBg,
+          p: 2.25,
+          color: "white",
         }}
       >
         <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', mb: 1.5 }}>
@@ -2625,13 +2855,13 @@ useEffect(() => {
             </Typography>
             <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap', alignItems: 'center' }}>
               <Chip
-                label={invoiceTypeLabel}
+                icon={paySummary.isClosed ? <LockIcon fontSize="small" /> : undefined}
+                label={statusLabel}
                 size="small"
                 sx={{
-                  backgroundColor: typeColor,
-                  color: '#000',
-                  fontWeight: 700,
-                  fontSize: 11,
+                  backgroundColor: "rgba(0,0,0,0.18)",
+                  color: "white",
+                  fontWeight: 800,
                 }}
               />
               <Typography sx={{ fontSize: 13, opacity: 0.9 }}>
@@ -2761,197 +2991,119 @@ useEffect(() => {
       <CardContent sx={{ p: 3 }}>
         {/* Financial Summary */}
         <Box sx={{ mb: 3, p: 2, backgroundColor: '#f8fafc', borderRadius: 2 }}>
-          <Typography variant="subtitle2" sx={{ fontWeight: 700, mb: 1.5, color: '#1e293b' }}>
-            Financial Summary
+          <Typography variant="subtitle2" sx={{ fontWeight: 800, mb: 1.25, color: '#0f172a' }}>
+            Payment Summary
           </Typography>
-          <Box sx={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: 2 }}>
-            {(() => {
-              const isGold = !!rawTypeSupplier?.toLowerCase().includes("gold");
-              const isDiamond = !!rawTypeSupplier?.toLowerCase().includes("diamond");
-              const isWatch = !!rawTypeSupplier?.toLowerCase().includes("watch");
-              
-              // Invoice totals
-              const totalLyd = Number(row.total_remise_final_lyd || row.total_remise_final_LYD) || 0;
-              const totalUsd = Number(row.total_remise_final) || 0;
-              const totalEur = Number(row.totalAmountEur || row.total_amount_eur) || 0;
-              
-              // Paid amounts
-              const amountLyd = Number(row.amount_lyd) || 0;
-              const amountUsd = Number(row.amount_currency) || 0;
-              const amountUsdLyd = Number(row.amount_currency_LYD) || 0;
-              const amountEur = Number(row.amount_EUR) || 0;
-              const amountEurLyd = Number(row.amount_EUR_LYD) || 0;
-              
-              // Get remaining amounts from backend first
-              const restLydBackend = Number(row.rest_of_money ?? row.rest_of_moneyLYD ?? row.rest_of_money_lyd ?? 0) || 0;
-              const restUsdBackend = Number(row.rest_of_moneyUSD ?? row.rest_of_money_usd ?? 0) || 0;
-              const restEurBackend = Number(row.rest_of_moneyEUR ?? row.rest_of_money_eur ?? 0) || 0;
-              const restUsdLydBackend = Number(row.rest_of_moneyUSD_LYD ?? row.rest_of_money_usd_lyd ?? 0) || 0;
-              const restEurLydBackend = Number(row.rest_of_moneyEUR_LYD ?? row.rest_of_money_eur_lyd ?? 0) || 0;
-              
-              // Calculate remaining amounts:
-              // For Gold invoices: total is in LYD, but may have USD/EUR payments
-              // For Diamond/Watch: total is in USD, may have LYD/EUR payments
-              let remainingLyd = 0;
-              let remainingUsd = 0;
-              let remainingEur = 0;
-              let remainingUsdLyd = 0;
-              let remainingEurLyd = 0;
-              
-              if (isGold) {
-                // Gold: total is in LYD
-                // Use backend values if available, otherwise calculate
-                remainingLyd = restLydBackend > 0 
-                  ? restLydBackend 
-                  : Math.max(0, totalLyd - amountLyd - amountUsdLyd - amountEurLyd);
-                remainingUsd = restUsdBackend > 0 
-                  ? restUsdBackend 
-                  : Math.max(0, amountUsd > 0 ? 0 : 0); // No USD total for gold
-                remainingEur = restEurBackend > 0 
-                  ? restEurBackend 
-                  : Math.max(0, amountEur > 0 ? 0 : 0); // No EUR total for gold
-              } else {
-                // Diamond/Watch: total is in USD
-                remainingUsd = restUsdBackend > 0 
-                  ? restUsdBackend 
-                  : Math.max(0, totalUsd - amountUsd);
-                remainingEur = restEurBackend > 0 
-                  ? restEurBackend 
-                  : Math.max(0, totalEur - amountEur);
-                remainingLyd = restLydBackend > 0 
-                  ? restLydBackend 
-                  : 0; // LYD is just a payment method for USD invoices
-                
-                // Calculate LYD equivalents for remaining foreign currency
-                if (remainingUsd > 0) {
-                  remainingUsdLyd = restUsdLydBackend > 0 
-                    ? restUsdLydBackend 
-                    : amountUsd > 0 && amountUsdLyd > 0 
-                      ? (remainingUsd * (amountUsdLyd / amountUsd))
-                      : 0;
-                }
-                if (remainingEur > 0) {
-                  remainingEurLyd = restEurLydBackend > 0 
-                    ? restEurLydBackend 
-                    : amountEur > 0 && amountEurLyd > 0 
-                      ? (remainingEur * (amountEurLyd / amountEur))
-                      : 0;
-                }
-              }
-              
-              // Round to nearest whole number and filter out values less than 2
-              const roundedRemLyd = Math.round(remainingLyd);
-              const roundedRemUsd = Math.round(remainingUsd);
-              const roundedRemEur = Math.round(remainingEur);
-              const roundedRemUsdLyd = Math.round(remainingUsdLyd);
-              const roundedRemEurLyd = Math.round(remainingEurLyd);
-              
-              console.log('[Financial Summary] Calculated remainders:', {
-                num_fact: row.num_fact,
-                type: isGold ? 'gold' : isDiamond ? 'diamond' : 'watch',
-                totals: { totalLyd, totalUsd, totalEur },
-                paid: { amountLyd, amountUsd, amountUsdLyd, amountEur, amountEurLyd },
-                backend: { restLydBackend, restUsdBackend, restEurBackend, restUsdLydBackend, restEurLydBackend },
-                calculated: { remainingLyd, remainingUsd, remainingEur, remainingUsdLyd, remainingEurLyd },
-                rounded: { roundedRemLyd, roundedRemUsd, roundedRemEur, roundedRemUsdLyd, roundedRemEurLyd },
-              });
-              
-              return (
-                <>
-                  {totalLyd > 0 && isGold && (
-                    <Box>
-                      <Typography sx={{ fontSize: 11, color: '#64748b', mb: 0.5 }}>Invoice Total</Typography>
-                      <Typography sx={{ fontSize: 18, fontWeight: 800, color: '#1e293b' }}>
-                        {formatWholeAmount(totalLyd)} LYD
-                      </Typography>
-                    </Box>
-                  )}
-                  
-                  {totalUsd > 0 && !isGold && (
-                    <Box>
-                      <Typography sx={{ fontSize: 11, color: '#64748b', mb: 0.5 }}>Invoice Total</Typography>
-                      <Typography sx={{ fontSize: 18, fontWeight: 800, color: '#1e293b' }}>
-                        {formatWholeAmount(totalUsd)} USD
-                      </Typography>
-                    </Box>
-                  )}
-                  
-                  {amountLyd > 0 && (
-                    <Box>
-                      <Typography sx={{ fontSize: 11, color: '#64748b', mb: 0.5 }}>Paid (LYD)</Typography>
-                      <Typography sx={{ fontSize: 16, fontWeight: 700, color: '#10b981' }}>
-                        {formatWholeAmount(amountLyd)} LYD
-                      </Typography>
-                    </Box>
-                  )}
-                  
-                  {amountUsd > 0 && (
-                    <Box>
-                      <Typography sx={{ fontSize: 11, color: '#64748b', mb: 0.5 }}>Paid (USD)</Typography>
-                      <Typography sx={{ fontSize: 16, fontWeight: 700, color: '#10b981' }}>
-                        {formatWholeAmount(amountUsd)} USD
-                        {amountUsdLyd > 0 && (
-                          <Typography component="span" sx={{ fontSize: 11, ml: 0.5, color: '#64748b' }}>
-                            ({formatWholeAmount(amountUsdLyd)} LYD)
-                          </Typography>
-                        )}
-                      </Typography>
-                    </Box>
-                  )}
-                  
-                  {amountEur > 0 && (
-                    <Box>
-                      <Typography sx={{ fontSize: 11, color: '#64748b', mb: 0.5 }}>Paid (EUR)</Typography>
-                      <Typography sx={{ fontSize: 16, fontWeight: 700, color: '#10b981' }}>
-                        {formatWholeAmount(amountEur)} EUR
-                        {amountEurLyd > 0 && (
-                          <Typography component="span" sx={{ fontSize: 11, ml: 0.5, color: '#64748b' }}>
-                            ({formatWholeAmount(amountEurLyd)} LYD)
-                          </Typography>
-                        )}
-                      </Typography>
-                    </Box>
-                  )}
-                  
-                  {roundedRemLyd > 1 && (
-                    <Box>
-                      <Typography sx={{ fontSize: 11, color: '#64748b', mb: 0.5 }}>Remaining (LYD)</Typography>
-                      <Typography sx={{ fontSize: 16, fontWeight: 700, color: '#ef4444' }}>
-                        {formatWholeAmount(roundedRemLyd)} LYD
-                      </Typography>
-                    </Box>
-                  )}
 
-                  {roundedRemUsd > 1 && (
-                    <Box>
-                      <Typography sx={{ fontSize: 11, color: '#64748b', mb: 0.5 }}>Remaining (USD)</Typography>
-                      <Typography sx={{ fontSize: 16, fontWeight: 700, color: '#ef4444' }}>
-                        {formatWholeAmount(roundedRemUsd)} USD
-                        {roundedRemUsdLyd > 1 && (
-                          <Typography component="span" sx={{ fontSize: 11, ml: 0.5, color: '#64748b' }}>
-                            ({formatWholeAmount(roundedRemUsdLyd)} LYD)
-                          </Typography>
-                        )}
-                      </Typography>
-                    </Box>
-                  )}
+          <Box sx={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(210px, 1fr))', gap: 1.5 }}>
+            {/* TOTAL */}
+            {paySummary.isGold ? (
+              <Box>
+                <Typography sx={{ fontSize: 11, color: '#64748b' }}>Invoice Total</Typography>
+                <Typography sx={{ fontSize: 18, fontWeight: 900, color: '#0f172a' }}>
+                  {formatWholeAmount(paySummary.total.lyd)} LYD
+                </Typography>
+              </Box>
+            ) : (
+              <Box>
+                <Typography sx={{ fontSize: 11, color: '#64748b' }}>Invoice Total</Typography>
+                <Typography sx={{ fontSize: 18, fontWeight: 900, color: '#0f172a' }}>
+                  {formatWholeAmount(paySummary.total.usd)} USD
+                </Typography>
+                {paySummary.total.eur > MONEY_EPS && (
+                  <Typography sx={{ fontSize: 12, color: '#64748b' }}>
+                    Also tracked: {formatWholeAmount(paySummary.total.eur)} EUR
+                  </Typography>
+                )}
+              </Box>
+            )}
 
-                  {roundedRemEur > 1 && (
-                    <Box>
-                      <Typography sx={{ fontSize: 11, color: '#64748b', mb: 0.5 }}>Remaining (EUR)</Typography>
-                      <Typography sx={{ fontSize: 16, fontWeight: 700, color: '#ef4444' }}>
-                        {formatWholeAmount(roundedRemEur)} EUR
-                        {roundedRemEurLyd > 1 && (
-                          <Typography component="span" sx={{ fontSize: 11, ml: 0.5, color: '#64748b' }}>
-                            ({formatWholeAmount(roundedRemEurLyd)} LYD)
-                          </Typography>
-                        )}
-                      </Typography>
-                    </Box>
-                  )}
-                </>
-              );
-            })()}
+            {/* PAID */}
+            {(paySummary.paid.lyd > MONEY_EPS) && (
+              <Box>
+                <Typography sx={{ fontSize: 11, color: '#64748b' }}>Paid (LYD)</Typography>
+                <Typography sx={{ fontSize: 16, fontWeight: 800, color: '#10b981' }}>
+                  {formatWholeAmount(paySummary.paid.lyd)} LYD
+                </Typography>
+              </Box>
+            )}
+
+            {(paySummary.paid.usd > MONEY_EPS) && (
+              <Box>
+                <Typography sx={{ fontSize: 11, color: '#64748b' }}>Paid (USD)</Typography>
+                <Typography sx={{ fontSize: 16, fontWeight: 800, color: '#10b981' }}>
+                  {formatWholeAmount(paySummary.paid.usd)} USD
+                </Typography>
+                {(paySummary.paid.usdLyd > MONEY_EPS) && (
+                  <Typography sx={{ fontSize: 12, color: '#64748b' }}>
+                    ≈ {formatWholeAmount(paySummary.paid.usdLyd)} LYD
+                  </Typography>
+                )}
+              </Box>
+            )}
+
+            {(paySummary.paid.eur > MONEY_EPS) && (
+              <Box>
+                <Typography sx={{ fontSize: 11, color: '#64748b' }}>Paid (EUR)</Typography>
+                <Typography sx={{ fontSize: 16, fontWeight: 800, color: '#10b981' }}>
+                  {formatWholeAmount(paySummary.paid.eur)} EUR
+                </Typography>
+                {(paySummary.paid.eurLyd > MONEY_EPS) && (
+                  <Typography sx={{ fontSize: 12, color: '#64748b' }}>
+                    ≈ {formatWholeAmount(paySummary.paid.eurLyd)} LYD
+                  </Typography>
+                )}
+              </Box>
+            )}
+
+            {/* REMAINING */}
+            {(paySummary.remaining.lyd > MONEY_EPS) && (
+              <Box>
+                <Typography sx={{ fontSize: 11, color: '#64748b' }}>Remaining (LYD)</Typography>
+                <Typography sx={{ fontSize: 16, fontWeight: 900, color: '#ef4444' }}>
+                  {formatWholeAmount(paySummary.remaining.lyd)} LYD
+                </Typography>
+              </Box>
+            )}
+
+            {(paySummary.remaining.usd > MONEY_EPS) && (
+              <Box>
+                <Typography sx={{ fontSize: 11, color: '#64748b' }}>Remaining (USD)</Typography>
+                <Typography sx={{ fontSize: 16, fontWeight: 900, color: '#ef4444' }}>
+                  {formatWholeAmount(paySummary.remaining.usd)} USD
+                </Typography>
+                {(paySummary.remaining.usdLyd > MONEY_EPS) && (
+                  <Typography sx={{ fontSize: 12, color: '#64748b' }}>
+                    ≈ {formatWholeAmount(paySummary.remaining.usdLyd)} LYD
+                  </Typography>
+                )}
+              </Box>
+            )}
+
+            {(paySummary.remaining.eur > MONEY_EPS) && (
+              <Box>
+                <Typography sx={{ fontSize: 11, color: '#64748b' }}>Remaining (EUR)</Typography>
+                <Typography sx={{ fontSize: 16, fontWeight: 900, color: '#ef4444' }}>
+                  {formatWholeAmount(paySummary.remaining.eur)} EUR
+                </Typography>
+                {(paySummary.remaining.eurLyd > MONEY_EPS) && (
+                  <Typography sx={{ fontSize: 12, color: '#64748b' }}>
+                    ≈ {formatWholeAmount(paySummary.remaining.eurLyd)} LYD
+                  </Typography>
+                )}
+              </Box>
+            )}
+
+            {/* If fully paid show a clean badge */}
+            {paySummary.isClosed && paySummary.isFullyPaid && (
+              <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
+                <Chip
+                  label="✅ Fully Paid"
+                  size="small"
+                  sx={{ fontWeight: 900, bgcolor: "#dcfce7", color: "#166534" }}
+                />
+              </Box>
+            )}
           </Box>
         </Box>
 
@@ -2967,176 +3119,163 @@ useEffect(() => {
             </Typography>
             <Box
               sx={{
-                display: 'grid',
-                gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))',
-                gap: 2.5,
+                display: "grid",
+                gridTemplateColumns: "repeat(auto-fill, minmax(340px, 1fr))",
+                gap: 1.5,
               }}
             >
               {details.map((d: any, idx: number) => {
                 const productImageId = d.imageId ?? d.id_achat ?? d.picint ?? d.id_art ?? d.ID_ART;
                 const productBlobUrls = productImageId ? (imageBlobUrls[productImageId] || []) : [];
                 const productRawUrls = productImageId ? (imageUrls[productImageId] || []) : [];
-                const invoiceIdForLine = d.id_fact || row.id_fact || row.num_fact;
+
+                // Choose only THIS item’s image; otherwise fallback.
+                const primaryImg = productBlobUrls[0] || productRawUrls[0] || FALLBACK_ITEM_IMAGE;
+
+                // Ensure individual price is shown (already computed in merge)
                 const rawPrice = d.prix_vente_remise;
-                console.log('[Card Render] Item price:', { design: d.design, rawPrice, type: d.typeSupplier });
+                const currencyLabel =
+                  String(d.typeSupplier || "").toLowerCase().includes("gold") ? "LYD" : "USD";
                 const resolvedPriceLabel =
                   rawPrice !== "" && rawPrice !== null && rawPrice !== undefined
-                    ? `${formatNumber(rawPrice)} ${d.typeSupplier?.toLowerCase().includes("gold") ? "LYD" : "USD"}`
+                    ? `${formatNumber(rawPrice)} ${currencyLabel}`
                     : "—";
+
                 return (
                   <Card
                     key={idx}
                     variant="outlined"
                     sx={{
-                      display: 'flex',
-                      flexDirection: 'column',
                       borderRadius: 2,
-                      overflow: 'hidden',
-                      transition: 'all 0.2s',
-                      border: theme => `1px solid ${theme.palette.divider}`,
-                      background: theme => theme.palette.background.paper,
-                      color: theme => theme.palette.text.primary,
-                      '&:hover': {
-                        boxShadow: 4,
-                        borderColor: theme => theme.palette.primary.main,
-                      }
+                      overflow: "hidden",
+                      border: (theme) => `1px solid ${theme.palette.divider}`,
+                      transition: "0.15s ease",
+                      "&:hover": { boxShadow: 3, borderColor: (theme) => theme.palette.primary.main },
                     }}
                   >
-                    {/* Product Image */}
-                    <Box
-                      sx={{
-                        width: "100%",
-                        height: 200,
-                        backgroundColor: theme => theme.palette.mode === 'dark' ? '#222' : '#f8fafc',
-                        display: 'flex',
-                        alignItems: 'center',
-                        justifyContent: 'center',
-                        overflow: 'hidden',
-                        position: 'relative',
-                      }}
-                    >
-                      {productBlobUrls.length > 0 ? (
-                        <img
-                          src={productBlobUrls[0]}
-                          alt="Product"
-                          style={{
-                            width: "100%",
-                            height: "100%",
-                            objectFit: "cover",
-                            cursor: "pointer",
-                          }}
-                          onClick={() => {
-                            setImageDialogUrl(productBlobUrls[0]);
+                    <Box sx={{ display: "flex", gap: 2, p: 1.5, alignItems: "stretch" }}>
+                      {/* Image (fixed, always shows fallback) */}
+                      <Box
+                        sx={{
+                          width: 92,
+                          height: 92,
+                          borderRadius: 2,
+                          overflow: "hidden",
+                          flex: "0 0 auto",
+                          bgcolor: (theme) => (theme.palette.mode === "dark" ? "#111827" : "#e2e8f0"),
+                          border: "1px solid rgba(0,0,0,0.06)",
+                          position: "relative",
+                          cursor: primaryImg !== FALLBACK_ITEM_IMAGE ? "pointer" : "default",
+                        }}
+                        onClick={() => {
+                          if (primaryImg && primaryImg !== FALLBACK_ITEM_IMAGE) {
+                            setImageDialogUrl(primaryImg);
                             setImageDialogOpen(true);
-                          }}
+                          }
+                        }}
+                      >
+                        <img
+                          src={primaryImg}
+                          alt="Product"
+                          style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}
                           onError={(e) => {
-                            // fallback to raw url if blob fails
-                            const target = e.currentTarget as HTMLImageElement;
-                            if (productRawUrls.length > 0) {
-                              target.src = productRawUrls[0];
-                            } else {
-                              target.style.display = 'none';
-                            }
+                            // Force fallback for THIS element only
+                            const img = e.currentTarget as HTMLImageElement;
+                            img.src = FALLBACK_ITEM_IMAGE;
                           }}
                         />
-                      ) : productRawUrls.length > 0 ? (
-                        <img
-                          src={productRawUrls[0]}
-                          alt="Product"
-                          style={{
-                            width: "100%",
-                            height: "100%",
-                            objectFit: "cover",
-                            cursor: "pointer",
-                          }}
-                          onClick={() => {
-                            setImageDialogUrl(productRawUrls[0]);
-                            setImageDialogOpen(true);
-                          }}
-                          onError={e => {
-                            const target = e.currentTarget as HTMLImageElement;
-                            target.style.display = 'none';
-                          }}
-                        />
-                      ) : (
-                        <Box
-                          sx={{
-                            display: 'flex',
-                            flexDirection: 'column',
-                            alignItems: 'center',
-                            justifyContent: 'center',
-                            color: 'text.disabled',
-                            textAlign: 'center',
-                          }}
-                        >
-                          <Typography sx={{ fontSize: 48 }}>📦</Typography>
-                          <Typography sx={{ fontSize: 12, mt: 1 }}>No Image</Typography>
-                          <Typography sx={{ fontSize: 10, color: 'text.disabled', mt: 0.5 }}>
-                            ID: {productImageId || 'N/A'}
-                          </Typography>
-                        </Box>
-                      )}
-                      {d.IS_GIFT && (
-                        <Chip
-                          label="🎁 Gift"
-                          size="small"
-                          sx={{
-                            position: 'absolute',
-                            top: 8,
-                            right: 8,
-                            backgroundColor: '#fbbf24',
-                            color: '#000',
-                            fontWeight: 700,
-                          }}
-                        />
-                      )}
-                    </Box>
-                    {/* Product Details */}
-                    <Box sx={{ p: 2 }}>
-                      <Typography sx={{ fontWeight: 700, fontSize: 15, mb: 1, lineHeight: 1.3, color: 'text.primary' }}>
-                        {d.design || 'Unnamed Product'}
-                      </Typography>
-                      <Typography sx={{ fontWeight: 700, fontSize: 18, color: 'primary.main', mb: 1.5 }}>
-                        {resolvedPriceLabel}
-                      </Typography>
-                      <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0.5, fontSize: 12, color: 'text.secondary' }}>
-                        <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
-                          <span>•</span>
-                          <span>{d.typeSupplier}</span>
-                        </Box>
-                        {d.weight && (
-                          <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
-                            <span>⚖️</span>
-                            <span>{d.weight}g</span>
-                          </Box>
-                        )}
-                        {d.code && (
-                          <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
-                            <span>🔖</span>
-                            <span>{d.code}</span>
-                          </Box>
-                        )}
-                        {d.CODE_EXTERNAL && (
-                          <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
-                            <span>📋</span>
-                            <span>Ref: {d.CODE_EXTERNAL}</span>
-                          </Box>
+                        {d.IS_GIFT && (
+                          <Chip
+                            label="🎁 Gift"
+                            size="small"
+                            sx={{
+                              position: "absolute",
+                              top: 6,
+                              left: 6,
+                              bgcolor: "#fbbf24",
+                              color: "#111827",
+                              fontWeight: 900,
+                              height: 22,
+                            }}
+                          />
                         )}
                       </Box>
-                      {isChiraVal && (
-                        <Button
-                          variant="contained"
-                          size="small"
-                          fullWidth
-                          sx={{ mt: 2, fontSize: 11, py: 0.75, textTransform: 'none' }}
-                          onClick={() => {
-                            setChiraDialogIdFact(invoiceIdForLine);
-                            setChiraDialogOpen(true);
-                          }}
-                        >
-                          Return Chira
-                        </Button>
-                      )}
+
+                      {/* Details */}
+                      <Box sx={{ flex: 1, minWidth: 0 }}>
+                        <Box sx={{ display: "flex", justifyContent: "space-between", gap: 1 }}>
+                          <Typography
+                            sx={{
+                              fontWeight: 900,
+                              fontSize: 14,
+                              color: "text.primary",
+                              overflow: "hidden",
+                              textOverflow: "ellipsis",
+                              whiteSpace: "nowrap",
+                            }}
+                            title={d.design || ""}
+                          >
+                            {d.design || "Unnamed Product"}
+                          </Typography>
+
+                          <Typography sx={{ fontWeight: 900, fontSize: 14, color: "primary.main", flex: "0 0 auto" }}>
+                            {resolvedPriceLabel}
+                          </Typography>
+                        </Box>
+
+                        <Box sx={{ mt: 0.75, display: "flex", gap: 1, flexWrap: "wrap" }}>
+                          <Chip
+                            label={String(d.typeSupplier || "").replace(/^\s+|\s+$/g, "") || "Type"}
+                            size="small"
+                            sx={{ fontWeight: 800, }}
+                          />
+                          {d.weight && (
+                            <Chip
+                              label={`⚖️ ${d.weight}g`}
+                              size="small"
+                              sx={{ fontWeight: 800 }}
+                            />
+                          )}
+                          {d.code && (
+                            <Chip
+                              label={`🔖 ${d.code}`}
+                              size="small"
+                              sx={{ fontWeight: 800, }}
+                            />
+                          )}
+                          {d.CODE_EXTERNAL && (
+                            <Chip
+                              label={`Ref: ${d.CODE_EXTERNAL}`}
+                              size="small"
+                              sx={{ fontWeight: 800, }}
+                            />
+                          )}
+                          {productImageId && (
+                            <Chip
+                              label={`ImgID: ${productImageId}`}
+                              size="small"
+                              sx={{ fontWeight: 800 }}
+                            />
+                          )}
+                        </Box>
+
+                        {/* Chira button stays as-is */}
+                        {isChiraVal && (
+                          <Button
+                            variant="contained"
+                            size="small"
+                            fullWidth
+                            sx={{ mt: 1.25, fontSize: 12, py: 0.75, textTransform: "none", fontWeight: 800 }}
+                            onClick={() => {
+                              const invoiceIdForLine = d.id_fact || row.id_fact || row.num_fact;
+                              setChiraDialogIdFact(invoiceIdForLine);
+                              setChiraDialogOpen(true);
+                            }}
+                          >
+                            Return Chira
+                          </Button>
+                        )}
+                      </Box>
                     </Box>
                   </Card>
                 );
@@ -3207,9 +3346,6 @@ useEffect(() => {
     return Number.isFinite(v) ? v : 0;
   };
 
-  const normalizeMoney = (v: number) => Math.round((Number(v) || 0) * 100) / 100;
-
-  const normalizeLyd0 = (v: number) => Math.round(Number(v) || 0);
   const moneyEps = 0.01;
 
   const splitMoney2 = React.useCallback((raw: any) => {
@@ -3322,7 +3458,7 @@ useEffect(() => {
 
   const fetchImagesTyped = useCallback(async (
     id: number | string,
-    type: "watch" | "diamond" | "gold"
+    type: "watches" | "diamond" | "gold"
   ): Promise<string[] | null> => {
     const token = localStorage.getItem("token");
     try {
@@ -3595,7 +3731,7 @@ useEffect(() => {
               <MenuItem value="all">All</MenuItem>
               <MenuItem value="gold">Gold</MenuItem>
               <MenuItem value="diamond">Diamond</MenuItem>
-              <MenuItem value="watch">Watch</MenuItem>
+              <MenuItem value="watches">Watch</MenuItem>
             </Select>
           </FormControl>
           <FormControl size="small" sx={{ minWidth: 220 }}>
